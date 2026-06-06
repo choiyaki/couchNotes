@@ -65,6 +65,15 @@ actor NoteStore {
             exec("INSERT INTO note_fts (id, content) SELECT id, content FROM notes WHERE deleted = 0;")
         }
 
+        // バックリンク用：source_id（リンク元）→ target_key（リンク先の正規化キー）
+        exec("CREATE TABLE IF NOT EXISTS links (source_id TEXT, target_key TEXT);")
+        exec("CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_key);")
+        exec("CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_id);")
+        // 既存DBに links が無かった場合は本文から再構築
+        if linksCount() == 0 && count() > 0 {
+            rebuildLinks()
+        }
+
         isBootstrapped = true
     }
 
@@ -158,6 +167,30 @@ actor NoteStore {
         return readItems(stmt, previewTrim: true)
     }
 
+    // MARK: - バックリンク
+
+    /// この id を指している（リンク元の）ノート一覧。
+    /// 解決規則は本文タップと同じ：フルパス一致 または ファイル名（basename）一致（小文字）。
+    func backlinks(for id: String) -> [NoteItem] {
+        let lower = id.lowercased()
+        let full  = lower.hasSuffix(".md") ? String(lower.dropLast(3)) : lower
+        let base  = full.components(separatedBy: "/").last ?? full
+        let sql = """
+        SELECT DISTINCT n.id, n.path, n.mtime, substr(n.content, 1, 400)
+        FROM links l
+        JOIN notes n ON n.id = l.source_id
+        WHERE l.target_key IN (?, ?) AND n.deleted = 0 AND n.id != ?
+        ORDER BY n.mtime DESC
+        LIMIT 200;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, full, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, base, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, id,   -1, SQLITE_TRANSIENT)
+        return readItems(stmt, previewTrim: true)
+    }
+
     /// id, path, mtime, preview の4カラムを NoteItem 配列に変換する共通処理。
     private func readItems(_ stmt: OpaquePointer?, previewTrim: Bool) -> [NoteItem] {
         var items: [NoteItem] = []
@@ -200,18 +233,21 @@ actor NoteStore {
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
         deleteFTS(id)
+        deleteLinks(id)
     }
 
     /// 同期対象から外れたフォルダ配下の行をローカルから物理削除する（サーバには影響なし）。
     func removeFolder(_ prefix: String) {
         guard !prefix.isEmpty else { return }
         let pattern = prefix + "/%"
-        if let stmt = prepare("DELETE FROM notes WHERE id LIKE ?;") {
-            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
-            sqlite3_step(stmt)
-            sqlite3_finalize(stmt)
+        for table in ["notes", "note_fts"] {
+            if let stmt = prepare("DELETE FROM \(table) WHERE id LIKE ?;") {
+                sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
         }
-        if let stmt = prepare("DELETE FROM note_fts WHERE id LIKE ?;") {
+        if let stmt = prepare("DELETE FROM links WHERE source_id LIKE ?;") {
             sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
             sqlite3_step(stmt)
             sqlite3_finalize(stmt)
@@ -239,8 +275,9 @@ actor NoteStore {
         sqlite3_bind_text(stmt, 6, r.content, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
 
-        // 全文検索インデックスも更新
+        // 全文検索・バックリンクのインデックスも更新
         updateFTS(id: r.id, content: r.content)
+        updateLinks(id: r.id, content: r.content)
     }
 
     // MARK: - FTS メンテナンス
@@ -265,6 +302,75 @@ actor NoteStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
+    }
+
+    // MARK: - リンク（バックリンク）メンテナンス
+
+    private static let wikiLinkRegex = try? NSRegularExpression(pattern: #"\[\[([^\]\n]+)\]\]"#)
+
+    /// 本文から [[...]] を抜き出し、正規化済みのリンク先キー集合を返す。
+    private static func parseLinkKeys(from content: String) -> [String] {
+        guard let regex = wikiLinkRegex else { return [] }
+        let ns = content as NSString
+        var keys = Set<String>()
+        for m in regex.matches(in: content, range: NSRange(location: 0, length: ns.length)) {
+            guard m.numberOfRanges >= 2 else { continue }
+            if let key = normalizeKey(ns.substring(with: m.range(at: 1))) { keys.insert(key) }
+        }
+        return Array(keys)
+    }
+
+    /// リンク表記を比較用キーに正規化（エイリアス/見出し除去・小文字・.md 除去）。
+    private static func normalizeKey(_ raw: String) -> String? {
+        var s = raw
+        if let bar  = s.firstIndex(of: "|") { s = String(s[..<bar]) }
+        if let hash = s.firstIndex(of: "#") { s = String(s[..<hash]) }
+        s = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if s.hasSuffix(".md") { s = String(s.dropLast(3)) }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return s.isEmpty ? nil : s
+    }
+
+    private func linksCount() -> Int {
+        guard let stmt = prepare("SELECT COUNT(*) FROM links;") else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    private func updateLinks(id: String, content: String) {
+        deleteLinks(id)
+        let keys = Self.parseLinkKeys(from: content)
+        guard !keys.isEmpty,
+              let stmt = prepare("INSERT INTO links (source_id, target_key) VALUES (?, ?);")
+        else { return }
+        defer { sqlite3_finalize(stmt) }
+        for key in keys {
+            sqlite3_reset(stmt)
+            sqlite3_bind_text(stmt, 1, id,  -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+        }
+    }
+
+    private func deleteLinks(_ id: String) {
+        guard let stmt = prepare("DELETE FROM links WHERE source_id = ?;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    /// 全ノートの本文から links を作り直す（既存DB初回のバックフィル）。
+    private func rebuildLinks() {
+        var rows: [(String, String)] = []
+        if let stmt = prepare("SELECT id, content FROM notes WHERE deleted = 0;") {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append((columnText(stmt, 0) ?? "", columnText(stmt, 1) ?? ""))
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("BEGIN TRANSACTION;")
+        for (id, content) in rows { updateLinks(id: id, content: content) }
+        exec("COMMIT;")
     }
 
     // MARK: - 同期状態（last_seq など）
