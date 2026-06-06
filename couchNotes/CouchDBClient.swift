@@ -7,6 +7,15 @@ class CouchDBClient {
 
     private let chunkSize = 102400
 
+    /// ドキュメントIDを URL の1パスセグメントとして扱うための文字セット。
+    /// `.urlPathAllowed` は "/" を残すため、フォルダ区切りの "/" が
+    /// パス区切り（＝別ドキュメント＋添付ファイル）と誤解釈される。"/" も明示的にエンコードする。
+    private static let pathSegmentAllowed: CharacterSet = {
+        var set = CharacterSet.urlPathAllowed
+        set.remove("/")
+        return set
+    }()
+
     // MARK: - 接続情報
 
     private func makeBase() throws -> (url: String, auth: String) {
@@ -293,7 +302,7 @@ class CouchDBClient {
         headers: [String: String]? = nil
     ) async throws -> (Data, Int) {
         let (base, auth) = try makeBase()
-        let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed) ?? path
         guard let url = URL(string: "\(base)/\(encoded)") else {
             throw CouchDBError.invalidSettings
         }
