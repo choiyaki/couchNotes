@@ -58,6 +58,12 @@ actor NoteStore {
             value TEXT
         );
         """)
+        // 全文検索（trigram：日本語のような非分かち書きでも部分一致できる）
+        exec("CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(id UNINDEXED, content, tokenize='trigram');")
+        // 既存DBに FTS が無かった場合は本文から再構築
+        if ftsCount() == 0 && count() > 0 {
+            exec("INSERT INTO note_fts (id, content) SELECT id, content FROM notes WHERE deleted = 0;")
+        }
 
         isBootstrapped = true
     }
@@ -111,6 +117,67 @@ actor NoteStore {
         return sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
     }
 
+    // MARK: - 全文検索
+
+    /// 本文全文検索。3文字以上は FTS5(trigram)、1〜2文字は LIKE フォールバック。
+    /// プレビューはマッチ箇所のスニペット。関連度（bm25）順。
+    func search(_ query: String) -> [NoteItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        return trimmed.count >= 3 ? ftsSearch(trimmed) : likeSearch(trimmed)
+    }
+
+    private func ftsSearch(_ query: String) -> [NoteItem] {
+        // trigram では語をフレーズ（"..."）として渡すと部分一致になる。" は "" でエスケープ。
+        let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        let sql = """
+        SELECT n.id, n.path, n.mtime, snippet(note_fts, 1, '', '', '…', 12)
+        FROM note_fts
+        JOIN notes n ON n.id = note_fts.id
+        WHERE note_fts MATCH ? AND n.deleted = 0
+        ORDER BY rank
+        LIMIT 200;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, phrase, -1, SQLITE_TRANSIENT)
+        return readItems(stmt, previewTrim: false)
+    }
+
+    private func likeSearch(_ query: String) -> [NoteItem] {
+        let sql = """
+        SELECT id, path, mtime, substr(content, 1, 400)
+        FROM notes
+        WHERE deleted = 0 AND content LIKE ?
+        ORDER BY mtime DESC
+        LIMIT 200;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, "%" + query + "%", -1, SQLITE_TRANSIENT)
+        return readItems(stmt, previewTrim: true)
+    }
+
+    /// id, path, mtime, preview の4カラムを NoteItem 配列に変換する共通処理。
+    private func readItems(_ stmt: OpaquePointer?, previewTrim: Bool) -> [NoteItem] {
+        var items: [NoteItem] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id    = columnText(stmt, 0) ?? ""
+            let path  = columnText(stmt, 1)
+            let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
+            let raw   = columnText(stmt, 3) ?? ""
+            let preview: String?
+            if previewTrim {
+                let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                preview = t.isEmpty ? nil : String(t.prefix(300))
+            } else {
+                preview = raw.isEmpty ? nil : raw
+            }
+            items.append(NoteItem(id: id, mtime: mtime, path: path, preview: preview))
+        }
+        return items
+    }
+
     // MARK: - 更新
 
     /// 1 件を upsert（ctime は新規時のみ設定し、更新時は保持）。
@@ -126,21 +193,29 @@ actor NoteStore {
         exec("COMMIT;")
     }
 
-    /// 削除（ソフト削除フラグを立てて一覧から除外）。
+    /// 削除（ソフト削除フラグを立てて一覧／検索から除外）。
     func delete(_ id: String) {
         guard let stmt = prepare("UPDATE notes SET deleted = 1 WHERE id = ?;") else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
+        deleteFTS(id)
     }
 
     /// 同期対象から外れたフォルダ配下の行をローカルから物理削除する（サーバには影響なし）。
     func removeFolder(_ prefix: String) {
         guard !prefix.isEmpty else { return }
-        guard let stmt = prepare("DELETE FROM notes WHERE id LIKE ?;") else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, prefix + "/%", -1, SQLITE_TRANSIENT)
-        sqlite3_step(stmt)
+        let pattern = prefix + "/%"
+        if let stmt = prepare("DELETE FROM notes WHERE id LIKE ?;") {
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+        if let stmt = prepare("DELETE FROM note_fts WHERE id LIKE ?;") {
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
     }
 
     private func upsert(_ r: NoteRecord, on db: OpaquePointer?) {
@@ -162,6 +237,33 @@ actor NoteStore {
         bindOptionalDouble(stmt, 4, r.ctime)
         sqlite3_bind_int64(stmt, 5, Int64(r.size))
         sqlite3_bind_text(stmt, 6, r.content, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+
+        // 全文検索インデックスも更新
+        updateFTS(id: r.id, content: r.content)
+    }
+
+    // MARK: - FTS メンテナンス
+
+    private func ftsCount() -> Int {
+        guard let stmt = prepare("SELECT COUNT(*) FROM note_fts;") else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    private func updateFTS(id: String, content: String) {
+        deleteFTS(id)
+        guard let stmt = prepare("INSERT INTO note_fts (id, content) VALUES (?, ?);") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, content, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    private func deleteFTS(_ id: String) {
+        guard let stmt = prepare("DELETE FROM note_fts WHERE id = ?;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
     }
 

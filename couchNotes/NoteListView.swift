@@ -11,6 +11,16 @@ struct NoteListView: View {
     @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
     @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
 
+    // 全文検索
+    @State private var searchText    = ""
+    @State private var searchResults: [NoteItem] = []
+    @State private var searchTask: Task<Void, Never>? = nil
+
+    /// 一覧に表示するノート（検索中は検索結果、そうでなければ全件）
+    private var displayedNotes: [NoteItem] {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? notes : searchResults
+    }
+
     // 初回インポート（全件取得）の進捗
     @State private var isImporting     = false
     @State private var importProgress: Double? = nil
@@ -27,7 +37,7 @@ struct NoteListView: View {
                 } else if notes.isEmpty {
                     emptyView
                 } else {
-                    List(notes) { note in
+                    List(displayedNotes) { note in
                         NavigationLink(value: note.id) {
                             NoteRowView(note: note)
                         }
@@ -37,6 +47,11 @@ struct NoteListView: View {
                             } label: {
                                 Label("削除", systemImage: "trash")
                             }
+                        }
+                    }
+                    .overlay {
+                        if displayedNotes.isEmpty && !searchText.isEmpty {
+                            ContentUnavailableView.search(text: searchText)
                         }
                     }
                     .refreshable {
@@ -130,6 +145,10 @@ struct NoteListView: View {
                 Button("OK") { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")
+            }
+            .searchable(text: $searchText, prompt: "ノートを検索")
+            .onChange(of: searchText) { _, query in
+                runSearch(query)
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -243,6 +262,20 @@ struct NoteListView: View {
     /// 一覧を SQLite から読み込む（高速・通信なし）
     private func loadNotes() async {
         notes = await NoteStore.shared.listItems()
+    }
+
+    /// 全文検索（200ms デバウンス）
+    private func runSearch(_ query: String) {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { searchResults = []; return }
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+            let results = await NoteStore.shared.search(trimmed)
+            guard !Task.isCancelled else { return }
+            searchResults = results
+        }
     }
 
     /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）
