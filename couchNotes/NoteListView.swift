@@ -11,14 +11,25 @@ struct NoteListView: View {
     @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
     @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
 
-    // 全文検索
+    // 検索
     @State private var searchText    = ""
     @State private var searchResults: [NoteItem] = []
     @State private var searchTask: Task<Void, Never>? = nil
+    @State private var noTitleMatch  = false   // タイトル一致が無い → 「＋」を出す
+    @State private var showNewNote   = false
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// 一覧に表示するノート（検索中は検索結果、そうでなければ全件）
     private var displayedNotes: [NoteItem] {
-        searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? notes : searchResults
+        trimmedSearch.isEmpty ? notes : searchResults
+    }
+
+    /// 検索語にタイトル一致が無い時、新規作成「＋」を出す
+    private var showCreateFromSearch: Bool {
+        !trimmedSearch.isEmpty && noTitleMatch
     }
 
     // 初回インポート（全件取得）の進捗
@@ -37,6 +48,8 @@ struct NoteListView: View {
                 } else if notes.isEmpty {
                     emptyView
                 } else {
+                  VStack(spacing: 0) {
+                    searchBar
                     List(displayedNotes) { note in
                         NavigationLink(value: note.id) {
                             NoteRowView(note: note)
@@ -50,8 +63,12 @@ struct NoteListView: View {
                         }
                     }
                     .overlay {
-                        if displayedNotes.isEmpty && !searchText.isEmpty {
-                            ContentUnavailableView.search(text: searchText)
+                        if displayedNotes.isEmpty && !trimmedSearch.isEmpty {
+                            ContentUnavailableView(
+                                "一致するノートがありません",
+                                systemImage: "magnifyingglass",
+                                description: Text("「＋」で『\(trimmedSearch)』を作成できます")
+                            )
                         }
                     }
                     .refreshable {
@@ -74,6 +91,7 @@ struct NoteListView: View {
                     } message: { _ in
                         Text("この操作は元に戻せません。")
                     }
+                  }
                 }
             }
             .navigationTitle("ノート")
@@ -161,13 +179,21 @@ struct NoteListView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
-            .searchable(text: $searchText, prompt: "ノートを検索")
             .onChange(of: searchText) { _, query in
                 runSearch(query)
             }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showNewNote) {
+            NewNoteView(
+                folders: SyncScope.normalizedFolders,
+                initialFolder: nil,
+                initialTitle: trimmedSearch
+            ) { title, folder in
+                Task { await createNoteFromSearch(title: title, folder: folder) }
+            }
         }
         .task {
             // 起動: ストアを開く → 空なら全件インポート → 一覧をロード → リスナー開始
@@ -279,18 +305,89 @@ struct NoteListView: View {
         notes = await NoteStore.shared.listItems()
     }
 
-    /// 全文検索（200ms デバウンス）
+    /// 検索（200ms デバウンス）。タイトル一致の有無も判定して「＋」表示を制御。
     private func runSearch(_ query: String) {
         searchTask?.cancel()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { searchResults = []; return }
+        guard !trimmed.isEmpty else {
+            searchResults = []
+            noTitleMatch  = false
+            return
+        }
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled else { return }
             let results = await NoteStore.shared.search(trimmed)
             guard !Task.isCancelled else { return }
             searchResults = results
+            let q = trimmed.lowercased()
+            noTitleMatch = !results.contains { $0.shortTitle.lowercased().contains(q) }
         }
+    }
+
+    /// 検索語をタイトルに新規ノートを作成して開く（「＋」→ フォルダ選択経由）。
+    private func createNoteFromSearch(title: String, folder: String?) async {
+        showNewNote = false
+        guard let naming = NoteNaming.make(title: title, folder: folder) else { return }
+        do {
+            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: "")
+            await NoteStore.shared.upsert(NoteRecord(
+                id: naming.id, path: naming.path,
+                mtime: Date().timeIntervalSince1970 * 1000,
+                ctime: nil, size: 0, content: ""
+            ))
+            UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
+            await loadNotes()
+            searchText = ""
+            isClosureNavigation = true
+            historyForward = []
+            path.append(naming.id)
+        } catch {
+            errorMessage = "作成に失敗しました\n\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 検索バー
+
+    @ViewBuilder
+    var searchBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+                TextField("ノートを検索", text: $searchText)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            if showCreateFromSearch {
+                Button {
+                    showNewNote = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title2)
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .animation(.easeInOut(duration: 0.15), value: showCreateFromSearch)
     }
 
     /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）

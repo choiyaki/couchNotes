@@ -405,27 +405,18 @@ struct NoteDetailView: View {
     /// 選んだフォルダ（nil=ルート）にタイトルで新規ノートを作成して開く。
     private func createNote(title: String, folder: String?) async {
         showNewNote = false
-        // フォルダ誤生成を防ぐため "/" は除去
-        let safe = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "/", with: "-")
-        guard !safe.isEmpty else { return }
-
-        let displayFilename = safe + ".md"
-        let idFilename      = displayFilename.lowercased()
-        let newId   = folder.map { "\($0)/\(idFilename)" }      ?? idFilename
-        let newPath = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
-
+        guard let naming = NoteNaming.make(title: title, folder: folder) else { return }
         do {
-            try await CouchDBClient.shared.createNote(id: newId, path: newPath, text: "")
+            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: "")
             let record = NoteRecord(
-                id: newId, path: newPath,
+                id: naming.id, path: naming.path,
                 mtime: Date().timeIntervalSince1970 * 1000,
                 ctime: nil, size: 0, content: ""
             )
             await NoteStore.shared.upsert(record)
-            UserDefaults.standard.set(newId, forKey: "lastOpenedNoteId")
+            UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
             NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
-            onCreated?(newId)
+            onCreated?(naming.id)
         } catch {
             errorMessage = "作成に失敗しました\n\(error.localizedDescription)"
         }
@@ -568,11 +559,12 @@ struct NewNoteView: View {
     @State private var title = ""
     @State private var folder: String?
 
-    init(folders: [String], initialFolder: String?,
+    init(folders: [String], initialFolder: String?, initialTitle: String = "",
          onCreate: @escaping (_ title: String, _ folder: String?) -> Void) {
         self.folders = folders
         self.initialFolder = initialFolder
         self.onCreate = onCreate
+        _title  = State(initialValue: initialTitle)
         _folder = State(initialValue: initialFolder)
     }
 

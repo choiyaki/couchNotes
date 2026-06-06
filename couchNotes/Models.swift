@@ -114,6 +114,23 @@ struct NoteRecord {
     let content: String
 }
 
+// MARK: - 新規ノートの命名
+
+enum NoteNaming {
+    /// タイトルとフォルダ（nil=ルート）から (_id, path) を作る。
+    /// _id は小文字、path は大小保持。"/" はフォルダ誤生成を防ぐため "-" に置換。
+    static func make(title: String, folder: String?) -> (id: String, path: String)? {
+        let safe = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+        guard !safe.isEmpty else { return nil }
+        let displayFilename = safe + ".md"
+        let idFilename      = displayFilename.lowercased()
+        let id   = folder.map { "\($0)/\(idFilename)" }      ?? idFilename
+        let path = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
+        return (id, path)
+    }
+}
+
 // MARK: - エラー
 
 enum CouchDBError: LocalizedError {

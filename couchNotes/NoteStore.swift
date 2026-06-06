@@ -128,12 +128,33 @@ actor NoteStore {
 
     // MARK: - 全文検索
 
-    /// 本文全文検索。3文字以上は FTS5(trigram)、1〜2文字は LIKE フォールバック。
-    /// プレビューはマッチ箇所のスニペット。関連度（bm25）順。
+    /// 検索：タイトル（ファイル名）一致を先頭に、続けて本文一致を並べる。
+    /// 本文一致は3文字以上で FTS5(trigram)、1〜2文字は LIKE フォールバック。
     func search(_ query: String) -> [NoteItem] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        return trimmed.count >= 3 ? ftsSearch(trimmed) : likeSearch(trimmed)
+
+        let titleHits = titleSearch(trimmed)
+        let titleIDs  = Set(titleHits.map(\.id))
+        let contentHits = (trimmed.count >= 3 ? ftsSearch(trimmed) : likeSearch(trimmed))
+            .filter { !titleIDs.contains($0.id) }
+        return titleHits + contentHits
+    }
+
+    /// タイトル（ファイル名）に語句を含むノート。id で粗く絞り、basename で厳密判定。
+    private func titleSearch(_ query: String) -> [NoteItem] {
+        let sql = """
+        SELECT id, path, mtime, substr(content, 1, 400)
+        FROM notes
+        WHERE deleted = 0 AND lower(id) LIKE ?
+        ORDER BY mtime DESC
+        LIMIT 200;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        let q = query.lowercased()
+        sqlite3_bind_text(stmt, 1, "%" + q + "%", -1, SQLITE_TRANSIENT)
+        return readItems(stmt, previewTrim: true).filter { $0.shortTitle.lowercased().contains(q) }
     }
 
     private func ftsSearch(_ query: String) -> [NoteItem] {
