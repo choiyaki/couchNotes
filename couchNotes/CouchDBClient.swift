@@ -65,15 +65,46 @@ class CouchDBClient {
         )
     }
 
-    /// 全ノートを本文込みで一括取得（初回インポート用）
-    /// - _find で全メタ＋children を取得 → 全チャンクを `_bulk_get` でバッチ取得 → 本文を組み立て
-    /// - progress: 0...1 のダウンロード進捗（チャンク取得ベース）
-    func fetchAllNotesFull(
+    /// 指定フォルダ範囲のノートを本文込みで一括取得
+    /// - includeRoot: ルート直下（"/" を含まない id）も含めるか
+    /// - folders: 正規化済みフォルダ名（各 "<folder>/" 配下を取得）
+    func fetchScopedNotes(
+        folders: [String],
+        includeRoot: Bool = true,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> [NoteRecord] {
-        // 1) 全ノートのメタ + children
+        try await fetchNotes(
+            selector: scopeSelector(folders: folders, includeRoot: includeRoot),
+            progress: progress
+        )
+    }
+
+    /// 同期範囲を表す Mango selector を組み立てる
+    private func scopeSelector(folders: [String], includeRoot: Bool) -> [String: Any] {
+        var ors: [[String: Any]] = []
+        if includeRoot {
+            // ルート直下＝スラッシュを含まない id
+            ors.append(["_id": ["$regex": "^[^/]+$"]])
+        }
+        for f in folders where !f.isEmpty {
+            // "<folder>/..." の範囲（"0" は "/" の次の文字）。子フォルダも含む。
+            ors.append(["_id": ["$gte": "\(f)/", "$lt": "\(f)0"]])
+        }
+        var selector: [String: Any] = ["type": ["$eq": "plain"]]
+        if !ors.isEmpty { selector["$or"] = ors }
+        return selector
+    }
+
+    /// selector に一致するノートを本文込みで一括取得（初回／バックフィル共通）
+    /// - _find でメタ＋children を取得 → 全チャンクを `_bulk_get` でバッチ取得 → 本文を組み立て
+    /// - progress: 0...1 のダウンロード進捗（チャンク取得ベース）
+    private func fetchNotes(
+        selector: [String: Any],
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> [NoteRecord] {
+        // 1) ノートのメタ + children
         let query: [String: Any] = [
-            "selector": ["type": ["$eq": "plain"]],
+            "selector": selector,
             "fields":   ["_id", "path", "mtime", "ctime", "size", "children", "deleted"],
             "limit":    99999
         ]

@@ -75,12 +75,16 @@ class ChangesListener: ObservableObject {
                 since = response.last_seq   // 次のリクエストはここから
                 await NoteStore.shared.setSyncValue("last_seq", since)
 
+                // この応答バッチ中は同期範囲を一度だけ評価
+                let scopeFolders = SyncScope.normalizedFolders
+
                 var didChangeStore = false
                 for event in response.results {
                     guard !Task.isCancelled else { return }
                     guard
                         event.id.hasSuffix(".md"),
-                        !event.id.hasPrefix("h:")
+                        !event.id.hasPrefix("h:"),
+                        SyncScope.shouldSync(id: event.id, folders: scopeFolders)
                     else { continue }
 
                     if event.deleted == true {

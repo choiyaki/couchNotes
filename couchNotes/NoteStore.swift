@@ -134,6 +134,15 @@ actor NoteStore {
         sqlite3_step(stmt)
     }
 
+    /// 同期対象から外れたフォルダ配下の行をローカルから物理削除する（サーバには影響なし）。
+    func removeFolder(_ prefix: String) {
+        guard !prefix.isEmpty else { return }
+        guard let stmt = prepare("DELETE FROM notes WHERE id LIKE ?;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, prefix + "/%", -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
     private func upsert(_ r: NoteRecord, on db: OpaquePointer?) {
         let sql = """
         INSERT INTO notes (id, path, mtime, ctime, size, content, deleted)

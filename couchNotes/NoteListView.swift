@@ -173,6 +173,13 @@ struct NoteListView: View {
             guard hasLoadedOnce else { return }
             Task { await loadNotes() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .syncScopeDidChange)) { note in
+            // 同期フォルダの追加→バックフィル取得 / 削除→ローカル除去
+            guard hasLoadedOnce else { return }
+            let added   = note.userInfo?["added"]   as? [String] ?? []
+            let removed = note.userInfo?["removed"] as? [String] ?? []
+            Task { await applyScopeChange(added: added, removed: removed) }
+        }
     }
 
     // MARK: - ステータスインジケーター
@@ -250,7 +257,31 @@ struct NoteListView: View {
         noteToDelete = nil
     }
 
-    /// 初回の全件取得 → SQLite 保存 → last_seq 記録
+    /// 同期フォルダ変更の反映：削除フォルダはローカル除去、追加フォルダはバックフィル取得
+    private func applyScopeChange(added: [String], removed: [String]) async {
+        for folder in removed {
+            await NoteStore.shared.removeFolder(folder)
+        }
+        if !added.isEmpty {
+            isImporting    = true
+            importProgress = 0
+            defer { isImporting = false }
+            do {
+                // 追加フォルダ配下のみ取得（ルートは既に同期済みなので含めない）
+                let records = try await CouchDBClient.shared.fetchScopedNotes(
+                    folders: added, includeRoot: false
+                ) { frac in
+                    Task { @MainActor in importProgress = frac }
+                }
+                await NoteStore.shared.upsertMany(records)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        await loadNotes()
+    }
+
+    /// 初回の範囲内取得 → SQLite 保存 → last_seq 記録
     private func runInitialImport() async {
         isImporting    = true
         importProgress = 0
@@ -258,7 +289,9 @@ struct NoteListView: View {
         do {
             // 取得中の変更も拾えるよう、開始前の seq を起点として記録する
             let seq = try await CouchDBClient.shared.currentUpdateSeq()
-            let records = try await CouchDBClient.shared.fetchAllNotesFull { frac in
+            let records = try await CouchDBClient.shared.fetchScopedNotes(
+                folders: SyncScope.normalizedFolders, includeRoot: true
+            ) { frac in
                 Task { @MainActor in importProgress = frac }
             }
             await NoteStore.shared.upsertMany(records)
