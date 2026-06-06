@@ -86,14 +86,10 @@ struct NoteItem: Identifiable {
             .replacingOccurrences(of: ".md", with: "") ?? displayId
     }
 
-    /// リスト表示用サブタイトル（最終更新日時）
+    /// リスト表示用サブタイトル（最終更新日時, yyyyMMdd HH:mm）
     var lastModifiedString: String {
         guard let date = lastModified else { return id }
-        let df = DateFormatter()
-        df.dateStyle = .short
-        df.timeStyle = .short
-        df.locale = Locale(identifier: "ja_JP")
-        return df.string(from: date)
+        return DateDisplay.ymdhm.string(from: date)
     }
 
     var isToday: Bool {
@@ -104,7 +100,7 @@ struct NoteItem: Identifiable {
 
 // MARK: - 永続化用レコード（本文込み）
 
-/// SQLite に保存する 1 ノート分の完全な情報。
+/// SQLite に保存する 1 ノート分の完全な情報（content はフロントマター込みの全文）。
 struct NoteRecord {
     let id: String
     let path: String?
@@ -112,6 +108,14 @@ struct NoteRecord {
     let ctime: Double?
     let size: Int
     let content: String
+}
+
+/// エディタ用に取り出したノート（body はフロントマター除去済み）。
+struct StoredNote {
+    let body: String
+    let ctime: Double?    // 作成時刻（ms）
+    let mtime: Double?    // 更新時刻（ms）
+    let extra: String?    // created/updated 以外のフロントマター行
 }
 
 // MARK: - 新規ノートの命名

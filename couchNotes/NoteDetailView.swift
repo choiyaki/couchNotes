@@ -59,6 +59,11 @@ struct NoteDetailView: View {
     @State private var content        = ""
     @State private var editingContent = ""
     @State private var isLoading      = true
+
+    // フロントマター（YAML created/updated）。content/editingContent は本文のみ。
+    @State private var createdMs:        Double? = nil
+    @State private var updatedMs:        Double? = nil
+    @State private var extraFrontmatter: String  = ""
     @State private var isRefreshing   = false
     @State private var saveStatus: SaveStatus = .idle
     @State private var errorMessage: String? = nil
@@ -166,6 +171,8 @@ struct NoteDetailView: View {
             if !isLoading {
                 EditorFooterBar(
                     folderLabel: currentFolderLabel,
+                    createdText: DateDisplay.string(fromMs: createdMs),
+                    updatedText: DateDisplay.string(fromMs: updatedMs),
                     onFolderTap: { showFolderPicker = true },
                     onNewTap:    { showNewNote = true }
                 )
@@ -292,7 +299,11 @@ struct NoteDetailView: View {
 
     private func applyExternalChange(record: NoteRecord) async {
         await NoteStore.shared.upsert(record)
-        let fresh = record.content
+        let parsed = FrontmatterParser.split(record.content)
+        createdMs        = record.ctime
+        updatedMs        = record.mtime
+        extraFrontmatter = parsed.extraLines.joined(separator: "\n")
+        let fresh = parsed.body
 
         if !hasUnsavedChanges {
             content        = fresh
@@ -305,7 +316,11 @@ struct NoteDetailView: View {
 
     private func applyExternalChangeIfNeeded() async {
         // リスナーが既にストアを更新済みなので、そこから最新本文を読む
-        guard let fresh = await NoteStore.shared.content(noteId) else { return }
+        guard let stored = await NoteStore.shared.editingNote(noteId) else { return }
+        createdMs        = stored.ctime
+        updatedMs        = stored.mtime
+        extraFrontmatter = stored.extra ?? ""
+        let fresh = stored.body
         if fresh == content && !hasUnsavedChanges { return }
 
         if !hasUnsavedChanges {
@@ -327,8 +342,8 @@ struct NoteDetailView: View {
             guard !Task.isCancelled else { break }
 
             guard let record = try? await CouchDBClient.shared.fetchNoteRecord(id: noteId) else { continue }
-            let cached = await NoteStore.shared.content(noteId) ?? ""
-            guard record.content != cached else { continue }
+            let freshBody = FrontmatterParser.split(record.content).body
+            guard freshBody != content else { continue }
             await applyExternalChange(record: record)
         }
     }
@@ -336,10 +351,13 @@ struct NoteDetailView: View {
     // MARK: - ロード
 
     func loadContent() async {
-        if let cached = await NoteStore.shared.content(noteId) {
-            content        = cached
-            editingContent = cached
-            isLoading      = false
+        if let stored = await NoteStore.shared.editingNote(noteId) {
+            content          = stored.body
+            editingContent   = stored.body
+            createdMs        = stored.ctime
+            updatedMs        = stored.mtime
+            extraFrontmatter = stored.extra ?? ""
+            isLoading        = false
             await refreshInBackground()
             return
         }
@@ -348,8 +366,12 @@ struct NoteDetailView: View {
         do {
             if let record = try await CouchDBClient.shared.fetchNoteRecord(id: noteId) {
                 await NoteStore.shared.upsert(record)
-                content        = record.content
-                editingContent = record.content
+                let parsed       = FrontmatterParser.split(record.content)
+                content          = parsed.body
+                editingContent   = parsed.body
+                createdMs        = record.ctime
+                updatedMs        = record.mtime
+                extraFrontmatter = parsed.extraLines.joined(separator: "\n")
             } else {
                 content        = ""
                 editingContent = ""
@@ -406,12 +428,15 @@ struct NoteDetailView: View {
     private func createNote(title: String, folder: String?) async {
         showNewNote = false
         guard let naming = NoteNaming.make(title: title, folder: folder) else { return }
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        let sec   = Int(nowMs / 1000)
+        let fullText = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: "")
         do {
-            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: "")
+            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: fullText)
             let record = NoteRecord(
                 id: naming.id, path: naming.path,
-                mtime: Date().timeIntervalSince1970 * 1000,
-                ctime: nil, size: 0, content: ""
+                mtime: nowMs, ctime: nowMs,
+                size: fullText.utf8.count, content: fullText
             )
             await NoteStore.shared.upsert(record)
             UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
@@ -427,7 +452,8 @@ struct NoteDetailView: View {
         defer { isRefreshing = false }
         do {
             guard let record = try await CouchDBClient.shared.fetchNoteRecord(id: noteId) else { return }
-            guard record.content != (await NoteStore.shared.content(noteId) ?? "") else { return }
+            let freshBody = FrontmatterParser.split(record.content).body
+            guard freshBody != content else { return }
             await applyExternalChange(record: record)
         } catch { }
     }
@@ -442,15 +468,25 @@ struct NoteDetailView: View {
         }
 
         saveStatus = .saving
+        // フロントマター（created=ctime / updated=now）を付けて全文を保存
+        let nowMs      = Date().timeIntervalSince1970 * 1000
+        let createdSec = Int((createdMs ?? nowMs) / 1000)
+        let updatedSec = Int(nowMs / 1000)
+        let extraLines = extraFrontmatter.isEmpty ? [] : extraFrontmatter.components(separatedBy: "\n")
+        let fullText   = FrontmatterParser.compose(
+            createdSec: createdSec, updatedSec: updatedSec, extra: extraLines, body: editingContent
+        )
         do {
-            try await CouchDBClient.shared.saveNoteContent(id: noteId, text: editingContent)
+            try await CouchDBClient.shared.saveNoteContent(id: noteId, text: fullText)
+            if createdMs == nil { createdMs = nowMs }
+            updatedMs = nowMs
             let record = NoteRecord(
                 id: noteId,
                 path: displayPath ?? noteId,
-                mtime: Date().timeIntervalSince1970 * 1000,
-                ctime: nil,
-                size: editingContent.utf8.count,
-                content: editingContent
+                mtime: nowMs,
+                ctime: createdMs,
+                size: fullText.utf8.count,
+                content: fullText
             )
             await NoteStore.shared.upsert(record)
             content                 = editingContent
@@ -517,29 +553,48 @@ struct ExternalChangeBanner: View {
 
 struct EditorFooterBar: View {
     let folderLabel: String
+    let createdText: String
+    let updatedText: String
     let onFolderTap: () -> Void
     let onNewTap: () -> Void
 
+    private var dateLine: String {
+        var parts: [String] = []
+        if !createdText.isEmpty { parts.append("作成 \(createdText)") }
+        if !updatedText.isEmpty { parts.append("更新 \(updatedText)") }
+        return parts.joined(separator: "  ・  ")
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
-            Button(action: onFolderTap) {
-                HStack(spacing: 5) {
-                    Image(systemName: "folder")
-                    Text(folderLabel).lineLimit(1)
+        VStack(spacing: 4) {
+            if !dateLine.isEmpty {
+                Text(dateLine)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            HStack(spacing: 0) {
+                Button(action: onFolderTap) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder")
+                        Text(folderLabel).lineLimit(1)
+                    }
+                    .font(.subheadline)
                 }
-                .font(.subheadline)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
 
-            Spacer()
+                Spacer()
 
-            Button(action: onNewTap) {
-                Image(systemName: "square.and.pencil")
-                    .font(.body)
+                Button(action: onNewTap) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.tint)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)

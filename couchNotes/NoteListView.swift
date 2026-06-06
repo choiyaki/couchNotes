@@ -329,12 +329,15 @@ struct NoteListView: View {
     private func createNoteFromSearch(title: String, folder: String?) async {
         showNewNote = false
         guard let naming = NoteNaming.make(title: title, folder: folder) else { return }
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        let sec   = Int(nowMs / 1000)
+        let fullText = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: "")
         do {
-            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: "")
+            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: fullText)
             await NoteStore.shared.upsert(NoteRecord(
                 id: naming.id, path: naming.path,
-                mtime: Date().timeIntervalSince1970 * 1000,
-                ctime: nil, size: 0, content: ""
+                mtime: nowMs, ctime: nowMs,
+                size: fullText.utf8.count, content: fullText
             ))
             UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
             await loadNotes()

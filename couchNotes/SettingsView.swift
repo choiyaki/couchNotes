@@ -12,6 +12,11 @@ struct SettingsView: View {
     @State private var syncFolders: [String] = []
     @State private var newFolder = ""
 
+    // created/updated 付与（初回移行）
+    @State private var migrating       = false
+    @State private var migrateProgress = 0.0
+    @State private var migrationDone   = false
+
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
 
@@ -60,6 +65,29 @@ struct SettingsView: View {
                             .onSubmit(addFolder)
                         Button("追加", action: addFolder)
                             .disabled(SyncScope.normalize(newFolder).isEmpty)
+                    }
+                }
+                Section(
+                    header: Text("created / updated"),
+                    footer: Text("全ノートの YAML に created/updated を付与します。既に YAML がある場合はそちらを正として ctime/mtime に反映します。1回だけ実行してください。")
+                ) {
+                    if migrating {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ProgressView(value: migrateProgress)
+                            Text("付与中… \(Int(migrateProgress * 100))%")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        Button {
+                            runMigration()
+                        } label: {
+                            Label(
+                                migrationDone ? "created/updated を付与（実行済み）" : "created/updated を全ノートに付与",
+                                systemImage: migrationDone ? "checkmark.circle" : "calendar.badge.plus"
+                            )
+                        }
                     }
                 }
                 Section(header: Text("CouchDB 接続先")) {
@@ -115,6 +143,25 @@ struct SettingsView: View {
         username = km.load(key: "couchdb_user")     ?? ""
         password = km.load(key: "couchdb_password") ?? ""
         syncFolders = SyncScope.normalizedFolders
+        Task { migrationDone = await FrontmatterMigration.isDone() }
+    }
+
+    // MARK: - created/updated 付与（初回移行）
+
+    private func runMigration() {
+        migrating = true
+        migrateProgress = 0
+        Task {
+            do {
+                try await FrontmatterMigration.run { p in
+                    Task { @MainActor in migrateProgress = p }
+                }
+                migrationDone = true
+            } catch {
+                // 失敗時はそのまま（再実行可能）
+            }
+            migrating = false
+        }
     }
 
     // MARK: - 同期フォルダの追加・削除（即時反映）

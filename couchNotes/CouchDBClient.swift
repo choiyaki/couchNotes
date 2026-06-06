@@ -254,6 +254,31 @@ class CouchDBClient {
         try await putNote(note)
     }
 
+    /// 本文は変えず ctime/mtime だけ更新する（移行：YAMLを正としてメタデータへ反映）。
+    func updateNoteTimes(id: String, ctime: Double, mtime: Double) async throws {
+        guard var note = try await fetchNote(id: id) else { return }
+        note.ctime = ctime
+        note.mtime = mtime
+        try await putNote(note)
+    }
+
+    /// 本文を保存しつつ ctime/mtime を明示指定する（移行：YAML付与で時刻を据え置く）。
+    func saveContentPreservingTimes(id: String, text: String, ctime: Double, mtime: Double) async throws {
+        let (chunkIDs, chunks) = makeChunks(text: text)
+        try await putChunks(chunks)
+        if var note = try await fetchNote(id: id) {
+            note.children = chunkIDs
+            note.ctime    = ctime
+            note.mtime    = mtime
+            note.size     = text.utf8.count
+            try await putNote(note)
+        } else {
+            var note = LiveSyncNote(id: id, children: chunkIDs, size: text.utf8.count, ctime: ctime)
+            note.mtime = mtime
+            try await putNote(note)
+        }
+    }
+
     /// _changes longpoll 用の URLRequest を生成
     /// - Parameter since: "now" または前回レスポンスの last_seq
     func makeChangesURLRequest(since: String = "now") throws -> URLRequest {

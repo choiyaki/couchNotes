@@ -48,10 +48,13 @@ actor NoteStore {
             ctime    REAL,
             size     INTEGER,
             content  TEXT,
+            frontmatter_extra TEXT,
             deleted  INTEGER DEFAULT 0
         );
         """)
         exec("CREATE INDEX IF NOT EXISTS idx_notes_mtime ON notes(mtime DESC);")
+        // 既存DBへの列追加（既にあればエラーは無視される）
+        exec("ALTER TABLE notes ADD COLUMN frontmatter_extra TEXT;")
         exec("""
         CREATE TABLE IF NOT EXISTS sync_state (
             key   TEXT PRIMARY KEY,
@@ -73,6 +76,9 @@ actor NoteStore {
         if linksCount() == 0 && count() > 0 {
             rebuildLinks()
         }
+
+        // 既存行に含まれるフロントマターを本文から分離（1回だけ）
+        resplitExistingContent()
 
         isBootstrapped = true
     }
@@ -118,12 +124,26 @@ actor NoteStore {
         return items
     }
 
-    /// 本文を取得（存在しなければ nil）。
+    /// 本文（フロントマター除去済み）を取得（存在しなければ nil）。
     func content(_ id: String) -> String? {
         guard let stmt = prepare("SELECT content FROM notes WHERE id = ? AND deleted = 0;") else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         return sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
+    }
+
+    /// エディタ用：本文＋作成/更新時刻（ms）＋保持フロントマター。
+    func editingNote(_ id: String) -> StoredNote? {
+        let sql = "SELECT content, ctime, mtime, frontmatter_extra FROM notes WHERE id = ? AND deleted = 0;"
+        guard let stmt = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let body  = columnText(stmt, 0) ?? ""
+        let ctime = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+        let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
+        let extra = columnText(stmt, 3)
+        return StoredNote(body: body, ctime: ctime, mtime: mtime, extra: extra)
     }
 
     // MARK: - 全文検索
@@ -276,14 +296,20 @@ actor NoteStore {
     }
 
     private func upsert(_ r: NoteRecord, on db: OpaquePointer?) {
+        // フロントマターを分離し、本文のみを保存（表示・検索・プレビューを綺麗に保つ）
+        let parsed = FrontmatterParser.split(r.content)
+        let body   = parsed.body
+        let extra  = parsed.extraLines.joined(separator: "\n")
+
         let sql = """
-        INSERT INTO notes (id, path, mtime, ctime, size, content, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(id) DO UPDATE SET
             path = excluded.path,
             mtime = excluded.mtime,
             size = excluded.size,
             content = excluded.content,
+            frontmatter_extra = excluded.frontmatter_extra,
             deleted = 0;
         """
         guard let stmt = prepare(sql) else { return }
@@ -293,12 +319,13 @@ actor NoteStore {
         bindOptionalDouble(stmt, 3, r.mtime)
         bindOptionalDouble(stmt, 4, r.ctime)
         sqlite3_bind_int64(stmt, 5, Int64(r.size))
-        sqlite3_bind_text(stmt, 6, r.content, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 6, body, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 7, extra, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
 
-        // 全文検索・バックリンクのインデックスも更新
-        updateFTS(id: r.id, content: r.content)
-        updateLinks(id: r.id, content: r.content)
+        // 全文検索・バックリンクは本文のみで索引
+        updateFTS(id: r.id, content: body)
+        updateLinks(id: r.id, content: body)
     }
 
     // MARK: - FTS メンテナンス
@@ -378,6 +405,37 @@ actor NoteStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
+    }
+
+    /// 既存行（フロントマター混在）から本文を分離し、content/extra・索引を更新（1回だけ）。
+    private func resplitExistingContent() {
+        guard syncValue("content_split_v1") == nil else { return }
+
+        var rows: [(String, String)] = []
+        if let stmt = prepare("SELECT id, content FROM notes;") {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append((columnText(stmt, 0) ?? "", columnText(stmt, 1) ?? ""))
+            }
+            sqlite3_finalize(stmt)
+        }
+
+        exec("BEGIN TRANSACTION;")
+        for (id, full) in rows {
+            let parsed = FrontmatterParser.split(full)
+            guard parsed.body != full else { continue }   // フロントマター無しはそのまま
+            let extra = parsed.extraLines.joined(separator: "\n")
+            if let stmt = prepare("UPDATE notes SET content = ?, frontmatter_extra = ? WHERE id = ?;") {
+                sqlite3_bind_text(stmt, 1, parsed.body, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, extra, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+            updateFTS(id: id, content: parsed.body)
+            updateLinks(id: id, content: parsed.body)
+        }
+        exec("COMMIT;")
+        setSyncValue("content_split_v1", "done")
     }
 
     /// 全ノートの本文から links を作り直す（既存DB初回のバックフィル）。
