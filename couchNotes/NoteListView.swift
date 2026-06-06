@@ -16,6 +16,7 @@ struct NoteListView: View {
     @State private var searchResults: [NoteItem] = []
     @State private var searchTask: Task<Void, Never>? = nil
     @State private var showNewNote   = false
+    @FocusState private var searchFocused: Bool
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -357,9 +358,11 @@ struct NoteListView: View {
                 TextField("ノートを検索", text: $searchText)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
+                    .focused($searchFocused)
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
+                        searchFocused = false   // キーボードも閉じる
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
@@ -382,7 +385,7 @@ struct NoteListView: View {
             .disabled(!canCreateFromSearch)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.top, 1)
         .padding(.bottom, 4)
         .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
     }
