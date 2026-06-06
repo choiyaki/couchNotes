@@ -69,9 +69,8 @@ struct NoteDetailView: View {
     // デバウンス保存用
     @State private var saveDebounceTask: Task<Void, Never>?
 
-    // バックリンク
+    // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
-    @State private var showBacklinks = false
 
     // MARK: - ナビタイトル
 
@@ -116,6 +115,7 @@ struct NoteDetailView: View {
                 MarkdownTextView(
                     text: $editingContent,
                     notes: notes,
+                    backlinks: backlinks,
                     fontSize: CGFloat(fontSize),
                     lineSpacing: CGFloat(lineSpacing),
                     onLinkTap: onLinkTap
@@ -167,16 +167,6 @@ struct NoteDetailView: View {
                 }
                 .disabled(!canGoForward)
 
-                Button { showBacklinks = true } label: {
-                    HStack(spacing: 2) {
-                        Image(systemName: "link")
-                        if !backlinks.isEmpty {
-                            Text("\(backlinks.count)").font(.caption)
-                        }
-                    }
-                }
-                .disabled(backlinks.isEmpty)
-
                 saveStatusView
 
                 if isRefreshing {
@@ -206,12 +196,6 @@ struct NoteDetailView: View {
         ) { _ in
             // 他ノートの更新でこのノートへの被リンクが変わりうるため更新
             Task { await loadBacklinks() }
-        }
-        .sheet(isPresented: $showBacklinks) {
-            BacklinksView(backlinks: backlinks) { sourceId in
-                showBacklinks = false
-                onLinkTap?(sourceId)
-            }
         }
         .onChange(of: network.isOnline) { _, online in
             // オフライン→オンラインに復帰した時、未保存の変更があれば再試行
@@ -426,42 +410,5 @@ struct ExternalChangeBanner: View {
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.1))
         .overlay(Divider(), alignment: .bottom)
-    }
-}
-
-// MARK: - バックリンク一覧
-
-struct BacklinksView: View {
-    let backlinks: [NoteItem]
-    let onTap: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List(backlinks) { note in
-                Button {
-                    onTap(note.id)
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(note.shortTitle)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        if let preview = note.preview {
-                            Text(preview)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("リンク元 (\(backlinks.count))")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }
-                }
-            }
-        }
     }
 }

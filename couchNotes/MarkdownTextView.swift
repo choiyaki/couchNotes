@@ -20,6 +20,54 @@ final class NonAutoScrollTextView: UITextView {
         guard !suppressesAutoScroll else { return }
         super.scrollRectToVisible(rect, animated: animated)
     }
+
+    // MARK: - 本文末尾フッター（バックリンク表示）
+
+    /// 本文の下に差し込むフッター。スクロール領域内に配置するため本文と一緒にスクロールする。
+    var footerView: UIView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            if let footerView { addSubview(footerView) }
+            setNeedsLayout()
+        }
+    }
+    /// フッターが無い時の下部余白（キーボード用の従来値）
+    var defaultBottomInset: CGFloat = 80
+    private let footerGap: CGFloat = 24
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        positionFooter()
+    }
+
+    private func positionFooter() {
+        guard let footer = footerView else {
+            if abs(textContainerInset.bottom - defaultBottomInset) > 0.5 {
+                textContainerInset.bottom = defaultBottomInset
+            }
+            return
+        }
+        let width = bounds.width - textContainerInset.left - textContainerInset.right
+        guard width > 0 else { return }
+
+        let height = footer.systemLayoutSizeFitting(
+            CGSize(width: width, height: 0),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel
+        ).height
+
+        // 本文の実際の終端位置の下にフッターを置く
+        layoutManager.ensureLayout(for: textContainer)
+        let textHeight = layoutManager.usedRect(for: textContainer).height
+        let y = textContainerInset.top + textHeight + footerGap
+        footer.frame = CGRect(x: textContainerInset.left, y: y, width: width, height: height)
+
+        // フッター分の下部余白を確保（差分がある時だけ更新して再レイアウトの無限ループを防ぐ）
+        let needed = footerGap + height + defaultBottomInset
+        if abs(textContainerInset.bottom - needed) > 0.5 {
+            textContainerInset.bottom = needed
+        }
+    }
 }
 
 // MARK: - MarkdownTextView
@@ -27,6 +75,7 @@ final class NonAutoScrollTextView: UITextView {
 struct MarkdownTextView: UIViewRepresentable {
     @Binding var text: String
     var notes: [NoteItem] = []
+    var backlinks: [NoteItem] = []
     var fontSize:    CGFloat = MarkdownStyler.defaultFontSize
     var lineSpacing: CGFloat = MarkdownStyler.defaultLineSpacing
     var onLinkTap: ((String) -> Void)? = nil
@@ -56,6 +105,15 @@ struct MarkdownTextView: UIViewRepresentable {
         tv.addGestureRecognizer(tap)
 
         context.coordinator.textView = tv
+
+        // 本文末尾のバックリンクフッター（タップでリンク先へナビゲート）
+        let footer = BacklinksFooterView()
+        let linkTap = onLinkTap
+        footer.onTap = { [weak tv] id in
+            tv?.resignFirstResponder()
+            linkTap?(id)
+        }
+        context.coordinator.footer = footer
 
         let coord = context.coordinator
         let accessory = AccessoryContainerView()
@@ -95,6 +153,21 @@ struct MarkdownTextView: UIViewRepresentable {
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.notes = notes
 
+        // バックリンクフッターの更新（テキスト変更とは独立に反映する）
+        let ids = backlinks.map(\.id)
+        if context.coordinator.backlinkIDs != ids,
+           let nav = uiView as? NonAutoScrollTextView,
+           let footer = context.coordinator.footer {
+            context.coordinator.backlinkIDs = ids
+            if backlinks.isEmpty {
+                nav.footerView = nil
+            } else {
+                footer.configure(with: backlinks)
+                if nav.footerView !== footer { nav.footerView = footer }
+                nav.setNeedsLayout()
+            }
+        }
+
         let textChanged  = uiView.text != text
         let styleChanged = context.coordinator.fontSize    != fontSize
                         || context.coordinator.lineSpacing != lineSpacing
@@ -130,6 +203,8 @@ extension MarkdownTextView {
         var fontSize:    CGFloat = MarkdownStyler.defaultFontSize
         var lineSpacing: CGFloat = MarkdownStyler.defaultLineSpacing
         var accessoryView: AccessoryContainerView?
+        var footer: BacklinksFooterView?
+        var backlinkIDs: [String] = []
 
         init(_ parent: MarkdownTextView) { self.parent = parent }
 
@@ -903,5 +978,86 @@ final class AccessoryContainerView: UIInputView {
     func showSuggestion() {
         toolbar.isHidden    = true
         suggestion.isHidden = false
+    }
+}
+
+// MARK: - BacklinksFooterView
+
+/// 本文末尾に表示するバックリンク（リンク元）一覧。UITextView のスクロール領域に差し込む。
+final class BacklinksFooterView: UIView {
+    var onTap: ((String) -> Void)?
+
+    private let stack = UIStackView()
+
+    init() {
+        super.init(frame: .zero)
+        stack.axis    = .vertical
+        stack.spacing = 4
+        addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(with backlinks: [NoteItem]) {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        let separator = UIView()
+        separator.backgroundColor = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        stack.addArrangedSubview(separator)
+        stack.setCustomSpacing(10, after: separator)
+
+        let header = UILabel()
+        header.text      = "リンク元 (\(backlinks.count))"
+        header.font      = .systemFont(ofSize: 13, weight: .semibold)
+        header.textColor = .secondaryLabel
+        stack.addArrangedSubview(header)
+        stack.setCustomSpacing(8, after: header)
+
+        for note in backlinks {
+            stack.addArrangedSubview(makeRow(note))
+        }
+    }
+
+    private func makeRow(_ note: NoteItem) -> UIView {
+        let control = UIControl()
+        let inner = UIStackView()
+        inner.axis = .vertical
+        inner.spacing = 2
+        inner.isUserInteractionEnabled = false
+        control.addSubview(inner)
+        inner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            inner.topAnchor.constraint(equalTo: control.topAnchor, constant: 6),
+            inner.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: -6),
+            inner.leadingAnchor.constraint(equalTo: control.leadingAnchor),
+            inner.trailingAnchor.constraint(equalTo: control.trailingAnchor),
+        ])
+
+        let title = UILabel()
+        title.text          = note.shortTitle
+        title.font          = .systemFont(ofSize: 15, weight: .medium)
+        title.textColor     = .systemBlue
+        title.numberOfLines = 1
+        inner.addArrangedSubview(title)
+
+        if let preview = note.preview, !preview.isEmpty {
+            let body = UILabel()
+            body.text          = preview
+            body.font          = .systemFont(ofSize: 12)
+            body.textColor     = .secondaryLabel
+            body.numberOfLines = 2
+            inner.addArrangedSubview(body)
+        }
+
+        control.addAction(UIAction { [weak self] _ in self?.onTap?(note.id) }, for: .touchUpInside)
+        return control
     }
 }
