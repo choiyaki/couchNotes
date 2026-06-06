@@ -64,6 +64,7 @@ struct NoteListView: View {
                             }
                         }
                     }
+                    .contentMargins(.top, 4, for: .scrollContent)
                     .overlay {
                         if displayedNotes.isEmpty && !trimmedSearch.isEmpty {
                             ContentUnavailableView(
@@ -385,8 +386,8 @@ struct NoteListView: View {
             .disabled(!canCreateFromSearch)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 1)
-        .padding(.bottom, 4)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
         .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
     }
 
