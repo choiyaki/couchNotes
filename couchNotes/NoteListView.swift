@@ -6,12 +6,13 @@ struct NoteListView: View {
 
     @State private var notes: [NoteItem] = []
     @State private var path: [String]    = []
-    @State private var isLoading         = false
-    @State private var isPrefetching     = false
     @State private var errorMessage: String? = nil
     @State private var showSettings      = false
-    @State private var hasLoadedOnce     = false   // 初回ロード完了後の再 fetch を制御
-    @State private var cacheGeneration   = 0       // プリフェッチでキャッシュが増えた時に行プレビューを再描画させる
+    @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
+
+    // 初回インポート（全件取得）の進捗
+    @State private var isImporting     = false
+    @State private var importProgress: Double? = nil
 
     // 前進履歴（path 自体が後退履歴を兼ねる）
     @State private var historyForward:     [String] = []
@@ -20,20 +21,19 @@ struct NoteListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if isLoading && notes.isEmpty {
-                    ProgressView("読み込み中...")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if isImporting {
+                    importView
                 } else if notes.isEmpty {
                     emptyView
                 } else {
                     List(notes) { note in
                         NavigationLink(value: note.id) {
-                            NoteRowView(note: note, cacheGeneration: cacheGeneration)
+                            NoteRowView(note: note)
                         }
                     }
                     .refreshable {
+                        ChangesListener.shared.start()
                         await loadNotes()
-                        await prefetchRecentNotes()
                     }
                 }
             }
@@ -112,13 +112,21 @@ struct NoteListView: View {
             SettingsView()
         }
         .task {
-            // 初回起動時のみ: 前回開いていたノートを復元 + プリフェッチ
-            if let lastId = UserDefaults.standard.string(forKey: "lastOpenedNoteId"),
-               !lastId.isEmpty {
-                path = [lastId]
+            // 起動: ストアを開く → 空なら全件インポート → 一覧をロード → リスナー開始
+            await NoteStore.shared.bootstrap()
+            if await NoteStore.shared.count() == 0 {
+                await runInitialImport()
             }
             await loadNotes()
-            await prefetchRecentNotes()
+
+            // 前回開いていたノートを復元（存在する場合のみ）
+            if let lastId = UserDefaults.standard.string(forKey: "lastOpenedNoteId"),
+               !lastId.isEmpty,
+               notes.contains(where: { $0.id == lastId }) {
+                path = [lastId]
+            }
+
+            ChangesListener.shared.start()
             hasLoadedOnce = true
         }
         .onAppear {
@@ -132,7 +140,12 @@ struct NoteListView: View {
             Task { await loadNotes() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .noteSaved)) { _ in
-            // 詳細画面で保存が完了したタイミングで再 fetch（onAppear と save のレース対策）
+            // 詳細画面で保存が完了したタイミングで再ロード
+            guard hasLoadedOnce else { return }
+            Task { await loadNotes() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .noteStoreDidChange)) { _ in
+            // _changes でストアが更新されたら一覧を反映
             guard hasLoadedOnce else { return }
             Task { await loadNotes() }
         }
@@ -143,17 +156,31 @@ struct NoteListView: View {
     @ViewBuilder
     var statusIndicator: some View {
         HStack(spacing: 5) {
-            if isLoading {
-                ProgressView().scaleEffect(0.8)
-            } else if isPrefetching {
-                Image(systemName: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
             Circle()
                 .fill(listener.isConnected ? Color.green : Color.gray.opacity(0.5))
                 .frame(width: 7, height: 7)
         }
+    }
+
+    // MARK: - 初回インポート表示
+
+    var importView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 44))
+                .foregroundStyle(.tertiary)
+            Text("ノートを取得中…")
+                .font(.headline)
+            ProgressView(value: importProgress ?? 0)
+                .frame(maxWidth: 220)
+            Text("\(Int((importProgress ?? 0) * 100))%")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("初回のみ全件を取得します")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Empty State
@@ -171,8 +198,8 @@ struct NoteListView: View {
                 .foregroundStyle(.tertiary)
             Button("再読み込み") {
                 Task {
+                    await runInitialImport()
                     await loadNotes()
-                    await prefetchRecentNotes()
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -182,34 +209,27 @@ struct NoteListView: View {
 
     // MARK: - データ取得
 
+    /// 一覧を SQLite から読み込む（高速・通信なし）
     private func loadNotes() async {
-        isLoading = true
-        defer { isLoading = false }
+        notes = await NoteStore.shared.listItems()
+    }
+
+    /// 初回の全件取得 → SQLite 保存 → last_seq 記録
+    private func runInitialImport() async {
+        isImporting    = true
+        importProgress = 0
+        defer { isImporting = false }
         do {
-            notes = try await CouchDBClient.shared.fetchAllNoteIDs()
+            // 取得中の変更も拾えるよう、開始前の seq を起点として記録する
+            let seq = try await CouchDBClient.shared.currentUpdateSeq()
+            let records = try await CouchDBClient.shared.fetchAllNotesFull { frac in
+                Task { @MainActor in importProgress = frac }
+            }
+            await NoteStore.shared.upsertMany(records)
+            await NoteStore.shared.setSyncValue("last_seq", seq)
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    // MARK: - プリフェッチ
-
-    private func prefetchRecentNotes() async {
-        let targets = notes.prefix(15).filter { !NoteCache.shared.has($0.id) }
-        guard !targets.isEmpty else { return }
-
-        isPrefetching = true
-        defer { isPrefetching = false }
-
-        for note in targets {
-            guard !Task.isCancelled else { break }
-            if let content = try? await CouchDBClient.shared.fetchNoteContent(id: note.id) {
-                NoteCache.shared.set(note.id, content: content)
-            }
-        }
-
-        // キャッシュが増えたので行プレビューを再評価させる
-        cacheGeneration += 1
     }
 }
 
@@ -217,17 +237,6 @@ struct NoteListView: View {
 
 struct NoteRowView: View {
     let note: NoteItem
-    /// プリフェッチでキャッシュが更新された際に SwiftUI へ再描画を促すためのトークン。
-    /// 値自体は使わないが、これが変わることで行ビューの body が再評価される。
-    var cacheGeneration: Int = 0
-
-    /// キャッシュ済みの本文から先頭部分をプレビュー用に取り出す（未キャッシュなら nil）。
-    /// キャッシュ参照のみなので追加の通信は発生しない。
-    private var preview: String? {
-        guard let content = NoteCache.shared.get(note.id) else { return nil }
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : String(trimmed.prefix(300))
-    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -250,7 +259,7 @@ struct NoteRowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if let preview {
+                if let preview = note.preview {
                     Text(preview)
                         .font(.footnote)
                         .foregroundStyle(.primary.opacity(0.6))
@@ -260,12 +269,6 @@ struct NoteRowView: View {
             }
 
             Spacer()
-
-            if NoteCache.shared.has(note.id) {
-                Image(systemName: "bolt.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
         }
         .padding(.vertical, 4)
     }

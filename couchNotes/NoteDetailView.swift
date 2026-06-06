@@ -185,7 +185,7 @@ struct NoteDetailView: View {
                 let changedId = notification.userInfo?["noteId"] as? String,
                 changedId == noteId
             else { return }
-            applyExternalChangeIfNeeded()
+            Task { await applyExternalChangeIfNeeded() }
         }
         .onChange(of: network.isOnline) { _, online in
             // オフライン→オンラインに復帰した時、未保存の変更があれば再試行
@@ -237,9 +237,9 @@ struct NoteDetailView: View {
 
     // MARK: - 外部変更の適用
 
-    private func applyExternalChange(fresh: String) {
-        guard fresh != (NoteCache.shared.get(noteId) ?? "") else { return }
-        NoteCache.shared.set(noteId, content: fresh)
+    private func applyExternalChange(record: NoteRecord) async {
+        await NoteStore.shared.upsert(record)
+        let fresh = record.content
 
         if !hasUnsavedChanges {
             content        = fresh
@@ -250,8 +250,9 @@ struct NoteDetailView: View {
         }
     }
 
-    private func applyExternalChangeIfNeeded() {
-        guard let fresh = NoteCache.shared.get(noteId) else { return }
+    private func applyExternalChangeIfNeeded() async {
+        // リスナーが既にストアを更新済みなので、そこから最新本文を読む
+        guard let fresh = await NoteStore.shared.content(noteId) else { return }
         if fresh == content && !hasUnsavedChanges { return }
 
         if !hasUnsavedChanges {
@@ -272,17 +273,17 @@ struct NoteDetailView: View {
             } catch { break }
             guard !Task.isCancelled else { break }
 
-            guard let fresh = try? await CouchDBClient.shared.fetchNoteContent(id: noteId) else { continue }
-            let cached = NoteCache.shared.get(noteId) ?? ""
-            guard fresh != cached else { continue }
-            applyExternalChange(fresh: fresh)
+            guard let record = try? await CouchDBClient.shared.fetchNoteRecord(id: noteId) else { continue }
+            let cached = await NoteStore.shared.content(noteId) ?? ""
+            guard record.content != cached else { continue }
+            await applyExternalChange(record: record)
         }
     }
 
     // MARK: - ロード
 
     func loadContent() async {
-        if let cached = NoteCache.shared.get(noteId) {
+        if let cached = await NoteStore.shared.content(noteId) {
             content        = cached
             editingContent = cached
             isLoading      = false
@@ -292,10 +293,14 @@ struct NoteDetailView: View {
 
         isLoading = true
         do {
-            let text = try await CouchDBClient.shared.fetchNoteContent(id: noteId)
-            NoteCache.shared.set(noteId, content: text)
-            content        = text
-            editingContent = text
+            if let record = try await CouchDBClient.shared.fetchNoteRecord(id: noteId) {
+                await NoteStore.shared.upsert(record)
+                content        = record.content
+                editingContent = record.content
+            } else {
+                content        = ""
+                editingContent = ""
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -306,9 +311,9 @@ struct NoteDetailView: View {
         isRefreshing = true
         defer { isRefreshing = false }
         do {
-            let fresh = try await CouchDBClient.shared.fetchNoteContent(id: noteId)
-            guard fresh != (NoteCache.shared.get(noteId) ?? "") else { return }
-            applyExternalChange(fresh: fresh)
+            guard let record = try await CouchDBClient.shared.fetchNoteRecord(id: noteId) else { return }
+            guard record.content != (await NoteStore.shared.content(noteId) ?? "") else { return }
+            await applyExternalChange(record: record)
         } catch { }
     }
 
@@ -324,7 +329,15 @@ struct NoteDetailView: View {
         saveStatus = .saving
         do {
             try await CouchDBClient.shared.saveNoteContent(id: noteId, text: editingContent)
-            NoteCache.shared.set(noteId, content: editingContent)
+            let record = NoteRecord(
+                id: noteId,
+                path: displayPath ?? noteId,
+                mtime: Date().timeIntervalSince1970 * 1000,
+                ctime: nil,
+                size: editingContent.utf8.count,
+                content: editingContent
+            )
+            await NoteStore.shared.upsert(record)
             content                 = editingContent
             hasUnsavedChanges       = false
             externalChangeAvailable = false
@@ -339,8 +352,8 @@ struct NoteDetailView: View {
             saveStatus = .unsaved
         } catch CouchDBError.httpError(409, _) {
             // 競合（_rev mismatch）: サーバの最新内容を取得し ExternalChangeBanner で解決をユーザに委ねる
-            if let fresh = try? await CouchDBClient.shared.fetchNoteContent(id: noteId) {
-                applyExternalChange(fresh: fresh)
+            if let record = try? await CouchDBClient.shared.fetchNoteRecord(id: noteId) {
+                await applyExternalChange(record: record)
             }
             saveStatus = .unsaved
         } catch {

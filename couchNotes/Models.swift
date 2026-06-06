@@ -56,11 +56,13 @@ struct NoteItem: Identifiable {
     let id: String        // CouchDB _id（小文字に正規化済み）
     let mtime: Double?    // CouchDB の mtime（ミリ秒）
     let path: String?     // 元のファイルパス（大文字小文字を保持）
+    let preview: String?  // 一覧用の本文プレビュー（SQLite から読み出し済み）
 
-    init(id: String, mtime: Double? = nil, path: String? = nil) {
-        self.id    = id
-        self.mtime = mtime
-        self.path  = path
+    init(id: String, mtime: Double? = nil, path: String? = nil, preview: String? = nil) {
+        self.id      = id
+        self.mtime   = mtime
+        self.path    = path
+        self.preview = preview
     }
 
     /// 最終更新日時（Date型）
@@ -98,6 +100,18 @@ struct NoteItem: Identifiable {
         let df = DateFormatter(); df.dateFormat = "yyyyMMdd"
         return id == "\(df.string(from: Date())).md"
     }
+}
+
+// MARK: - 永続化用レコード（本文込み）
+
+/// SQLite に保存する 1 ノート分の完全な情報。
+struct NoteRecord {
+    let id: String
+    let path: String?
+    let mtime: Double?
+    let ctime: Double?
+    let size: Int
+    let content: String
 }
 
 // MARK: - エラー

@@ -55,6 +55,108 @@ class CouchDBClient {
         return try await fetchFullText(from: note.children)
     }
 
+    /// ノートのメタ情報＋本文をまとめて取得（SQLite 保存用）
+    func fetchNoteRecord(id: String) async throws -> NoteRecord? {
+        guard let note = try await fetchNote(id: id) else { return nil }
+        let content = try await fetchFullText(from: note.children)
+        return NoteRecord(
+            id: id, path: note.path, mtime: note.mtime,
+            ctime: note.ctime, size: note.size, content: content
+        )
+    }
+
+    /// 全ノートを本文込みで一括取得（初回インポート用）
+    /// - _find で全メタ＋children を取得 → 全チャンクを `_bulk_get` でバッチ取得 → 本文を組み立て
+    /// - progress: 0...1 のダウンロード進捗（チャンク取得ベース）
+    func fetchAllNotesFull(
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> [NoteRecord] {
+        // 1) 全ノートのメタ + children
+        let query: [String: Any] = [
+            "selector": ["type": ["$eq": "plain"]],
+            "fields":   ["_id", "path", "mtime", "ctime", "size", "children", "deleted"],
+            "limit":    99999
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: query) else {
+            throw CouchDBError.decodingError
+        }
+        let (data, code) = try await httpRequest(path: "_find", method: "POST", body: body)
+        if code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let resp = try? JSONDecoder().decode(FullFindResponse.self, from: data) else {
+            throw CouchDBError.decodingError
+        }
+
+        let docs = resp.docs.filter {
+            $0._id.hasSuffix(".md") && !$0._id.hasPrefix("h:") && $0.deleted != true
+        }
+
+        // 2) 全チャンクIDを集約・重複排除（内容ハッシュなので自然に共有される）
+        var chunkIDset = Set<String>()
+        for d in docs { for c in (d.children ?? []) { chunkIDset.insert(c) } }
+        let allChunkIDs = Array(chunkIDset)
+
+        // 3) _bulk_get で 1000 件ずつバッチ取得
+        var chunkData: [String: String] = [:]
+        let batchSize = 1000
+        let total = max(allChunkIDs.count, 1)
+        var fetched = 0
+        var index = 0
+        while index < allChunkIDs.count {
+            let end   = min(index + batchSize, allChunkIDs.count)
+            let batch = Array(allChunkIDs[index..<end])
+            let map   = try await bulkGetChunks(ids: batch)
+            for (k, v) in map { chunkData[k] = v }
+            fetched += batch.count
+            progress?(Double(fetched) / Double(total))
+            index = end
+        }
+
+        // 4) 本文を組み立て
+        return docs.map { d in
+            let content = (d.children ?? []).map { chunkData[$0] ?? "" }.joined()
+            return NoteRecord(
+                id: d._id, path: d.path, mtime: d.mtime,
+                ctime: d.ctime, size: d.size ?? content.utf8.count, content: content
+            )
+        }
+    }
+
+    /// 現在の update_seq を取得（初回インポート後、_changes の起点に使う）
+    func currentUpdateSeq() async throws -> String {
+        let (data, code) = try await httpRequest(path: "")
+        if code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let s = obj["update_seq"] as? String { return s }
+            if let n = obj["update_seq"] as? Int    { return String(n) }
+        }
+        return "now"
+    }
+
+    private func bulkGetChunks(ids: [String]) async throws -> [String: String] {
+        let payload: [String: Any] = ["docs": ids.map { ["id": $0] }]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            throw CouchDBError.decodingError
+        }
+        let (data, code) = try await httpRequest(path: "_bulk_get", method: "POST", body: body)
+        if code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let resp = try? JSONDecoder().decode(BulkGetResponse.self, from: data) else {
+            throw CouchDBError.decodingError
+        }
+        var out: [String: String] = [:]
+        for r in resp.results {
+            for d in r.docs {
+                if let ok = d.ok { out[ok._id] = ok.data }
+            }
+        }
+        return out
+    }
+
     /// ノート本文を保存（存在しない場合は新規作成）
     func saveNoteContent(id: String, text: String) async throws {
         if let existing = try await fetchNote(id: id) {
@@ -206,4 +308,35 @@ class CouchDBClient {
             }
         }
     }
+}
+
+// MARK: - 一括取得用レスポンス
+
+/// _find（本文込みの全件取得）用
+private struct FullFindResponse: Decodable {
+    struct Doc: Decodable {
+        let _id: String
+        let path: String?
+        let mtime: Double?
+        let ctime: Double?
+        let size: Int?
+        let children: [String]?
+        let deleted: Bool?
+    }
+    let docs: [Doc]
+}
+
+/// _bulk_get（チャンク一括取得）用
+private struct BulkGetResponse: Decodable {
+    struct Result: Decodable {
+        struct DocWrap: Decodable {
+            struct OK: Decodable {
+                let _id: String
+                let data: String
+            }
+            let ok: OK?
+        }
+        let docs: [DocWrap]
+    }
+    let results: [Result]
 }

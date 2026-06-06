@@ -4,7 +4,10 @@ import UIKit
 // MARK: - 通知名
 
 extension Notification.Name {
+    /// 開いている詳細画面向け：特定ノートの本文が更新された。userInfo["noteId"]。
     static let noteDidChange = Notification.Name("couchNotes.noteDidChange")
+    /// 一覧向け：ストア（追加/更新/削除）に変化があった。
+    static let noteStoreDidChange = Notification.Name("couchNotes.noteStoreDidChange")
 }
 
 // MARK: - longpoll レスポンス
@@ -61,33 +64,46 @@ class ChangesListener: ObservableObject {
     /// feed=longpoll で変更を待ち受けるループ
     /// 変更があれば即返す。なければ30秒後に空で返り、すぐ次のリクエストを送る
     private func listenLoop() async {
-        var since = "now"
+        // 前回終了時の last_seq から再開（無ければ現在から）。
+        // これでアプリ停止中に起きた変更も取りこぼさない。
+        var since = await NoteStore.shared.syncValue("last_seq") ?? "now"
 
         while !Task.isCancelled {
             isConnected = true
             do {
                 let response = try await fetchChanges(since: since)
                 since = response.last_seq   // 次のリクエストはここから
+                await NoteStore.shared.setSyncValue("last_seq", since)
 
+                var didChangeStore = false
                 for event in response.results {
                     guard !Task.isCancelled else { return }
                     guard
                         event.id.hasSuffix(".md"),
-                        !event.id.hasPrefix("h:"),
-                        event.deleted != true
+                        !event.id.hasPrefix("h:")
                     else { continue }
 
-                    // キャッシュ済みのノートだけ再取得
-                    guard NoteCache.shared.has(event.id) else { continue }
+                    if event.deleted == true {
+                        // 他デバイスでの削除をストアにも反映
+                        await NoteStore.shared.delete(event.id)
+                        didChangeStore = true
+                        continue
+                    }
 
-                    if let fresh = try? await CouchDBClient.shared.fetchNoteContent(id: event.id) {
-                        NoteCache.shared.set(event.id, content: fresh)
+                    // 変更ノートの本文＋メタを取得してストアを更新
+                    if let record = try? await CouchDBClient.shared.fetchNoteRecord(id: event.id) {
+                        await NoteStore.shared.upsert(record)
+                        didChangeStore = true
                         NotificationCenter.default.post(
                             name: .noteDidChange,
                             object: nil,
                             userInfo: ["noteId": event.id]
                         )
                     }
+                }
+
+                if didChangeStore {
+                    NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
                 }
             } catch is CancellationError {
                 break
