@@ -24,25 +24,25 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		0DC573702FC66920009AF4DE /* couchMemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = couchMemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		0DC573812FC66921009AF4DE /* couchMemoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = couchMemoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		0DC5738B2FC66921009AF4DE /* couchMemoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = couchMemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DC573702FC66920009AF4DE /* couchNotes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = couchNotes.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DC573812FC66921009AF4DE /* couchNotesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = couchNotesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DC5738B2FC66921009AF4DE /* couchNotesUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = couchNotesUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		0DC573722FC66920009AF4DE /* couchMemo */ = {
+		0DC573722FC66920009AF4DE /* couchNotes */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = couchMemo;
+			path = couchNotes;
 			sourceTree = "<group>";
 		};
-		0DC573842FC66921009AF4DE /* couchMemoTests */ = {
+		0DC573842FC66921009AF4DE /* couchNotesTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = couchMemoTests;
+			path = couchNotesTests;
 			sourceTree = "<group>";
 		};
-		0DC5738E2FC66921009AF4DE /* couchMemoUITests */ = {
+		0DC5738E2FC66921009AF4DE /* couchNotesUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = couchMemoUITests;
+			path = couchNotesUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,9 +75,9 @@
 		0DC573672FC66920009AF4DE = {
 			isa = PBXGroup;
 			children = (
-				0DC573722FC66920009AF4DE /* couchMemo */,
-				0DC573842FC66921009AF4DE /* couchMemoTests */,
-				0DC5738E2FC66921009AF4DE /* couchMemoUITests */,
+				0DC573722FC66920009AF4DE /* couchNotes */,
+				0DC573842FC66921009AF4DE /* couchNotesTests */,
+				0DC5738E2FC66921009AF4DE /* couchNotesUITests */,
 				0DC573712FC66920009AF4DE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -85,9 +85,9 @@
 		0DC573712FC66920009AF4DE /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				0DC573702FC66920009AF4DE /* couchMemo.app */,
-				0DC573812FC66921009AF4DE /* couchMemoTests.xctest */,
-				0DC5738B2FC66921009AF4DE /* couchMemoUITests.xctest */,
+				0DC573702FC66920009AF4DE /* couchNotes.app */,
+				0DC573812FC66921009AF4DE /* couchNotesTests.xctest */,
+				0DC5738B2FC66921009AF4DE /* couchNotesUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		0DC5736F2FC66920009AF4DE /* couchMemo */ = {
+		0DC5736F2FC66920009AF4DE /* couchNotes */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0DC573952FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemo" */;
+			buildConfigurationList = 0DC573952FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotes" */;
 			buildPhases = (
 				0DC5736C2FC66920009AF4DE /* Sources */,
 				0DC5736D2FC66920009AF4DE /* Frameworks */,
@@ -108,18 +108,18 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				0DC573722FC66920009AF4DE /* couchMemo */,
+				0DC573722FC66920009AF4DE /* couchNotes */,
 			);
-			name = couchMemo;
+			name = couchNotes;
 			packageProductDependencies = (
 			);
 			productName = couchMemo;
-			productReference = 0DC573702FC66920009AF4DE /* couchMemo.app */;
+			productReference = 0DC573702FC66920009AF4DE /* couchNotes.app */;
 			productType = "com.apple.product-type.application";
 		};
-		0DC573802FC66921009AF4DE /* couchMemoTests */ = {
+		0DC573802FC66921009AF4DE /* couchNotesTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0DC573982FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemoTests" */;
+			buildConfigurationList = 0DC573982FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotesTests" */;
 			buildPhases = (
 				0DC5737D2FC66921009AF4DE /* Sources */,
 				0DC5737E2FC66921009AF4DE /* Frameworks */,
@@ -131,18 +131,18 @@
 				0DC573832FC66921009AF4DE /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				0DC573842FC66921009AF4DE /* couchMemoTests */,
+				0DC573842FC66921009AF4DE /* couchNotesTests */,
 			);
-			name = couchMemoTests;
+			name = couchNotesTests;
 			packageProductDependencies = (
 			);
 			productName = couchMemoTests;
-			productReference = 0DC573812FC66921009AF4DE /* couchMemoTests.xctest */;
+			productReference = 0DC573812FC66921009AF4DE /* couchNotesTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		0DC5738A2FC66921009AF4DE /* couchMemoUITests */ = {
+		0DC5738A2FC66921009AF4DE /* couchNotesUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0DC5739B2FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemoUITests" */;
+			buildConfigurationList = 0DC5739B2FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotesUITests" */;
 			buildPhases = (
 				0DC573872FC66921009AF4DE /* Sources */,
 				0DC573882FC66921009AF4DE /* Frameworks */,
@@ -154,13 +154,13 @@
 				0DC5738D2FC66921009AF4DE /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				0DC5738E2FC66921009AF4DE /* couchMemoUITests */,
+				0DC5738E2FC66921009AF4DE /* couchNotesUITests */,
 			);
-			name = couchMemoUITests;
+			name = couchNotesUITests;
 			packageProductDependencies = (
 			);
 			productName = couchMemoUITests;
-			productReference = 0DC5738B2FC66921009AF4DE /* couchMemoUITests.xctest */;
+			productReference = 0DC5738B2FC66921009AF4DE /* couchNotesUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 0DC5736B2FC66920009AF4DE /* Build configuration list for PBXProject "couchMemo" */;
+			buildConfigurationList = 0DC5736B2FC66920009AF4DE /* Build configuration list for PBXProject "couchNotes" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +200,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				0DC5736F2FC66920009AF4DE /* couchMemo */,
-				0DC573802FC66921009AF4DE /* couchMemoTests */,
-				0DC5738A2FC66921009AF4DE /* couchMemoUITests */,
+				0DC5736F2FC66920009AF4DE /* couchNotes */,
+				0DC573802FC66921009AF4DE /* couchNotesTests */,
+				0DC5738A2FC66921009AF4DE /* couchNotesUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		0DC573832FC66921009AF4DE /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 0DC5736F2FC66920009AF4DE /* couchMemo */;
+			target = 0DC5736F2FC66920009AF4DE /* couchNotes */;
 			targetProxy = 0DC573822FC66921009AF4DE /* PBXContainerItemProxy */;
 		};
 		0DC5738D2FC66921009AF4DE /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 0DC5736F2FC66920009AF4DE /* couchMemo */;
+			target = 0DC5736F2FC66920009AF4DE /* couchNotes */;
 			targetProxy = 0DC5738C2FC66921009AF4DE /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -302,6 +302,7 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_ENTITLEMENTS = couchNotes/couchNotes.entitlements;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -363,6 +364,7 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_ENTITLEMENTS = couchNotes/couchNotes.entitlements;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
@@ -388,10 +390,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = couchMemo/couchMemo.entitlements;
+				CODE_SIGN_ENTITLEMENTS = couchNotes/couchNotes.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"couchMemo/Preview Content\"";
+				DEVELOPMENT_ASSET_PATHS = "\"couchNotes/Preview Content\"";
 				DEVELOPMENT_TEAM = H8BCFLBJVR;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -411,7 +413,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotes;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -427,10 +429,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = couchMemo/couchMemo.entitlements;
+				CODE_SIGN_ENTITLEMENTS = couchNotes/couchNotes.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"couchMemo/Preview Content\"";
+				DEVELOPMENT_ASSET_PATHS = "\"couchNotes/Preview Content\"";
 				DEVELOPMENT_TEAM = H8BCFLBJVR;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -450,7 +452,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotes;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -472,14 +474,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemoTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotesTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/couchMemo.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/couchMemo";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/couchNotes.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/couchNotes";
 				XROS_DEPLOYMENT_TARGET = 2.2;
 			};
 			name = Debug;
@@ -495,14 +497,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemoTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotesTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/couchMemo.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/couchMemo";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/couchNotes.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/couchNotes";
 				XROS_DEPLOYMENT_TARGET = 2.2;
 			};
 			name = Release;
@@ -517,14 +519,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemoUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotesUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_TARGET_NAME = couchMemo;
+				TEST_TARGET_NAME = couchNotes;
 				XROS_DEPLOYMENT_TARGET = 2.2;
 			};
 			name = Debug;
@@ -539,14 +541,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				MACOSX_DEPLOYMENT_TARGET = 14.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchMemoUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.choiyaki.couchNotesUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_TARGET_NAME = couchMemo;
+				TEST_TARGET_NAME = couchNotes;
 				XROS_DEPLOYMENT_TARGET = 2.2;
 			};
 			name = Release;
@@ -554,7 +556,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		0DC5736B2FC66920009AF4DE /* Build configuration list for PBXProject "couchMemo" */ = {
+		0DC5736B2FC66920009AF4DE /* Build configuration list for PBXProject "couchNotes" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0DC573932FC66921009AF4DE /* Debug */,
@@ -563,7 +565,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		0DC573952FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemo" */ = {
+		0DC573952FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotes" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0DC573962FC66921009AF4DE /* Debug */,
@@ -572,7 +574,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		0DC573982FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemoTests" */ = {
+		0DC573982FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotesTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0DC573992FC66921009AF4DE /* Debug */,
@@ -581,7 +583,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		0DC5739B2FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchMemoUITests" */ = {
+		0DC5739B2FC66921009AF4DE /* Build configuration list for PBXNativeTarget "couchNotesUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0DC5739C2FC66921009AF4DE /* Debug */,
