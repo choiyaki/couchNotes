@@ -110,6 +110,14 @@ struct NoteListView: View {
                     onGoToList: {
                         isClosureNavigation = true
                         path = []
+                    },
+                    onMoved: { newId in
+                        // 移動後：ナビゲーション先を新IDへ差し替え、一覧も更新
+                        isClosureNavigation = true
+                        if path.isEmpty { path = [newId] }
+                        else { path[path.count - 1] = newId }
+                        historyForward = []
+                        Task { await loadNotes() }
                     }
                 )
             }

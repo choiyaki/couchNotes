@@ -223,6 +223,24 @@ class CouchDBClient {
         }
     }
 
+    /// ノートを別フォルダへ移動する。_id ＝ パスのため「新IDで作成＋旧ID削除」で行う。
+    /// 本文チャンク（children）は共有なので再利用する。
+    /// - toId: 新しい _id（小文字パス）, newPath: 表示用パス（大小保持）
+    func moveNote(fromId: String, toId: String, newPath: String) async throws {
+        guard toId != fromId else { return }
+        // 移動先に同名ノートがある場合は上書きを避けて中止
+        if try await fetchNote(id: toId) != nil {
+            throw CouchDBError.httpError(409, "移動先に同名のノートが存在します")
+        }
+        guard let old = try await fetchNote(id: fromId) else {
+            throw CouchDBError.httpError(404, "元のノートが見つかりません")
+        }
+        var moved = LiveSyncNote(id: toId, children: old.children, size: old.size, ctime: old.ctime)
+        moved.path = newPath
+        try await putNote(moved)
+        try await deleteNote(id: fromId)
+    }
+
     /// _changes longpoll 用の URLRequest を生成
     /// - Parameter since: "now" または前回レスポンスの last_seq
     func makeChangesURLRequest(since: String = "now") throws -> URLRequest {

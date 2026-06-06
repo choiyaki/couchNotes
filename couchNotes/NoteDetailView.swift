@@ -48,6 +48,7 @@ struct NoteDetailView: View {
     var onGoBack:     (() -> Void)? = nil
     var onGoForward:  (() -> Void)? = nil
     var onGoToList:   (() -> Void)? = nil
+    var onMoved:      ((String) -> Void)? = nil   // 移動後の新しい noteId を親へ通知
 
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
@@ -71,6 +72,21 @@ struct NoteDetailView: View {
 
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
+
+    // フォルダ移動
+    @State private var showFolderPicker = false
+
+    /// 現在のフォルダ（正規化キー。ルートは nil）
+    private var currentFolderKey: String? {
+        let comps = noteId.components(separatedBy: "/")
+        return comps.count <= 1 ? nil : comps.dropLast().joined(separator: "/")
+    }
+    /// フッター表示用のフォルダ名（ルートは「ルート」）
+    private var currentFolderLabel: String {
+        let source = displayPath ?? noteId
+        let comps = source.components(separatedBy: "/")
+        return comps.count <= 1 ? "ルート" : comps.dropLast().joined(separator: "/")
+    }
 
     // MARK: - ナビタイトル
 
@@ -144,6 +160,12 @@ struct NoteDetailView: View {
                         }
                     }
             }
+
+            if !isLoading {
+                EditorFooterBar(folderLabel: currentFolderLabel) {
+                    showFolderPicker = true
+                }
+            }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)   // SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止
         .animation(.easeInOut(duration: 0.25), value: externalChangeAvailable)
@@ -181,6 +203,14 @@ struct NoteDetailView: View {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPickerView(
+                folders: SyncScope.normalizedFolders,
+                current: currentFolderKey
+            ) { folder in
+                Task { await moveNote(to: folder) }
+            }
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .noteDidChange)
@@ -322,6 +352,44 @@ struct NoteDetailView: View {
         backlinks = await NoteStore.shared.backlinks(for: noteId)
     }
 
+    // MARK: - フォルダ移動
+
+    /// 現在のノートを選んだフォルダ（nil=ルート）へ移動する。
+    private func moveNote(to folder: String?) async {
+        showFolderPicker = false
+        guard folder != currentFolderKey else { return }
+
+        // 未保存があれば先に保存（保存できなければ移動しない）
+        if hasUnsavedChanges {
+            await save()
+            guard !hasUnsavedChanges else {
+                errorMessage = "保存できていないため移動できません。通信状況を確認してください。"
+                return
+            }
+        }
+
+        let filename        = noteId.components(separatedBy: "/").last ?? noteId
+        let displayFilename = (displayPath ?? noteId).components(separatedBy: "/").last ?? filename
+        let newId   = folder.map { "\($0)/\(filename)" }        ?? filename
+        let newPath = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
+
+        do {
+            try await CouchDBClient.shared.moveNote(fromId: noteId, toId: newId, newPath: newPath)
+            let record = NoteRecord(
+                id: newId, path: newPath,
+                mtime: Date().timeIntervalSince1970 * 1000,
+                ctime: nil, size: content.utf8.count, content: content
+            )
+            await NoteStore.shared.upsert(record)
+            await NoteStore.shared.delete(noteId)
+            UserDefaults.standard.set(newId, forKey: "lastOpenedNoteId")
+            NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+            onMoved?(newId)
+        } catch {
+            errorMessage = "移動に失敗しました\n\(error.localizedDescription)"
+        }
+    }
+
     private func refreshInBackground() async {
         isRefreshing = true
         defer { isRefreshing = false }
@@ -410,5 +478,79 @@ struct ExternalChangeBanner: View {
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.1))
         .overlay(Divider(), alignment: .bottom)
+    }
+}
+
+// MARK: - エディタ下部フッター
+
+struct EditorFooterBar: View {
+    let folderLabel: String
+    let onFolderTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onFolderTap) {
+                HStack(spacing: 5) {
+                    Image(systemName: "folder")
+                    Text(folderLabel).lineLimit(1)
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .overlay(Divider(), alignment: .top)
+    }
+}
+
+// MARK: - フォルダ選択
+
+struct FolderPickerView: View {
+    let folders: [String]        // 正規化済み同期フォルダ
+    let current: String?         // 現在のフォルダ（ルートは nil）
+    let onSelect: (String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                row(label: "ルート", systemImage: "house", isSelected: current == nil) {
+                    onSelect(nil)
+                }
+                ForEach(folders, id: \.self) { folder in
+                    row(label: folder, systemImage: "folder", isSelected: current == folder) {
+                        onSelect(folder)
+                    }
+                }
+            }
+            .navigationTitle("フォルダを選択")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func row(label: String, systemImage: String,
+                     isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.secondary)
+                Text(label)
+                    .foregroundStyle(.primary)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.tint)
+                }
+            }
+        }
     }
 }
