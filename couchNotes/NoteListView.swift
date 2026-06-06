@@ -9,6 +9,7 @@ struct NoteListView: View {
     @State private var errorMessage: String? = nil
     @State private var showSettings      = false
     @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
+    @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
 
     // 初回インポート（全件取得）の進捗
     @State private var isImporting     = false
@@ -30,10 +31,33 @@ struct NoteListView: View {
                         NavigationLink(value: note.id) {
                             NoteRowView(note: note)
                         }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                noteToDelete = note
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
                     }
                     .refreshable {
                         ChangesListener.shared.start()
                         await loadNotes()
+                    }
+                    .confirmationDialog(
+                        "「\(noteToDelete?.shortTitle ?? "")」を削除しますか？",
+                        isPresented: Binding(
+                            get: { noteToDelete != nil },
+                            set: { if !$0 { noteToDelete = nil } }
+                        ),
+                        titleVisibility: .visible,
+                        presenting: noteToDelete
+                    ) { note in
+                        Button("削除", role: .destructive) {
+                            Task { await deleteNote(note) }
+                        }
+                        Button("キャンセル", role: .cancel) {}
+                    } message: { _ in
+                        Text("この操作は元に戻せません。")
                     }
                 }
             }
@@ -212,6 +236,18 @@ struct NoteListView: View {
     /// 一覧を SQLite から読み込む（高速・通信なし）
     private func loadNotes() async {
         notes = await NoteStore.shared.listItems()
+    }
+
+    /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）
+    private func deleteNote(_ note: NoteItem) async {
+        do {
+            try await CouchDBClient.shared.deleteNote(id: note.id)
+            await NoteStore.shared.delete(note.id)
+            notes.removeAll { $0.id == note.id }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        noteToDelete = nil
     }
 
     /// 初回の全件取得 → SQLite 保存 → last_seq 記録

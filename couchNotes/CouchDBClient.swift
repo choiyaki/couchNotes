@@ -169,6 +169,20 @@ class CouchDBClient {
         }
     }
 
+    /// ノートを削除（CouchDB ネイティブ削除＝トゥームストーン化）
+    /// 最新の _rev を取得してから DELETE する。既に存在しなければ何もしない。
+    func deleteNote(id: String) async throws {
+        guard let note = try await fetchNote(id: id) else { return }
+        guard let rev = note._rev else { throw CouchDBError.decodingError }
+        let (data, code) = try await httpRequest(
+            path: id, method: "DELETE", headers: ["If-Match": rev]
+        )
+        // 200(ok) / 202(accepted) を成功とみなす
+        if code != 200 && code != 202 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
     /// _changes longpoll 用の URLRequest を生成
     /// - Parameter since: "now" または前回レスポンスの last_seq
     func makeChangesURLRequest(since: String = "now") throws -> URLRequest {
@@ -244,7 +258,8 @@ class CouchDBClient {
     private func httpRequest(
         path: String,
         method: String = "GET",
-        body: Data? = nil
+        body: Data? = nil,
+        headers: [String: String]? = nil
     ) async throws -> (Data, Int) {
         let (base, auth) = try makeBase()
         let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
@@ -258,6 +273,9 @@ class CouchDBClient {
         if let body {
             req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        for (key, value) in headers ?? [:] {
+            req.setValue(value, forHTTPHeaderField: key)
         }
 
         do {
