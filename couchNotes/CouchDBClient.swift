@@ -241,6 +241,19 @@ class CouchDBClient {
         try await deleteNote(id: fromId)
     }
 
+    /// パスを明示して新規ノートを作成する（_id は小文字、path は大小保持）。
+    /// 既に同 _id がある場合は中止。
+    func createNote(id: String, path: String, text: String) async throws {
+        if try await fetchNote(id: id) != nil {
+            throw CouchDBError.httpError(409, "同名のノートが既に存在します")
+        }
+        let (chunkIDs, chunks) = makeChunks(text: text)
+        try await putChunks(chunks)
+        var note = LiveSyncNote(id: id, children: chunkIDs, size: text.utf8.count)
+        note.path = path
+        try await putNote(note)
+    }
+
     /// _changes longpoll 用の URLRequest を生成
     /// - Parameter since: "now" または前回レスポンスの last_seq
     func makeChangesURLRequest(since: String = "now") throws -> URLRequest {

@@ -118,6 +118,13 @@ struct NoteListView: View {
                         else { path[path.count - 1] = newId }
                         historyForward = []
                         Task { await loadNotes() }
+                    },
+                    onCreated: { newId in
+                        // 新規作成：そのノートを開く（履歴に積む）
+                        isClosureNavigation = true
+                        historyForward = []
+                        path.append(newId)
+                        Task { await loadNotes() }
                     }
                 )
             }

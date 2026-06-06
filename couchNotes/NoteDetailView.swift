@@ -49,6 +49,7 @@ struct NoteDetailView: View {
     var onGoForward:  (() -> Void)? = nil
     var onGoToList:   (() -> Void)? = nil
     var onMoved:      ((String) -> Void)? = nil   // 移動後の新しい noteId を親へ通知
+    var onCreated:    ((String) -> Void)? = nil   // 新規作成したノートを開くため親へ通知
 
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
@@ -73,8 +74,9 @@ struct NoteDetailView: View {
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
 
-    // フォルダ移動
+    // フォルダ移動・新規作成
     @State private var showFolderPicker = false
+    @State private var showNewNote      = false
 
     /// 現在のフォルダ（正規化キー。ルートは nil）
     private var currentFolderKey: String? {
@@ -162,9 +164,11 @@ struct NoteDetailView: View {
             }
 
             if !isLoading {
-                EditorFooterBar(folderLabel: currentFolderLabel) {
-                    showFolderPicker = true
-                }
+                EditorFooterBar(
+                    folderLabel: currentFolderLabel,
+                    onFolderTap: { showFolderPicker = true },
+                    onNewTap:    { showNewNote = true }
+                )
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)   // SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止
@@ -210,6 +214,14 @@ struct NoteDetailView: View {
                 current: currentFolderKey
             ) { folder in
                 Task { await moveNote(to: folder) }
+            }
+        }
+        .sheet(isPresented: $showNewNote) {
+            NewNoteView(
+                folders: SyncScope.normalizedFolders,
+                initialFolder: currentFolderKey
+            ) { title, folder in
+                Task { await createNote(title: title, folder: folder) }
             }
         }
         .onReceive(
@@ -390,6 +402,35 @@ struct NoteDetailView: View {
         }
     }
 
+    /// 選んだフォルダ（nil=ルート）にタイトルで新規ノートを作成して開く。
+    private func createNote(title: String, folder: String?) async {
+        showNewNote = false
+        // フォルダ誤生成を防ぐため "/" は除去
+        let safe = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+        guard !safe.isEmpty else { return }
+
+        let displayFilename = safe + ".md"
+        let idFilename      = displayFilename.lowercased()
+        let newId   = folder.map { "\($0)/\(idFilename)" }      ?? idFilename
+        let newPath = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
+
+        do {
+            try await CouchDBClient.shared.createNote(id: newId, path: newPath, text: "")
+            let record = NoteRecord(
+                id: newId, path: newPath,
+                mtime: Date().timeIntervalSince1970 * 1000,
+                ctime: nil, size: 0, content: ""
+            )
+            await NoteStore.shared.upsert(record)
+            UserDefaults.standard.set(newId, forKey: "lastOpenedNoteId")
+            NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+            onCreated?(newId)
+        } catch {
+            errorMessage = "作成に失敗しました\n\(error.localizedDescription)"
+        }
+    }
+
     private func refreshInBackground() async {
         isRefreshing = true
         defer { isRefreshing = false }
@@ -486,6 +527,7 @@ struct ExternalChangeBanner: View {
 struct EditorFooterBar: View {
     let folderLabel: String
     let onFolderTap: () -> Void
+    let onNewTap: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -498,12 +540,74 @@ struct EditorFooterBar: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+
             Spacer()
+
+            Button(action: onNewTap) {
+                Image(systemName: "square.and.pencil")
+                    .font(.body)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
         .overlay(Divider(), alignment: .top)
+    }
+}
+
+// MARK: - 新規ノート作成
+
+struct NewNoteView: View {
+    let folders: [String]          // 正規化済み同期フォルダ
+    let initialFolder: String?     // 初期選択フォルダ（ルートは nil）
+    let onCreate: (_ title: String, _ folder: String?) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var folder: String?
+
+    init(folders: [String], initialFolder: String?,
+         onCreate: @escaping (_ title: String, _ folder: String?) -> Void) {
+        self.folders = folders
+        self.initialFolder = initialFolder
+        self.onCreate = onCreate
+        _folder = State(initialValue: initialFolder)
+    }
+
+    private var canCreate: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("タイトル") {
+                    TextField("ノートのタイトル", text: $title)
+                        .autocorrectionDisabled()
+                }
+                Section("フォルダ") {
+                    Picker("フォルダ", selection: $folder) {
+                        Text("ルート").tag(Optional<String>.none)
+                        ForEach(folders, id: \.self) { f in
+                            Text(f).tag(Optional(f))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("新規ノート")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("作成") { onCreate(title, folder) }
+                        .disabled(!canCreate)
+                }
+            }
+        }
     }
 }
 
