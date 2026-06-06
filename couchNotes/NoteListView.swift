@@ -15,7 +15,6 @@ struct NoteListView: View {
     @State private var searchText    = ""
     @State private var searchResults: [NoteItem] = []
     @State private var searchTask: Task<Void, Never>? = nil
-    @State private var noTitleMatch  = false   // タイトル一致が無い → 「＋」を出す
     @State private var showNewNote   = false
 
     private var trimmedSearch: String {
@@ -27,9 +26,11 @@ struct NoteListView: View {
         trimmedSearch.isEmpty ? notes : searchResults
     }
 
-    /// 検索語にタイトル一致が無い時、新規作成「＋」を出す
-    private var showCreateFromSearch: Bool {
-        !trimmedSearch.isEmpty && noTitleMatch
+    /// 同じタイトルのノートが無ければ作成可能（「＋」を有効化）。空入力時は不可。
+    private var canCreateFromSearch: Bool {
+        let q = trimmedSearch.lowercased()
+        guard !q.isEmpty else { return false }
+        return !notes.contains { $0.shortTitle.lowercased() == q }
     }
 
     // 初回インポート（全件取得）の進捗
@@ -311,7 +312,6 @@ struct NoteListView: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             searchResults = []
-            noTitleMatch  = false
             return
         }
         searchTask = Task {
@@ -320,8 +320,6 @@ struct NoteListView: View {
             let results = await NoteStore.shared.search(trimmed)
             guard !Task.isCancelled else { return }
             searchResults = results
-            let q = trimmed.lowercased()
-            noTitleMatch = !results.contains { $0.shortTitle.lowercased().contains(q) }
         }
     }
 
@@ -374,20 +372,19 @@ struct NoteListView: View {
             .background(Color(.systemGray6))
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            if showCreateFromSearch {
-                Button {
-                    showNewNote = true
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                }
-                .transition(.scale.combined(with: .opacity))
+            Button {
+                showNewNote = true
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(canCreateFromSearch ? Color.accentColor : Color.secondary.opacity(0.35))
             }
+            .disabled(!canCreateFromSearch)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 4)
-        .animation(.easeInOut(duration: 0.15), value: showCreateFromSearch)
+        .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
     }
 
     /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）
