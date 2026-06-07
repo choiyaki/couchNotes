@@ -250,7 +250,11 @@ actor NoteStore {
             } else {
                 repoPath = path
             }
-            result.append((repoPath, content))
+            // Netlify 等はファイル名の # / ? を許可しないため全角に置換（公開ファイル名のみ）
+            let safePath = repoPath
+                .replacingOccurrences(of: "#", with: "＃")
+                .replacingOccurrences(of: "?", with: "？")
+            result.append((safePath, content))
         }
         return result
     }
