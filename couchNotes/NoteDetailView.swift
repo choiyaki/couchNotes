@@ -391,7 +391,7 @@ struct NoteDetailView: View {
     /// 現在のノートを選んだフォルダ（nil=ルート）へ移動する。
     private func moveNote(to folder: String?) async {
         showFolderPicker = false
-        guard folder != currentFolderKey else { return }
+        guard folder?.lowercased() != currentFolderKey else { return }
 
         // 未保存があれば先に保存（保存できなければ移動しない）
         if hasUnsavedChanges {
@@ -404,8 +404,9 @@ struct NoteDetailView: View {
 
         let filename        = noteId.components(separatedBy: "/").last ?? noteId
         let displayFilename = (displayPath ?? noteId).components(separatedBy: "/").last ?? filename
-        let newId   = folder.map { "\($0)/\(filename)" }        ?? filename
-        let newPath = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
+        // _id はフォルダも小文字、path はフォルダ原文（Obsidian の実フォルダ名）
+        let newId   = folder.map { "\($0.lowercased())/\(filename)" } ?? filename
+        let newPath = folder.map { "\($0)/\(displayFilename)" }       ?? displayFilename
 
         do {
             try await CouchDBClient.shared.moveNote(fromId: noteId, toId: newId, newPath: newPath)
@@ -673,7 +674,7 @@ struct FolderPickerView: View {
                     onSelect(nil)
                 }
                 ForEach(folders, id: \.self) { folder in
-                    row(label: folder, systemImage: "folder", isSelected: current == folder) {
+                    row(label: folder, systemImage: "folder", isSelected: current == folder.lowercased()) {
                         onSelect(folder)
                     }
                 }

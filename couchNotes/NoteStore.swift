@@ -280,7 +280,8 @@ actor NoteStore {
     /// 同期対象から外れたフォルダ配下の行をローカルから物理削除する（サーバには影響なし）。
     func removeFolder(_ prefix: String) {
         guard !prefix.isEmpty else { return }
-        let pattern = prefix + "/%"
+        // 保存されている id は小文字なので小文字で照合
+        let pattern = prefix.lowercased() + "/%"
         for table in ["notes", "note_fts"] {
             if let stmt = prepare("DELETE FROM \(table) WHERE id LIKE ?;") {
                 sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)

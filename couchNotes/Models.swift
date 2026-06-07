@@ -129,8 +129,9 @@ enum NoteNaming {
         guard !safe.isEmpty else { return nil }
         let displayFilename = safe + ".md"
         let idFilename      = displayFilename.lowercased()
-        let id   = folder.map { "\($0)/\(idFilename)" }      ?? idFilename
-        let path = folder.map { "\($0)/\(displayFilename)" } ?? displayFilename
+        // _id はフォルダも小文字、path はフォルダ原文（Obsidian の実フォルダ名）
+        let id   = folder.map { "\($0.lowercased())/\(idFilename)" } ?? idFilename
+        let path = folder.map { "\($0)/\(displayFilename)" }         ?? displayFilename
         return (id, path)
     }
 }

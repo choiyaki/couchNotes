@@ -96,8 +96,9 @@ class CouchDBClient {
             ors.append(["_id": ["$regex": "^[^/]+$"]])
         }
         for f in folders where !f.isEmpty {
-            // "<folder>/..." の範囲（"0" は "/" の次の文字）。子フォルダも含む。
-            ors.append(["_id": ["$gte": "\(f)/", "$lt": "\(f)0"]])
+            // _id は小文字なので小文字化して範囲指定（"0" は "/" の次の文字）。子フォルダも含む。
+            let lf = f.lowercased()
+            ors.append(["_id": ["$gte": "\(lf)/", "$lt": "\(lf)0"]])
         }
         var selector: [String: Any] = ["type": ["$eq": "plain"]]
         if !ors.isEmpty { selector["$or"] = ors }
