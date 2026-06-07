@@ -31,24 +31,29 @@ struct GitHubBackupClient {
         var entries: [[String: Any]] = []
         var baseTree: String? = nil
 
-        if head.exists, let headSha = head.sha,
-           let baseTreeSha = try await commitTreeSha(headSha),
-           let repoBlobs = try await treeBlobs(baseTreeSha) {
-            // 差分モード：git blob SHA を突き合わせ、変更・追加・削除だけ送る
+        if head.exists, let headSha = head.sha, let baseTreeSha = try await commitTreeSha(headSha) {
+            // 既存コミットあり：base_tree の上に変更を載せる（非mdファイルは常に保持）
             baseTree = baseTreeSha
-            var currentPaths = Set<String>()
-            for f in files {
-                currentPaths.insert(f.path)
-                if repoBlobs[f.path] != Self.gitBlobSHA(f.content) {
-                    entries.append(["path": f.path, "mode": "100644", "type": "blob", "content": f.content])
+            if let repoBlobs = try await treeBlobs(baseTreeSha) {
+                // 差分：git blob SHA を突き合わせ、変更・追加（content）＋ 削除は .md のみ
+                var currentPaths = Set<String>()
+                for f in files {
+                    currentPaths.insert(f.path)
+                    if repoBlobs[f.path] != Self.gitBlobSHA(f.content) {
+                        entries.append(["path": f.path, "mode": "100644", "type": "blob", "content": f.content])
+                    }
                 }
+                for path in repoBlobs.keys where path.hasSuffix(".md") && !currentPaths.contains(path) {
+                    entries.append(["path": path, "mode": "100644", "type": "blob", "sha": NSNull()])
+                }
+                if entries.isEmpty { return 0 }   // 変更なし
+            } else {
+                // ツリー取得不可（巨大で truncated 等）：削除はせず、全ノートを base_tree に上書き
+                guard !files.isEmpty else { return 0 }
+                entries = files.map { ["path": $0.path, "mode": "100644", "type": "blob", "content": $0.content] }
             }
-            for path in repoBlobs.keys where !currentPaths.contains(path) {
-                entries.append(["path": path, "mode": "100644", "type": "blob", "sha": NSNull()])
-            }
-            if entries.isEmpty { return 0 }   // 変更なし
         } else {
-            // 全件スナップショット（空リポジトリ／ツリー取得不可時のフォールバック）
+            // 空リポジトリ：ノートのみのスナップショット
             guard !files.isEmpty else {
                 throw GitHubBackupError(message: "バックアップ対象のノートがありません。")
             }
