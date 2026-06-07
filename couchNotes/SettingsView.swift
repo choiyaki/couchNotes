@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 設定トップ（項目リスト）
 
@@ -33,6 +34,11 @@ struct SettingsView: View {
                         MaintenanceSettingsView()
                     } label: {
                         Label("メンテナンス", systemImage: "wrench.and.screwdriver")
+                    }
+                    NavigationLink {
+                        URLSchemeHelpView()
+                    } label: {
+                        Label("URL スキーム", systemImage: "link")
                     }
                 }
             }
@@ -316,6 +322,78 @@ struct MaintenanceSettingsView: View {
                 // 失敗時はそのまま（再実行可能）
             }
             migrating = false
+        }
+    }
+}
+
+// MARK: - URL スキームの解説
+
+struct URLSchemeHelpView: View {
+    @State private var copied = false
+
+    var body: some View {
+        Form {
+            Section(footer: Text("他アプリ・iOS ショートカット・Web リンクから couchnotes:// で開けます。content / text は URL エンコードが必要です（ショートカットの「URL を開く」推奨）。")) {
+                LabeledContent("スキーム", value: "couchnotes://")
+            }
+
+            action(
+                title: "open（開く）",
+                desc: "既存ノートを開きます。見つからなければエラー表示。",
+                url: "couchnotes://open?path=Publish/会議メモ"
+            )
+            action(
+                title: "new（新規作成）",
+                desc: "無ければ作成、あれば開いて content を末尾に追記。常に開きます。",
+                url: "couchnotes://new?path=Inbox/買い物&content=牛乳"
+            )
+            action(
+                title: "append（追記）",
+                desc: "常に作成 or 追記。改行を入れて text を末尾に追記（newline=false で改行なし）。常に開きます。",
+                url: "couchnotes://append?path=20260608&text=思いついたこと"
+            )
+
+            Section(
+                header: Text("path の指定"),
+                footer: Text("スラッシュありはフォルダ内、なしはルート直下。.md は省略可。フォルダ名・ファイル名は元の大文字小文字で。")
+            ) {
+                LabeledContent("フォルダ内", value: "Publish/会議メモ")
+                LabeledContent("ルート直下", value: "会議メモ")
+            }
+        }
+        .navigationTitle("URL スキーム")
+        .navigationBarTitleDisplayMode(.inline)
+        .overlay {
+            if copied {
+                VStack {
+                    Spacer()
+                    Text("✓ コピーしました")
+                        .padding(.horizontal, 20).padding(.vertical, 10)
+                        .background(.green).foregroundStyle(.white)
+                        .clipShape(Capsule()).padding(.bottom, 40)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut, value: copied)
+    }
+
+    @ViewBuilder
+    private func action(title: String, desc: String, url: String) -> some View {
+        Section(header: Text(title)) {
+            Text(desc)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(url)
+                .font(.system(.footnote, design: .monospaced))
+                .textSelection(.enabled)
+            Button {
+                UIPasteboard.general.string = url
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+            } label: {
+                Label("コピー", systemImage: "doc.on.doc")
+            }
         }
     }
 }
