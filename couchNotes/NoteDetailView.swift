@@ -79,9 +79,11 @@ struct NoteDetailView: View {
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
 
-    // フォルダ移動・新規作成
+    // フォルダ移動・新規作成・タイトル変更
     @State private var showFolderPicker = false
     @State private var showNewNote      = false
+    @State private var showRename       = false
+    @State private var renameText       = ""
 
     /// 現在のフォルダ（正規化キー。ルートは nil）
     private var currentFolderKey: String? {
@@ -189,6 +191,17 @@ struct NoteDetailView: View {
                     Image(systemName: "rectangle.stack")
                 }
             }
+            ToolbarItem(placement: .principal) {
+                Button {
+                    renameText = navTitle
+                    showRename = true
+                } label: {
+                    Text(navTitle)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { onGoBack?() } label: {
                     Image(systemName: "chevron.backward")
@@ -230,6 +243,14 @@ struct NoteDetailView: View {
             ) { title, folder in
                 Task { await createNote(title: title, folder: folder) }
             }
+        }
+        .alert("タイトル変更", isPresented: $showRename) {
+            TextField("タイトル", text: $renameText)
+                .autocorrectionDisabled()
+            Button("変更") { Task { await renameNote(to: renameText) } }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("他ページのリンクも更新されます。")
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .noteDidChange)
@@ -422,6 +443,17 @@ struct NoteDetailView: View {
             onMoved?(newId)
         } catch {
             errorMessage = "移動に失敗しました\n\(error.localizedDescription)"
+        }
+    }
+
+    /// タイトル変更（本体リネーム＋他ページのリンク書き換え）→ 新IDへ遷移。
+    private func renameNote(to title: String) async {
+        showRename = false
+        do {
+            let newId = try await RenameService.rename(oldId: noteId, oldPath: displayPath, newTitle: title)
+            if newId != noteId { onMoved?(newId) }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 

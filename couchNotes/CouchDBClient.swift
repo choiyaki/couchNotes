@@ -263,6 +263,32 @@ class CouchDBClient {
         try await putNote(note)
     }
 
+    /// path・ctime・mtime を明示してノートを作成/更新する（リネーム＝新ID作成に使用）。
+    /// - requireAbsent: true なら既存IDがある場合は中止（上書き防止）。
+    func putNoteContent(
+        id: String, path: String, text: String,
+        ctime: Double, mtime: Double, requireAbsent: Bool = false
+    ) async throws {
+        if requireAbsent, try await fetchNote(id: id) != nil {
+            throw CouchDBError.httpError(409, "同名のノートが既に存在します")
+        }
+        let (chunkIDs, chunks) = makeChunks(text: text)
+        try await putChunks(chunks)
+        if var note = try await fetchNote(id: id) {
+            note.children = chunkIDs
+            note.path     = path
+            note.ctime    = ctime
+            note.mtime    = mtime
+            note.size     = text.utf8.count
+            try await putNote(note)
+        } else {
+            var note = LiveSyncNote(id: id, children: chunkIDs, size: text.utf8.count, ctime: ctime)
+            note.path  = path
+            note.mtime = mtime
+            try await putNote(note)
+        }
+    }
+
     /// 本文を保存しつつ ctime/mtime を明示指定する（移行：YAML付与で時刻を据え置く）。
     func saveContentPreservingTimes(id: String, text: String, ctime: Double, mtime: Double) async throws {
         let (chunkIDs, chunks) = makeChunks(text: text)

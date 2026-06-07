@@ -10,6 +10,8 @@ struct NoteListView: View {
     @State private var showSettings      = false
     @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
     @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
+    @State private var noteToRename: NoteItem? = nil   // タイトル変更の対象
+    @State private var renameText  = ""
 
     // 検索
     @State private var searchText    = ""
@@ -57,6 +59,12 @@ struct NoteListView: View {
                             NoteRowView(note: note)
                         }
                         .contextMenu {
+                            Button {
+                                renameText = note.shortTitle
+                                noteToRename = note
+                            } label: {
+                                Label("タイトル変更", systemImage: "pencil")
+                            }
                             Button(role: .destructive) {
                                 noteToDelete = note
                             } label: {
@@ -93,6 +101,17 @@ struct NoteListView: View {
                         Button("キャンセル", role: .cancel) {}
                     } message: { _ in
                         Text("この操作は元に戻せません。")
+                    }
+                    .alert("タイトル変更", isPresented: Binding(
+                        get: { noteToRename != nil },
+                        set: { if !$0 { noteToRename = nil } }
+                    ), presenting: noteToRename) { note in
+                        TextField("タイトル", text: $renameText)
+                            .autocorrectionDisabled()
+                        Button("変更") { Task { await renameNote(note, to: renameText) } }
+                        Button("キャンセル", role: .cancel) {}
+                    } message: { _ in
+                        Text("他ページのリンクも更新されます。")
                     }
                   }
                 }
@@ -392,6 +411,22 @@ struct NoteListView: View {
         .padding(.top, 6)
         .padding(.bottom, 6)
         .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
+    }
+
+    /// タイトル変更（本体リネーム＋他ページのリンク書き換え）
+    private func renameNote(_ note: NoteItem, to title: String) async {
+        do {
+            let newId = try await RenameService.rename(oldId: note.id, oldPath: note.path, newTitle: title)
+            // 万一そのノートを開いていたら遷移先も差し替え
+            if let idx = path.firstIndex(of: note.id) {
+                isClosureNavigation = true
+                path[idx] = newId
+            }
+            await loadNotes()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        noteToRename = nil
     }
 
     /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）
