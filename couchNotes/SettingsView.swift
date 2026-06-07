@@ -90,6 +90,13 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Section(header: Text("バックアップ")) {
+                    NavigationLink {
+                        BackupSettingsView()
+                    } label: {
+                        Label("GitHub バックアップ", systemImage: "arrow.up.circle")
+                    }
+                }
                 Section(header: Text("CouchDB 接続先")) {
                     TextField("ホスト (例: https://example.com:5984)", text: $host)
                         .keyboardType(.URL)

@@ -209,6 +209,52 @@ actor NoteStore {
         return readItems(stmt, previewTrim: true)
     }
 
+    // MARK: - バックアップ用エクスポート
+
+    /// バックアップ対象ノートを (リポジトリ内パス, 全文) で列挙する。
+    /// - folder: nil=全体（path をそのまま）／値あり=そのフォルダのみ（フォルダ名を外して直下に）
+    func notesForBackup(folder: String?) -> [(path: String, content: String)] {
+        let base = "SELECT path, ctime, mtime, content, frontmatter_extra FROM notes WHERE deleted = 0"
+        let sql  = folder == nil ? base + ";" : base + " AND id LIKE ?;"
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+
+        let dropCount: Int
+        if let folder {
+            sqlite3_bind_text(stmt, 1, folder.lowercased() + "/%", -1, SQLITE_TRANSIENT)
+            dropCount = folder.split(separator: "/").count
+        } else {
+            dropCount = 0
+        }
+
+        var result: [(path: String, content: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let path = columnText(stmt, 0) else { continue }
+            let ctime = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+            let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
+            let body  = columnText(stmt, 3) ?? ""
+            let extraRaw = columnText(stmt, 4) ?? ""
+            let extra = extraRaw.isEmpty ? [] : extraRaw.components(separatedBy: "\n")
+
+            let now = Date().timeIntervalSince1970 * 1000
+            let createdSec = Int((ctime ?? mtime ?? now) / 1000)
+            let updatedSec = Int((mtime ?? now) / 1000)
+            let content = FrontmatterParser.compose(
+                createdSec: createdSec, updatedSec: updatedSec, extra: extra, body: body
+            )
+
+            let repoPath: String
+            if dropCount > 0 {
+                let comps = path.components(separatedBy: "/")
+                repoPath = comps.count > dropCount ? comps.dropFirst(dropCount).joined(separator: "/") : path
+            } else {
+                repoPath = path
+            }
+            result.append((repoPath, content))
+        }
+        return result
+    }
+
     // MARK: - バックリンク
 
     /// この id を指している（リンク元の）ノート一覧。
