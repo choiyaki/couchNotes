@@ -12,6 +12,7 @@ struct LiveSyncNote: Codable {
     var size: Int
     var type: String
     var eden: [String: String]?
+    var deleted: Bool?            // LiveSync 互換のソフト削除マーカー（未削除時は nil＝出力されない）
 
     init(id: String, children: [String], size: Int, ctime: Double? = nil) {
         let now = Date().timeIntervalSince1970 * 1000
@@ -24,6 +25,7 @@ struct LiveSyncNote: Codable {
         self.size     = size
         self.type     = "plain"
         self.eden     = [:]
+        self.deleted  = nil
     }
 }
 

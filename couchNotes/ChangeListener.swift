@@ -88,21 +88,27 @@ class ChangesListener: ObservableObject {
                     else { continue }
 
                     if event.deleted == true {
-                        // 他デバイスでの削除をストアにも反映
+                        // CouchDB ネイティブ削除（トゥームストーン）をストアにも反映
                         await NoteStore.shared.delete(event.id)
                         didChangeStore = true
                         continue
                     }
 
-                    // 変更ノートの本文＋メタを取得してストアを更新
-                    if let record = try? await CouchDBClient.shared.fetchNoteRecord(id: event.id) {
-                        await NoteStore.shared.upsert(record)
+                    // 変更ノートを取得。nil＝404 もしくは LiveSync の deleted:true → ローカルも削除
+                    do {
+                        if let record = try await CouchDBClient.shared.fetchNoteRecord(id: event.id) {
+                            await NoteStore.shared.upsert(record)
+                            NotificationCenter.default.post(
+                                name: .noteDidChange,
+                                object: nil,
+                                userInfo: ["noteId": event.id]
+                            )
+                        } else {
+                            await NoteStore.shared.delete(event.id)
+                        }
                         didChangeStore = true
-                        NotificationCenter.default.post(
-                            name: .noteDidChange,
-                            object: nil,
-                            userInfo: ["noteId": event.id]
-                        )
+                    } catch {
+                        // ネットワーク等の一時失敗は無視（次回再試行）
                     }
                 }
 

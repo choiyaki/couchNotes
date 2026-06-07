@@ -64,9 +64,11 @@ class CouchDBClient {
         return try await fetchFullText(from: note.children)
     }
 
-    /// ノートのメタ情報＋本文をまとめて取得（SQLite 保存用）
+    /// ノートのメタ情報＋本文をまとめて取得（SQLite 保存用）。
+    /// LiveSync のソフト削除（deleted:true）は「存在しない」として nil を返す。
     func fetchNoteRecord(id: String) async throws -> NoteRecord? {
         guard let note = try await fetchNote(id: id) else { return nil }
+        if note.deleted == true { return nil }
         let content = try await fetchFullText(from: note.children)
         return NoteRecord(
             id: id, path: note.path, mtime: note.mtime,
@@ -210,18 +212,14 @@ class CouchDBClient {
         }
     }
 
-    /// ノートを削除（CouchDB ネイティブ削除＝トゥームストーン化）
-    /// 最新の _rev を取得してから DELETE する。既に存在しなければ何もしない。
+    /// ノートを削除（Obsidian LiveSync 互換のソフト削除）。
+    /// ネイティブ削除（_deleted トゥームストーン）だと LiveSync が再アップロードで復活させるため、
+    /// ドキュメントに deleted:true を立てて mtime を更新する。既に無ければ何もしない。
     func deleteNote(id: String) async throws {
-        guard let note = try await fetchNote(id: id) else { return }
-        guard let rev = note._rev else { throw CouchDBError.decodingError }
-        let (data, code) = try await httpRequest(
-            path: id, method: "DELETE", headers: ["If-Match": rev]
-        )
-        // 200(ok) / 202(accepted) を成功とみなす
-        if code != 200 && code != 202 {
-            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
-        }
+        guard var note = try await fetchNote(id: id) else { return }
+        note.deleted = true
+        note.mtime   = Date().timeIntervalSince1970 * 1000
+        try await putNote(note)
     }
 
     /// ノートを別フォルダへ移動する。_id ＝ パスのため「新IDで作成＋旧ID削除」で行う。
