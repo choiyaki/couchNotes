@@ -217,6 +217,12 @@ struct MaintenanceSettingsView: View {
     @State private var migrateProgress = 0.0
     @State private var migrationDone   = false
 
+    // 削除済みの物理削除（purge）
+    @State private var purging       = false
+    @State private var purgeProgress = 0.0
+    @State private var purgeConfirm  = false
+    @State private var purgeResult: String?
+
     var body: some View {
         Form {
             Section(
@@ -241,10 +247,60 @@ struct MaintenanceSettingsView: View {
                     }
                 }
             }
+
+            Section(
+                header: Text("削除済みの整理"),
+                footer: Text("削除済みノートと、不要になったチャンクを CouchDB から物理削除（_purge）します。全端末が削除を同期し終えたタイミングで実行してください（未同期の端末があると復活する場合があります）。元に戻せません。")
+            ) {
+                if purging {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ProgressView(value: purgeProgress)
+                        Text("削除中… \(Int(purgeProgress * 100))%")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    Button(role: .destructive) {
+                        purgeConfirm = true
+                    } label: {
+                        Label("削除済みを完全削除（チャンク整理）", systemImage: "trash.slash")
+                    }
+                }
+            }
         }
         .navigationTitle("メンテナンス")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { Task { migrationDone = await FrontmatterMigration.isDone() } }
+        .alert("完全削除", isPresented: $purgeConfirm) {
+            Button("削除", role: .destructive) { runPurge() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("削除済みノートと不要チャンクを物理削除します。全端末が同期済みであることを確認してください。元に戻せません。")
+        }
+        .alert("完全削除", isPresented: Binding(
+            get: { purgeResult != nil },
+            set: { if !$0 { purgeResult = nil } }
+        )) {
+            Button("OK") { purgeResult = nil }
+        } message: {
+            Text(purgeResult ?? "")
+        }
+    }
+
+    private func runPurge() {
+        purging = true
+        purgeProgress = 0
+        Task {
+            do {
+                let r = try await CouchDBClient.shared.purgeDeletedNotes { p in
+                    Task { @MainActor in purgeProgress = p }
+                }
+                purgeResult = "完全削除しました（ノート \(r.notes) 件・チャンク \(r.chunks) 件）"
+            } catch {
+                purgeResult = "失敗しました\n\(error.localizedDescription)"
+            }
+            purging = false
+        }
     }
 
     private func runMigration() {

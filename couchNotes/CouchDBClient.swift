@@ -304,6 +304,96 @@ class CouchDBClient {
         }
     }
 
+    /// 削除済み(deleted:true)ノートと、それだけが参照する孤児チャンクを物理削除(_purge)する。
+    /// 戻り値＝(削除したノート数, 削除したチャンク数)。progress は 0...1。
+    /// ※ 全端末が削除を同期済みの前提で実行すること（未同期端末があると復活し得る）。
+    func purgeDeletedNotes(progress: @escaping @Sendable (Double) -> Void) async throws -> (notes: Int, chunks: Int) {
+        // 1) children を持つドキュメント（＝ノート類）を全取得し、削除済み/生存を仕分け
+        let query: [String: Any] = [
+            "selector": ["children": ["$exists": true]],
+            "fields":   ["_id", "children", "deleted"],
+            "limit":    999999
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: query) else {
+            throw CouchDBError.decodingError
+        }
+        let (data, code) = try await httpRequest(path: "_find", method: "POST", body: body)
+        if code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let resp = try? JSONDecoder().decode(PurgeFindResponse.self, from: data) else {
+            throw CouchDBError.decodingError
+        }
+
+        var deletedIds: [String] = []
+        var deletedChunks = Set<String>()
+        var liveChunks = Set<String>()
+        for doc in resp.docs {
+            let children = doc.children ?? []
+            if doc.deleted == true {
+                deletedIds.append(doc._id)
+                children.forEach { deletedChunks.insert($0) }
+            } else {
+                children.forEach { liveChunks.insert($0) }
+            }
+        }
+        // 生存ノートが参照していないチャンクだけが孤児（共有チャンクの誤削除を防ぐ）
+        let orphanChunks = Array(deletedChunks.subtracting(liveChunks))
+        let allIds = deletedIds + orphanChunks
+        guard !allIds.isEmpty else { return (0, 0) }
+
+        // 2) 各ドキュメントの最新 rev を取得（_purge に必要）
+        let revs = try await fetchRevs(ids: allIds)
+
+        // 3) _purge をバッチ実行
+        let deletedSet = Set(deletedIds)
+        var purgedNotes = 0
+        var purgedChunks = 0
+        let batchSize = 100
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + batchSize, allIds.count)
+            var purgeBody: [String: [String]] = [:]
+            for id in allIds[index..<end] { if let rev = revs[id] { purgeBody[id] = [rev] } }
+            if !purgeBody.isEmpty {
+                let pdata = try JSONSerialization.data(withJSONObject: purgeBody)
+                let (rdata, rcode) = try await httpRequest(path: "_purge", method: "POST", body: pdata)
+                if rcode != 200 && rcode != 201 {
+                    throw CouchDBError.httpError(rcode, String(data: rdata, encoding: .utf8) ?? "")
+                }
+                for id in purgeBody.keys {
+                    if deletedSet.contains(id) { purgedNotes += 1 } else { purgedChunks += 1 }
+                }
+            }
+            index = end
+            progress(Double(index) / Double(allIds.count))
+        }
+        return (purgedNotes, purgedChunks)
+    }
+
+    /// _all_docs で id→rev をまとめて取得。
+    private func fetchRevs(ids: [String]) async throws -> [String: String] {
+        var result: [String: String] = [:]
+        let batchSize = 1000
+        var index = 0
+        while index < ids.count {
+            let end = min(index + batchSize, ids.count)
+            let batch = Array(ids[index..<end])
+            let body = try JSONSerialization.data(withJSONObject: ["keys": batch])
+            let (data, code) = try await httpRequest(path: "_all_docs", method: "POST", body: body)
+            if code != 200 {
+                throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+            }
+            if let resp = try? JSONDecoder().decode(AllDocsRevResponse.self, from: data) {
+                for row in resp.rows {
+                    if let id = row.id, let rev = row.value?.rev { result[id] = rev }
+                }
+            }
+            index = end
+        }
+        return result
+    }
+
     /// _changes longpoll 用の URLRequest を生成
     /// - Parameter since: "now" または前回レスポンスの last_seq
     func makeChangesURLRequest(since: String = "now") throws -> URLRequest {
@@ -463,6 +553,26 @@ private struct FullFindResponse: Decodable {
         let deleted: Bool?
     }
     let docs: [Doc]
+}
+
+/// _purge 用：children を持つドキュメントの仕分け
+private struct PurgeFindResponse: Decodable {
+    struct Doc: Decodable {
+        let _id: String
+        let children: [String]?
+        let deleted: Bool?
+    }
+    let docs: [Doc]
+}
+
+/// _all_docs で rev を取得する用
+private struct AllDocsRevResponse: Decodable {
+    struct Row: Decodable {
+        let id: String?
+        struct Value: Decodable { let rev: String? }
+        let value: Value?
+    }
+    let rows: [Row]
 }
 
 /// _bulk_get（チャンク一括取得）用
