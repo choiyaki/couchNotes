@@ -10,6 +10,9 @@ struct couchNotesApp: App {
                     // バックグラウンド/フォアグラウンド切替は ChangesListener が自動管理
                     ChangesListener.shared.start()
                 }
+                .onOpenURL { url in
+                    URLActionRouter.shared.handle(url)
+                }
         }
     }
 }

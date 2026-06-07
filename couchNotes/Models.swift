@@ -118,6 +118,7 @@ struct StoredNote {
     let ctime: Double?    // 作成時刻（ms）
     let mtime: Double?    // 更新時刻（ms）
     let extra: String?    // created/updated 以外のフロントマター行
+    let path: String?     // 元のパス（大小保持）
 }
 
 // MARK: - 新規ノートの命名

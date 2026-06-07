@@ -132,9 +132,9 @@ actor NoteStore {
         return sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
     }
 
-    /// エディタ用：本文＋作成/更新時刻（ms）＋保持フロントマター。
+    /// エディタ用：本文＋作成/更新時刻（ms）＋保持フロントマター＋パス。
     func editingNote(_ id: String) -> StoredNote? {
-        let sql = "SELECT content, ctime, mtime, frontmatter_extra FROM notes WHERE id = ? AND deleted = 0;"
+        let sql = "SELECT content, ctime, mtime, frontmatter_extra, path FROM notes WHERE id = ? AND deleted = 0;"
         guard let stmt = prepare(sql) else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
@@ -143,7 +143,8 @@ actor NoteStore {
         let ctime = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
         let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
         let extra = columnText(stmt, 3)
-        return StoredNote(body: body, ctime: ctime, mtime: mtime, extra: extra)
+        let path  = columnText(stmt, 4)
+        return StoredNote(body: body, ctime: ctime, mtime: mtime, extra: extra, path: path)
     }
 
     // MARK: - 全文検索

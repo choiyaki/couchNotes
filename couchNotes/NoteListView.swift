@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NoteListView: View {
     @ObservedObject private var listener = ChangesListener.shared
+    @ObservedObject private var urlRouter = URLActionRouter.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var notes: [NoteItem] = []
@@ -234,6 +235,25 @@ struct NoteListView: View {
 
             ChangesListener.shared.start()
             hasLoadedOnce = true
+            // 起動時に保留中の URL アクションがあれば処理させる
+            URLActionRouter.shared.markReady()
+        }
+        .onChange(of: urlRouter.noteToOpen) { _, newId in
+            guard let id = newId else { return }
+            Task {
+                await loadNotes()
+                if path.last != id {
+                    isClosureNavigation = true
+                    historyForward = []
+                    path.append(id)
+                }
+                urlRouter.noteToOpen = nil
+            }
+        }
+        .onChange(of: urlRouter.errorMessage) { _, msg in
+            guard let msg else { return }
+            errorMessage = msg
+            urlRouter.errorMessage = nil
         }
         .onAppear {
             // 詳細画面から戻ってきた時など、再表示のたびにソート順を更新
