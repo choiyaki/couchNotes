@@ -454,10 +454,19 @@ extension MarkdownTextView {
             let replaceStart = pos - replaceLen
             guard replaceStart >= 0 else { return }
 
+            // カーソル直後に既存の "]]"（ツールバーの [[]] 挿入由来）があれば一緒に置換し、
+            // 置換文字列側の "]]" と重複して "]]]]" になるのを防ぐ
+            let ns = tv.text as NSString
+            var tailLen = 0
+            if pos + 2 <= ns.length,
+               ns.substring(with: NSRange(location: pos, length: 2)) == "]]" {
+                tailLen = 2
+            }
+
             let replacement = "[[\(note.shortTitle)]]"
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(
-                in: NSRange(location: replaceStart, length: replaceLen),
+                in: NSRange(location: replaceStart, length: replaceLen + tailLen),
                 with: replacement
             )
             tv.textStorage.endEditing()
