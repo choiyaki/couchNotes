@@ -168,13 +168,15 @@ struct BackupTargetEditor: View {
             let files = await NoteStore.shared.notesForBackup(folder: folder)
             do {
                 let client = GitHubBackupClient(owner: owner, repo: repo, branch: branch, token: tok)
-                try await client.backup(files: files) { p in
+                let changed = try await client.backup(files: files) { p in
                     Task { @MainActor in progress = p }
                 }
                 target.lastBackup = Date()
                 BackupStore.upsert(target)
                 onChange()
-                resultMessage = "バックアップ完了（\(files.count) ファイル）"
+                resultMessage = changed == 0
+                    ? "変更はありませんでした"
+                    : "バックアップ完了（\(changed) 件を更新）"
             } catch {
                 resultMessage = error.localizedDescription
             }

@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import CryptoKit
 
 struct GitHubBackupError: LocalizedError {
     let message: String
@@ -20,25 +21,48 @@ struct GitHubBackupClient {
     let branch: String
     let token: String
 
-    /// md ファイル群を push する。progress は 0...1。
+    /// md ファイル群を push する。リポジトリの現状と比較して差分だけ送る。
+    /// 戻り値＝変更したファイル数（0＝変更なしでコミットせず）。progress は 0...1。
+    @discardableResult
     func backup(files: [(path: String, content: String)],
-                progress: @escaping @Sendable (Double) -> Void) async throws {
-        guard !files.isEmpty else {
-            throw GitHubBackupError(message: "バックアップ対象のノートがありません。")
-        }
-
-        // 1) 現在の HEAD（無ければ空リポジトリ＝親なし）
+                progress: @escaping @Sendable (Double) -> Void) async throws -> Int {
         let head = try await currentHead()
 
-        // 2) ツリー作成（100件ずつ inline content・base_tree 連鎖で1本に積む）
-        var treeSha: String? = nil
+        var entries: [[String: Any]] = []
+        var baseTree: String? = nil
+
+        if head.exists, let headSha = head.sha,
+           let baseTreeSha = try await commitTreeSha(headSha),
+           let repoBlobs = try await treeBlobs(baseTreeSha) {
+            // 差分モード：git blob SHA を突き合わせ、変更・追加・削除だけ送る
+            baseTree = baseTreeSha
+            var currentPaths = Set<String>()
+            for f in files {
+                currentPaths.insert(f.path)
+                if repoBlobs[f.path] != Self.gitBlobSHA(f.content) {
+                    entries.append(["path": f.path, "mode": "100644", "type": "blob", "content": f.content])
+                }
+            }
+            for path in repoBlobs.keys where !currentPaths.contains(path) {
+                entries.append(["path": path, "mode": "100644", "type": "blob", "sha": NSNull()])
+            }
+            if entries.isEmpty { return 0 }   // 変更なし
+        } else {
+            // 全件スナップショット（空リポジトリ／ツリー取得不可時のフォールバック）
+            guard !files.isEmpty else {
+                throw GitHubBackupError(message: "バックアップ対象のノートがありません。")
+            }
+            entries = files.map { ["path": $0.path, "mode": "100644", "type": "blob", "content": $0.content] }
+        }
+
+        // ツリー作成（100件ずつ base_tree 連鎖）
+        var treeSha = baseTree
         let batchSize = 100
         var index = 0
-        let total = max(files.count, 1)
-        while index < files.count {
-            let end   = min(index + batchSize, files.count)
-            let batch = Array(files[index..<end])
-            treeSha   = try await createTree(base: treeSha, files: batch)
+        let total = max(entries.count, 1)
+        while index < entries.count {
+            let end = min(index + batchSize, entries.count)
+            treeSha = try await createTree(base: treeSha, entries: Array(entries[index..<end]))
             index = end
             progress(Double(index) / Double(total))
         }
@@ -46,19 +70,25 @@ struct GitHubBackupClient {
             throw GitHubBackupError(message: "ツリーの作成に失敗しました。")
         }
 
-        // 3) コミット
         let commitSha = try await createCommit(
             message: "Backup \(Self.timestamp())",
             tree: finalTree,
             parents: head.sha.map { [$0] } ?? []
         )
-
-        // 4) ブランチ更新（無ければ作成）
         if head.exists {
             try await updateRef(sha: commitSha)
         } else {
             try await createRef(sha: commitSha)
         }
+        return entries.count
+    }
+
+    /// git のオブジェクトSHA（blob）を計算：sha1("blob <len>\0" + bytes)
+    private static func gitBlobSHA(_ content: String) -> String {
+        let bytes = Array(content.utf8)
+        var data = Data("blob \(bytes.count)\u{0}".utf8)
+        data.append(contentsOf: bytes)
+        return Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - API 呼び出し
@@ -71,15 +101,34 @@ struct GitHubBackupClient {
         return (sha, true)
     }
 
-    private func createTree(base: String?, files: [(path: String, content: String)]) async throws -> String {
-        let entries: [[String: Any]] = files.map {
-            ["path": $0.path, "mode": "100644", "type": "blob", "content": $0.content]
-        }
+    private func createTree(base: String?, entries: [[String: Any]]) async throws -> String {
         var body: [String: Any] = ["tree": entries]
         if let base { body["base_tree"] = base }
         let (data, code) = try await request("POST", "git/trees", body: body)
         guard code == 201, let sha = json(data)?["sha"] as? String else { throw error(data, code) }
         return sha
+    }
+
+    /// コミットのツリーSHAを取得。
+    private func commitTreeSha(_ commitSha: String) async throws -> String? {
+        let (data, code) = try await request("GET", "git/commits/\(commitSha)")
+        guard code == 200 else { return nil }
+        return (json(data)?["tree"] as? [String: Any])?["sha"] as? String
+    }
+
+    /// ツリーを再帰取得し、path→blobSHA を返す。truncated（巨大）の場合は nil。
+    private func treeBlobs(_ treeSha: String) async throws -> [String: String]? {
+        let (data, code) = try await request("GET", "git/trees/\(treeSha)?recursive=1")
+        guard code == 200, let obj = json(data) else { return nil }
+        if (obj["truncated"] as? Bool) == true { return nil }
+        guard let tree = obj["tree"] as? [[String: Any]] else { return nil }
+        var map: [String: String] = [:]
+        for entry in tree where (entry["type"] as? String) == "blob" {
+            if let path = entry["path"] as? String, let sha = entry["sha"] as? String {
+                map[path] = sha
+            }
+        }
+        return map
     }
 
     private func createCommit(message: String, tree: String, parents: [String]) async throws -> String {
