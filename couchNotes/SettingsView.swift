@@ -1,6 +1,55 @@
 import SwiftUI
 
+// MARK: - 設定トップ（項目リスト）
+
 struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    NavigationLink {
+                        ConnectionSettingsView()
+                    } label: {
+                        Label("接続（CouchDB）", systemImage: "externaldrive.connected.to.line.below")
+                    }
+                    NavigationLink {
+                        SyncFolderSettingsView()
+                    } label: {
+                        Label("同期フォルダ", systemImage: "folder")
+                    }
+                    NavigationLink {
+                        EditorSettingsView()
+                    } label: {
+                        Label("エディタ", systemImage: "textformat")
+                    }
+                    NavigationLink {
+                        BackupSettingsView()
+                    } label: {
+                        Label("GitHub バックアップ", systemImage: "arrow.up.circle")
+                    }
+                    NavigationLink {
+                        MaintenanceSettingsView()
+                    } label: {
+                        Label("メンテナンス", systemImage: "wrench.and.screwdriver")
+                    }
+                }
+            }
+            .navigationTitle("設定")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完了") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 接続（CouchDB 接続先＋認証）
+
+struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var host     = ""
@@ -9,138 +58,48 @@ struct SettingsView: View {
     @State private var password = ""
     @State private var saved    = false
 
-    @State private var syncFolders: [String] = []
-    @State private var newFolder = ""
-
-    // created/updated 付与（初回移行）
-    @State private var migrating       = false
-    @State private var migrateProgress = 0.0
-    @State private var migrationDone   = false
-
-    @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
-    @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
-
     var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text("エディター")) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("文字サイズ: \(Int(fontSize))pt")
-                            .font(.subheadline)
-                        Slider(value: $fontSize, in: 12...24, step: 1)
-                    }
-                    .padding(.vertical, 4)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("行間: \(lineSpacing, specifier: "%.1f")pt")
-                            .font(.subheadline)
-                        Slider(value: $lineSpacing, in: 0...12, step: 0.5)
-                    }
-                    .padding(.vertical, 4)
-                }
-                Section(
-                    header: Text("同期フォルダ"),
-                    footer: Text("ルート直下のノートは常に同期されます。指定したフォルダ配下も同期対象になります。追加すると不足分を取得し、削除するとローカルから除外します。フォルダ名は大文字・小文字を区別します（Obsidian のフォルダ名に合わせてください）。")
-                ) {
-                    HStack {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                        Text("ルート")
-                        Spacer()
-                        Text("常に同期")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(syncFolders, id: \.self) { folder in
-                        HStack {
-                            Image(systemName: "folder")
-                                .foregroundStyle(.secondary)
-                            Text(folder)
-                        }
-                    }
-                    .onDelete(perform: deleteFolders)
-                    HStack {
-                        TextField("フォルダ名を追加", text: $newFolder)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .onSubmit(addFolder)
-                        Button("追加", action: addFolder)
-                            .disabled(SyncScope.normalize(newFolder).isEmpty)
-                    }
-                }
-                Section(
-                    header: Text("created / updated"),
-                    footer: Text("全ノートの YAML に created/updated を付与します。既に YAML がある場合はそちらを正として ctime/mtime に反映します。1回だけ実行してください。")
-                ) {
-                    if migrating {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ProgressView(value: migrateProgress)
-                            Text("付与中… \(Int(migrateProgress * 100))%")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 4)
-                    } else {
-                        Button {
-                            runMigration()
-                        } label: {
-                            Label(
-                                migrationDone ? "created/updated を付与（実行済み）" : "created/updated を全ノートに付与",
-                                systemImage: migrationDone ? "checkmark.circle" : "calendar.badge.plus"
-                            )
-                        }
-                    }
-                }
-                Section(header: Text("バックアップ")) {
-                    NavigationLink {
-                        BackupSettingsView()
-                    } label: {
-                        Label("GitHub バックアップ", systemImage: "arrow.up.circle")
-                    }
-                }
-                Section(header: Text("CouchDB 接続先")) {
-                    TextField("ホスト (例: https://example.com:5984)", text: $host)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    TextField("データベース名", text: $dbName)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                }
-                Section(header: Text("認証情報")) {
-                    TextField("ユーザー名", text: $username)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    SecureField("パスワード", text: $password)
-                }
+        Form {
+            Section(header: Text("CouchDB 接続先")) {
+                TextField("ホスト (例: https://example.com:5984)", text: $host)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("データベース名", text: $dbName)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
             }
-            .navigationTitle("設定")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("キャンセル") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { save() }
-                }
+            Section(header: Text("認証情報")) {
+                TextField("ユーザー名", text: $username)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                SecureField("パスワード", text: $password)
             }
-            .onAppear(perform: load)
-            .overlay {
-                if saved {
-                    VStack {
-                        Spacer()
-                        Text("✓ 保存しました")
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 10)
-                            .background(.green)
-                            .foregroundStyle(.white)
-                            .clipShape(Capsule())
-                            .padding(.bottom, 40)
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.easeInOut, value: saved)
         }
+        .navigationTitle("接続")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") { save() }
+            }
+        }
+        .onAppear(perform: load)
+        .overlay {
+            if saved {
+                VStack {
+                    Spacer()
+                    Text("✓ 保存しました")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(.green)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                        .padding(.bottom, 40)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut, value: saved)
     }
 
     private func load() {
@@ -149,29 +108,60 @@ struct SettingsView: View {
         dbName   = km.load(key: "couchdb_db")       ?? ""
         username = km.load(key: "couchdb_user")     ?? ""
         password = km.load(key: "couchdb_password") ?? ""
-        syncFolders = SyncScope.normalizedFolders
-        Task { migrationDone = await FrontmatterMigration.isDone() }
     }
 
-    // MARK: - created/updated 付与（初回移行）
-
-    private func runMigration() {
-        migrating = true
-        migrateProgress = 0
-        Task {
-            do {
-                try await FrontmatterMigration.run { p in
-                    Task { @MainActor in migrateProgress = p }
-                }
-                migrationDone = true
-            } catch {
-                // 失敗時はそのまま（再実行可能）
-            }
-            migrating = false
+    private func save() {
+        let km = KeychainManager.shared
+        km.save(key: "couchdb_host",     value: host)
+        km.save(key: "couchdb_db",       value: dbName)
+        km.save(key: "couchdb_user",     value: username)
+        km.save(key: "couchdb_password", value: password)
+        saved = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            saved = false
+            dismiss()
         }
     }
+}
 
-    // MARK: - 同期フォルダの追加・削除（即時反映）
+// MARK: - 同期フォルダ
+
+struct SyncFolderSettingsView: View {
+    @State private var syncFolders: [String] = []
+    @State private var newFolder = ""
+
+    var body: some View {
+        Form {
+            Section(
+                footer: Text("ルート直下のノートは常に同期されます。指定したフォルダ配下も同期対象になります。追加すると不足分を取得し、削除するとローカルから除外します。フォルダ名は大文字・小文字を区別します（Obsidian のフォルダ名に合わせてください）。")
+            ) {
+                HStack {
+                    Image(systemName: "folder").foregroundStyle(.secondary)
+                    Text("ルート")
+                    Spacer()
+                    Text("常に同期").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(syncFolders, id: \.self) { folder in
+                    HStack {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        Text(folder)
+                    }
+                }
+                .onDelete(perform: deleteFolders)
+                HStack {
+                    TextField("フォルダ名を追加", text: $newFolder)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onSubmit(addFolder)
+                    Button("追加", action: addFolder)
+                        .disabled(SyncScope.normalize(newFolder).isEmpty)
+                }
+            }
+        }
+        .navigationTitle("同期フォルダ")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { syncFolders = SyncScope.normalizedFolders }
+    }
 
     private func addFolder() {
         guard let added = SyncScope.add(newFolder) else { return }
@@ -192,17 +182,84 @@ struct SettingsView: View {
             userInfo: ["added": [String](), "removed": removed]
         )
     }
+}
 
-    private func save() {
-        let km = KeychainManager.shared
-        km.save(key: "couchdb_host",     value: host)
-        km.save(key: "couchdb_db",       value: dbName)
-        km.save(key: "couchdb_user",     value: username)
-        km.save(key: "couchdb_password", value: password)
-        saved = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            saved = false
-            dismiss()
+// MARK: - エディタ
+
+struct EditorSettingsView: View {
+    @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
+    @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("文字サイズ: \(Int(fontSize))pt").font(.subheadline)
+                    Slider(value: $fontSize, in: 12...24, step: 1)
+                }
+                .padding(.vertical, 4)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("行間: \(lineSpacing, specifier: "%.1f")pt").font(.subheadline)
+                    Slider(value: $lineSpacing, in: 0...12, step: 0.5)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .navigationTitle("エディタ")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - メンテナンス（created/updated 付与）
+
+struct MaintenanceSettingsView: View {
+    @State private var migrating       = false
+    @State private var migrateProgress = 0.0
+    @State private var migrationDone   = false
+
+    var body: some View {
+        Form {
+            Section(
+                header: Text("created / updated"),
+                footer: Text("全ノートの YAML に created/updated を付与します。既に YAML がある場合はそちらを正として ctime/mtime に反映します。1回だけ実行してください。")
+            ) {
+                if migrating {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ProgressView(value: migrateProgress)
+                        Text("付与中… \(Int(migrateProgress * 100))%")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    Button {
+                        runMigration()
+                    } label: {
+                        Label(
+                            migrationDone ? "created/updated を付与（実行済み）" : "created/updated を全ノートに付与",
+                            systemImage: migrationDone ? "checkmark.circle" : "calendar.badge.plus"
+                        )
+                    }
+                }
+            }
+        }
+        .navigationTitle("メンテナンス")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { Task { migrationDone = await FrontmatterMigration.isDone() } }
+    }
+
+    private func runMigration() {
+        migrating = true
+        migrateProgress = 0
+        Task {
+            do {
+                try await FrontmatterMigration.run { p in
+                    Task { @MainActor in migrateProgress = p }
+                }
+                migrationDone = true
+            } catch {
+                // 失敗時はそのまま（再実行可能）
+            }
+            migrating = false
         }
     }
 }
