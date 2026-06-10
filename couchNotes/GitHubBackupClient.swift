@@ -88,6 +88,92 @@ struct GitHubBackupClient {
         return entries.count
     }
 
+    // MARK: - 復元（pull）
+
+    /// リポジトリの全 .md ファイルを取得して (path, content) で返す（一方向の復元用）。
+    /// GraphQL でまとめ取りするのでファイル数が多くても少ないリクエストで済む。progress は 0...1。
+    func filesForRestore(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+        let paths = try await allMarkdownPaths()
+        guard !paths.isEmpty else { return [] }
+
+        var result: [(path: String, content: String)] = []
+        let batchSize = 100
+        var index = 0
+        while index < paths.count {
+            let end = min(index + batchSize, paths.count)
+            let batch = Array(paths[index..<end])
+            let contents = try await fetchContentsBatch(batch)
+            for (i, path) in batch.enumerated() {
+                if let text = contents[i] { result.append((path, text)) }
+            }
+            index = end
+            progress(Double(index) / Double(paths.count))
+        }
+        return result
+    }
+
+    /// HEAD コミットのツリーから .md パスを列挙する。
+    private func allMarkdownPaths() async throws -> [String] {
+        let head = try await currentHead()
+        guard head.exists, let headSha = head.sha,
+              let treeSha = try await commitTreeSha(headSha) else {
+            return []
+        }
+        guard let blobs = try await treeBlobs(treeSha) else {
+            throw GitHubBackupError(message: "リポジトリが大きすぎて一覧を取得できませんでした。")
+        }
+        return blobs.keys.filter { $0.hasSuffix(".md") }.sorted()
+    }
+
+    /// GraphQL で複数パスの Blob.text をまとめて取得する。戻り値は paths と同じ並び（取得不可は nil）。
+    private func fetchContentsBatch(_ paths: [String]) async throws -> [String?] {
+        var fields = ""
+        for (i, path) in paths.enumerated() {
+            let expr = "\(branch):\(path)"
+            fields += "f\(i): object(expression: \(Self.graphQLString(expr))) { ... on Blob { text } }\n"
+        }
+        let query = "query { repository(owner: \(Self.graphQLString(owner)), name: \(Self.graphQLString(repo))) {\n\(fields)} }"
+
+        let (data, code) = try await graphQLRequest(query)
+        guard code == 200 else { throw error(data, code) }
+        guard let obj = json(data) else {
+            throw GitHubBackupError(message: "復元データの取得に失敗しました。")
+        }
+        guard let dataObj = obj["data"] as? [String: Any],
+              let repoObj = dataObj["repository"] as? [String: Any] else {
+            if let errs = obj["errors"] as? [[String: Any]] {
+                let msg = errs.compactMap { $0["message"] as? String }.joined(separator: " / ")
+                throw GitHubBackupError(message: "GitHub GraphQL エラー: \(msg)")
+            }
+            throw GitHubBackupError(message: "復元データの取得に失敗しました。")
+        }
+        return paths.indices.map { i in
+            (repoObj["f\(i)"] as? [String: Any])?["text"] as? String
+        }
+    }
+
+    /// GraphQL の文字列リテラルとしてエスケープする（前後の " 込み）。
+    private static func graphQLString(_ s: String) -> String {
+        let escaped = s
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func graphQLRequest(_ query: String) async throws -> (Data, Int) {
+        guard let url = URL(string: "https://api.github.com/graphql") else {
+            throw GitHubBackupError(message: "URL が不正です。")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("couchNotes", forHTTPHeaderField: "User-Agent")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+    }
+
     /// git のオブジェクトSHA（blob）を計算：sha1("blob <len>\0" + bytes)
     private static func gitBlobSHA(_ content: String) -> String {
         let bytes = Array(content.utf8)

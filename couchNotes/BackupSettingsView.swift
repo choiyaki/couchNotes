@@ -11,8 +11,10 @@ import SwiftUI
 struct BackupSettingsView: View {
     @State private var targets: [BackupTarget] = []
     @State private var runningTargetId: UUID? = nil
+    @State private var isRestoring = false
     @State private var progress = 0.0
     @State private var resultMessage: String?
+    @State private var pendingRestore: BackupTarget? = nil
 
     var body: some View {
         List {
@@ -42,6 +44,24 @@ struct BackupSettingsView: View {
         } message: {
             Text(resultMessage ?? "")
         }
+        .confirmationDialog(
+            "このバックアップから復元しますか？",
+            isPresented: Binding(
+                get: { pendingRestore != nil },
+                set: { if !$0 { pendingRestore = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("復元する", role: .destructive) {
+                if let target = pendingRestore {
+                    pendingRestore = nil
+                    Task { await restore(target) }
+                }
+            }
+            Button("キャンセル", role: .cancel) { pendingRestore = nil }
+        } message: {
+            Text("リポジトリの内容で現在のノートを上書きします（同名は上書き・無いものは追加）。ローカルにしか無いノートは削除されません。")
+        }
     }
 
     @ViewBuilder
@@ -52,7 +72,7 @@ struct BackupSettingsView: View {
                 Text("\(target.folder ?? "全体") → \(target.owner)/\(target.repo)")
                     .font(.caption).foregroundStyle(.secondary)
                 if runningTargetId == target.id {
-                    Text("バックアップ中… \(Int(progress * 100))%")
+                    Text("\(isRestoring ? "復元中" : "バックアップ中")… \(Int(progress * 100))%")
                         .font(.caption2).foregroundStyle(.tertiary)
                 } else if let last = target.lastBackup {
                     Text("最終: \(DateDisplay.ymdhm.string(from: last))")
@@ -63,6 +83,14 @@ struct BackupSettingsView: View {
             if runningTargetId == target.id {
                 ProgressView()
             } else {
+                Button {
+                    pendingRestore = target
+                } label: {
+                    Image(systemName: "arrow.down.circle").font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .tint(.orange)
+                .disabled(runningTargetId != nil)
                 Button {
                     Task { await backup(target) }
                 } label: {
@@ -115,6 +143,52 @@ struct BackupSettingsView: View {
         } catch {
             resultMessage = error.localizedDescription
         }
+        runningTargetId = nil
+    }
+
+    /// リポジトリの全 .md を取得し、CouchDB へ一括書き戻す（上書き＋追記）。
+    private func restore(_ target: BackupTarget) async {
+        guard let token = BackupStore.token(for: target.id), !token.isEmpty,
+              !target.owner.trimmingCharacters(in: .whitespaces).isEmpty,
+              !target.repo.trimmingCharacters(in: .whitespaces).isEmpty else {
+            resultMessage = "オーナー・リポジトリ・トークンを設定してください。"
+            return
+        }
+        runningTargetId = target.id
+        isRestoring = true
+        progress = 0
+        let branch = target.branch.trimmingCharacters(in: .whitespaces).isEmpty ? "main" : target.branch
+        do {
+            let client = GitHubBackupClient(owner: target.owner, repo: target.repo, branch: branch, token: token)
+            // 取得（0...0.5）→ 書き戻し（0.5...1）の2フェーズで進捗表示
+            let files = try await client.filesForRestore { p in
+                Task { @MainActor in progress = p * 0.5 }
+            }
+            if files.isEmpty {
+                resultMessage = "リポジトリに復元できるノートがありません。"
+            } else {
+                let written = try await CouchDBClient.shared.restore(files: files) { p in
+                    Task { @MainActor in progress = 0.5 + p * 0.5 }
+                }
+                // ローカル（SQLite）へも即時反映
+                let records = files.map { f -> NoteRecord in
+                    let parsed = FrontmatterParser.split(f.content)
+                    return NoteRecord(
+                        id: f.path.lowercased(),
+                        path: f.path,
+                        mtime: parsed.updated.map { Double($0) * 1000 },
+                        ctime: parsed.created.map { Double($0) * 1000 },
+                        size: f.content.utf8.count,
+                        content: f.content
+                    )
+                }
+                await NoteStore.shared.upsertMany(records)
+                resultMessage = "復元完了（\(written) 件）"
+            }
+        } catch {
+            resultMessage = error.localizedDescription
+        }
+        isRestoring = false
         runningTargetId = nil
     }
 }

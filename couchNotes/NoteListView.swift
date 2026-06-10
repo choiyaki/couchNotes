@@ -55,6 +55,7 @@ struct NoteListView: View {
                 } else {
                   VStack(spacing: 0) {
                     searchBar
+                    countLabel
                     List(displayedNotes) { note in
                         NavigationLink(value: note.id) {
                             NoteRowView(note: note)
@@ -392,6 +393,20 @@ struct NoteListView: View {
     // MARK: - 検索バー
 
     @ViewBuilder
+    /// 総ページ数の表示（検索中は「ヒット数 / 全数」）。
+    var countLabel: some View {
+        HStack {
+            Spacer()
+            Text(trimmedSearch.isEmpty
+                 ? "\(notes.count) ページ"
+                 : "\(searchResults.count) / \(notes.count) ページ")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 4)
+    }
+
     var searchBar: some View {
         HStack(spacing: 8) {
             HStack(spacing: 6) {
