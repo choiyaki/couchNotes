@@ -72,49 +72,57 @@ class ChangesListener: ObservableObject {
             isConnected = true
             do {
                 let response = try await fetchChanges(since: since)
-                since = response.last_seq   // 次のリクエストはここから
-                await NoteStore.shared.setSyncValue("last_seq", since)
 
                 // この応答バッチ中は同期範囲を一度だけ評価
                 let scopeFolders = SyncScope.normalizedFolders
 
-                var didChangeStore = false
+                // 対象ノートを「更新」と「ネイティブ削除」に仕分け（重複idは排除）
+                var updateIDs: [String] = []
+                var deleteIDs: [String] = []
+                var seen = Set<String>()
                 for event in response.results {
-                    guard !Task.isCancelled else { return }
                     guard
                         event.id.hasSuffix(".md"),
                         !event.id.hasPrefix("h:"),
-                        SyncScope.shouldSync(id: event.id, folders: scopeFolders)
+                        SyncScope.shouldSync(id: event.id, folders: scopeFolders),
+                        seen.insert(event.id).inserted
                     else { continue }
+                    if event.deleted == true { deleteIDs.append(event.id) }
+                    else                     { updateIDs.append(event.id) }
+                }
 
-                    if event.deleted == true {
-                        // CouchDB ネイティブ削除（トゥームストーン）をストアにも反映
-                        await NoteStore.shared.delete(event.id)
-                        didChangeStore = true
-                        continue
-                    }
+                var didChangeStore = false
 
-                    // 変更ノートを取得。nil＝404 もしくは LiveSync の deleted:true → ローカルも削除
-                    do {
-                        if let record = try await CouchDBClient.shared.fetchNoteRecord(id: event.id) {
-                            await NoteStore.shared.upsert(record)
+                // 更新分はバルク取得 → 一括 upsert。LiveSync のソフト削除（deleted:true）は
+                // 結果に含まれないので、要求 id との差集合を削除として扱う。
+                if !updateIDs.isEmpty {
+                    let records = try await CouchDBClient.shared.fetchNoteRecords(ids: updateIDs)
+                    if !records.isEmpty {
+                        await NoteStore.shared.upsertMany(records)
+                        for r in records {
                             NotificationCenter.default.post(
-                                name: .noteDidChange,
-                                object: nil,
-                                userInfo: ["noteId": event.id]
+                                name: .noteDidChange, object: nil, userInfo: ["noteId": r.id]
                             )
-                        } else {
-                            await NoteStore.shared.delete(event.id)
                         }
                         didChangeStore = true
-                    } catch {
-                        // ネットワーク等の一時失敗は無視（次回再試行）
                     }
+                    let returned = Set(records.map { $0.id })
+                    for id in updateIDs where !returned.contains(id) { deleteIDs.append(id) }
+                }
+
+                for id in deleteIDs {
+                    await NoteStore.shared.delete(id)
+                    didChangeStore = true
                 }
 
                 if didChangeStore {
                     NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
                 }
+
+                // 全処理が成功してから last_seq を前進・保存する。
+                // 途中で失敗した場合は同じ since から再試行し、変更を取りこぼさない。
+                since = response.last_seq
+                await NoteStore.shared.setSyncValue("last_seq", since)
             } catch is CancellationError {
                 break
             } catch {

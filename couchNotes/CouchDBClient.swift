@@ -166,6 +166,13 @@ class CouchDBClient {
         }
     }
 
+    /// 指定 id 群のノートを本文込みで一括取得する（_changes の差分取り込み用）。
+    /// deleted:true やルート外などは結果に含まれない（呼び出し側で差集合＝削除を判定する）。
+    func fetchNoteRecords(ids: [String]) async throws -> [NoteRecord] {
+        guard !ids.isEmpty else { return [] }
+        return try await fetchNotes(selector: ["type": ["$eq": "plain"], "_id": ["$in": ids]])
+    }
+
     /// 現在の update_seq を取得（初回インポート後、_changes の起点に使う）
     func currentUpdateSeq() async throws -> String {
         let (data, code) = try await httpRequest(path: "")
