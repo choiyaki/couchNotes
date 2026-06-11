@@ -31,6 +31,11 @@ struct SettingsView: View {
                         Label("GitHub バックアップ", systemImage: "arrow.up.circle")
                     }
                     NavigationLink {
+                        MarkdownImportView()
+                    } label: {
+                        Label("md ファイルを取り込む", systemImage: "square.and.arrow.down")
+                    }
+                    NavigationLink {
                         MaintenanceSettingsView()
                     } label: {
                         Label("メンテナンス", systemImage: "wrench.and.screwdriver")
