@@ -8,6 +8,9 @@ struct NoteListView: View {
     @AppStorage("noteList_layout") private var layoutRaw = NoteListLayout.detail.rawValue
     private var layout: NoteListLayout { NoteListLayout(rawValue: layoutRaw) ?? .detail }
 
+    // フォルダ絞り込み："" = すべて／"/" = ルート直下のみ／それ以外 = フォルダ名（配下を表示）
+    @AppStorage("noteList_folderFilter") private var folderFilter = ""
+
     @State private var notes: [NoteItem] = []
     @State private var path: [String]    = []
     @State private var errorMessage: String? = nil
@@ -28,9 +31,16 @@ struct NoteListView: View {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// 一覧に表示するノート（検索中は検索結果、そうでなければ全件）
+    /// 一覧に表示するノート（検索中は検索結果、そうでなければ全件）。さらにフォルダ絞り込みを適用。
     private var displayedNotes: [NoteItem] {
-        trimmedSearch.isEmpty ? notes : searchResults
+        let base = trimmedSearch.isEmpty ? notes : searchResults
+        switch folderFilter {
+        case "":  return base
+        case "/": return base.filter { !$0.id.lowercased().contains("/") }   // ルート直下のみ
+        default:
+            let prefix = folderFilter.lowercased() + "/"
+            return base.filter { $0.id.lowercased().hasPrefix(prefix) }       // 配下（サブフォルダ含む）
+        }
     }
 
     /// 同じタイトルのノートが無ければ作成可能（「＋」を有効化）。空入力時は不可。
@@ -161,14 +171,19 @@ struct NoteListView: View {
                     }
                 }
                 ToolbarItem(placement: .principal) {
-                    Button {
-                        layoutRaw = layout.next.rawValue
-                    } label: {
-                        Image(systemName: layout.icon)
+                    HStack(spacing: 6) {
+                        Button {
+                            let next = layout.next
+                            layoutRaw = next.rawValue
+                            saveLayout(next, for: folderFilter)
+                        } label: {
+                            Image(systemName: layout.icon)
+                        }
+                        statusIndicator
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    statusIndicator
+                    folderFilterMenu
                 }
             }
             .alert("エラー", isPresented: Binding(
@@ -181,6 +196,10 @@ struct NoteListView: View {
             }
             .onChange(of: searchText) { _, query in
                 runSearch(query)
+            }
+            .onChange(of: folderFilter) { _, newFolder in
+                // フォルダを切り替えたら、そのフォルダに保存された表示形式へ
+                layoutRaw = savedLayout(for: newFolder).rawValue
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -196,6 +215,8 @@ struct NoteListView: View {
             }
         }
         .task {
+            // 現在のフォルダに保存された表示形式を反映
+            layoutRaw = savedLayout(for: folderFilter).rawValue
             // 起動: ストアを開く → 空なら全件インポート → 一覧をロード → リスナー開始
             await NoteStore.shared.bootstrap()
             if await NoteStore.shared.count() == 0 {
@@ -269,6 +290,21 @@ struct NoteListView: View {
             Circle()
                 .fill(listener.isConnected ? Color.green : Color.gray.opacity(0.5))
                 .frame(width: 7, height: 7)
+        }
+    }
+
+    /// フォルダ絞り込みメニュー（すべて／ルート／同期フォルダ）。選択中は塗りつぶしアイコン。
+    var folderFilterMenu: some View {
+        Menu {
+            Picker("フォルダで絞り込み", selection: $folderFilter) {
+                Text("すべて").tag("")
+                Text("ルート").tag("/")
+                ForEach(SyncScope.normalizedFolders, id: \.self) { folder in
+                    Text(folder).tag(folder)
+                }
+            }
+        } label: {
+            Image(systemName: folderFilter.isEmpty ? "folder" : "folder.fill")
         }
     }
 
@@ -446,13 +482,30 @@ struct NoteListView: View {
         await loadNotes()
     }
 
-    /// 総ページ数の表示（検索中は「ヒット数 / 全数」）。
+    // MARK: - フォルダごとの表示形式
+
+    private static let layoutByFolderKey = "noteList_layoutByFolder"
+
+    /// 指定フォルダに保存された表示形式（未保存なら詳細表示）。
+    private func savedLayout(for folder: String) -> NoteListLayout {
+        let map = UserDefaults.standard.dictionary(forKey: Self.layoutByFolderKey) as? [String: String] ?? [:]
+        return NoteListLayout(rawValue: map[folder] ?? "") ?? .detail
+    }
+
+    /// 指定フォルダの表示形式を保存する。
+    private func saveLayout(_ layout: NoteListLayout, for folder: String) {
+        var map = UserDefaults.standard.dictionary(forKey: Self.layoutByFolderKey) as? [String: String] ?? [:]
+        map[folder] = layout.rawValue
+        UserDefaults.standard.set(map, forKey: Self.layoutByFolderKey)
+    }
+
+    /// ページ数の表示（検索・フォルダ絞り込み中は「表示数 / 全数」）。
     var countLabel: some View {
         HStack {
             Spacer()
-            Text(trimmedSearch.isEmpty
+            Text(displayedNotes.count == notes.count
                  ? "\(notes.count) ページ"
-                 : "\(searchResults.count) / \(notes.count) ページ")
+                 : "\(displayedNotes.count) / \(notes.count) ページ")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -677,58 +730,70 @@ struct NoteCardView: View {
     @State private var imageURL: URL? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            // タイトル（最大3行）＋「今日」バッジ
-            HStack(alignment: .top, spacing: 5) {
-                Text(note.shortTitle)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(3)
-                if note.isToday {
-                    Text("今日")
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Color.accentColor)
-                        .clipShape(Capsule())
-                }
-            }
+        // Color で正方形を確定（横幅基準）し、内容をオーバーレイ。はみ出す画像は上下をクリップ。
+        Color(.systemGray6)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                VStack(alignment: .leading, spacing: 4) {
+                    // タイトル（最大3行）＋日付。fixedSize で圧縮されず常に確保する。
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .top, spacing: 5) {
+                            Text(note.shortTitle)
+                                .font(.footnote.weight(.semibold))
+                                .lineSpacing(1)
+                                .lineLimit(3)
+                            if note.isToday {
+                                Text("今日")
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Color.accentColor)
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        Text(note.lastModifiedString)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(note.lastModifiedString)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            // タイトル下の可変エリア：画像があれば画像、なければ本文プレビュー
-            if let imageURL {
-                AsyncImage(url: imageURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    case .failure:
-                        Color(.systemGray5)
-                    default:
-                        Color(.systemGray6)
+                    // タイトル下の残り領域：画像があれば画像、なければ本文プレビュー
+                    if let imageURL {
+                        // Color.clear に画像を overlay することで、画像の本来サイズが
+                        // 領域の高さを膨らませない（残り領域にフィットさせ、はみ出しはクリップ）。
+                        Color.clear
+                            .overlay {
+                                AsyncImage(url: imageURL) { phase in
+                                    switch phase {
+                                    case .success(let image):
+                                        image.resizable().aspectRatio(contentMode: .fill)
+                                    case .failure:
+                                        Color(.systemGray5)
+                                    default:
+                                        Color(.systemGray6)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    } else if let preview = note.preview {
+                        Text(preview)
+                            .font(.caption2)
+                            .foregroundStyle(.primary.opacity(0.6))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else {
+                        Spacer(minLength: 0)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else if let preview = note.preview {
-                Text(preview)
-                    .font(.caption2)
-                    .foregroundStyle(.primary.opacity(0.6))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                Spacer(minLength: 0)
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity)
-        .aspectRatio(1, contentMode: .fit)   // すべてのカードを正方形に統一
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .task(id: note.id) {
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .task(id: note.id) {
             // 可視カードだけ本文を引いて先頭の画像URL（https）を検出する
             if let urlString = await NoteStore.shared.firstImageURL(forID: note.id),
                let url = URL(string: urlString) {

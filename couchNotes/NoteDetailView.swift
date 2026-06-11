@@ -202,6 +202,9 @@ struct NoteDetailView: View {
                         .font(.headline)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        // 左右のバーボタンに被らないよう最大幅を制限し、長いタイトルは末尾を省略
+                        .frame(maxWidth: UIScreen.main.bounds.width * 0.55)
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
