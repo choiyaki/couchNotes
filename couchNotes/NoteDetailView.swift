@@ -53,6 +53,8 @@ struct NoteDetailView: View {
 
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
+    // 一覧へ戻るボタンのアイコンを一覧の表示モードに合わせる
+    @AppStorage("noteList_layout")    private var layoutRaw = NoteListLayout.detail.rawValue
 
     @ObservedObject private var network = NetworkMonitor.shared
 
@@ -188,7 +190,7 @@ struct NoteDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { onGoToList?() } label: {
-                    Image(systemName: "rectangle.stack")
+                    Image(systemName: (NoteListLayout(rawValue: layoutRaw) ?? .detail).icon)
                 }
             }
             ToolbarItem(placement: .principal) {

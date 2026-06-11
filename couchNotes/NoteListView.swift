@@ -5,6 +5,9 @@ struct NoteListView: View {
     @ObservedObject private var urlRouter = URLActionRouter.shared
     @Environment(\.scenePhase) private var scenePhase
 
+    @AppStorage("noteList_layout") private var layoutRaw = NoteListLayout.detail.rawValue
+    private var layout: NoteListLayout { NoteListLayout(rawValue: layoutRaw) ?? .detail }
+
     @State private var notes: [NoteItem] = []
     @State private var path: [String]    = []
     @State private var errorMessage: String? = nil
@@ -56,39 +59,9 @@ struct NoteListView: View {
                   VStack(spacing: 0) {
                     searchBar
                     countLabel
-                    List(displayedNotes) { note in
-                        NavigationLink(value: note.id) {
-                            NoteRowView(note: note)
-                        }
-                        .contextMenu {
-                            Button {
-                                renameText = note.shortTitle
-                                noteToRename = note
-                            } label: {
-                                Label("タイトル変更", systemImage: "pencil")
-                            }
-                            Button(role: .destructive) {
-                                noteToDelete = note
-                            } label: {
-                                Label("削除", systemImage: "trash")
-                            }
-                        }
-                    }
-                    .contentMargins(.top, 4, for: .scrollContent)
-                    .overlay {
-                        if displayedNotes.isEmpty && !trimmedSearch.isEmpty {
-                            ContentUnavailableView(
-                                "一致するノートがありません",
-                                systemImage: "magnifyingglass",
-                                description: Text("「＋」で『\(trimmedSearch)』を作成できます")
-                            )
-                        }
-                    }
-                    .refreshable {
-                        ChangesListener.shared.start()
-                        await loadNotes()
-                    }
-                    .confirmationDialog(
+                    noteContent
+                  }
+                  .confirmationDialog(
                         "「\(noteToDelete?.shortTitle ?? "")」を削除しますか？",
                         isPresented: Binding(
                             get: { noteToDelete != nil },
@@ -115,7 +88,6 @@ struct NoteListView: View {
                     } message: { _ in
                         Text("他ページのリンクも更新されます。")
                     }
-                  }
                 }
             }
             .navigationTitle("ノート")
@@ -189,7 +161,11 @@ struct NoteListView: View {
                     }
                 }
                 ToolbarItem(placement: .principal) {
-                    Image(systemName: "rectangle.stack")
+                    Button {
+                        layoutRaw = layout.next.rawValue
+                    } label: {
+                        Image(systemName: layout.icon)
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     statusIndicator
@@ -390,9 +366,86 @@ struct NoteListView: View {
         }
     }
 
-    // MARK: - 検索バー
+    // MARK: - 一覧本体（表示モード別）
+
+    /// 選択中の表示モードに応じた一覧本体。
+    @ViewBuilder
+    var noteContent: some View {
+        switch layout {
+        case .detail: notesList { NoteRowView(note: $0) }
+        case .list:   notesList { NoteRowCompactView(note: $0) }
+        case .card:   notesGrid
+        }
+    }
+
+    /// リスト系（詳細・コンパクト）の共通レイアウト。行の中身だけ差し替える。
+    @ViewBuilder
+    private func notesList<Row: View>(@ViewBuilder row: @escaping (NoteItem) -> Row) -> some View {
+        List(displayedNotes) { note in
+            NavigationLink(value: note.id) {
+                row(note)
+            }
+            .contextMenu { contextMenuButtons(for: note) }
+        }
+        .listStyle(.plain)
+        .contentMargins(.top, 4, for: .scrollContent)
+        .overlay { searchEmptyOverlay }
+        .refreshable { await refresh() }
+    }
+
+    /// カード表示（iPhone：2列グリッド）。
+    private var notesGrid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                spacing: 12
+            ) {
+                ForEach(displayedNotes) { note in
+                    NavigationLink(value: note.id) {
+                        NoteCardView(note: note)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { contextMenuButtons(for: note) }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+        }
+        .overlay { searchEmptyOverlay }
+        .refreshable { await refresh() }
+    }
 
     @ViewBuilder
+    private func contextMenuButtons(for note: NoteItem) -> some View {
+        Button {
+            renameText = note.shortTitle
+            noteToRename = note
+        } label: {
+            Label("タイトル変更", systemImage: "pencil")
+        }
+        Button(role: .destructive) {
+            noteToDelete = note
+        } label: {
+            Label("削除", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    private var searchEmptyOverlay: some View {
+        if displayedNotes.isEmpty && !trimmedSearch.isEmpty {
+            ContentUnavailableView(
+                "一致するノートがありません",
+                systemImage: "magnifyingglass",
+                description: Text("「＋」で『\(trimmedSearch)』を作成できます")
+            )
+        }
+    }
+
+    private func refresh() async {
+        ChangesListener.shared.start()
+        await loadNotes()
+    }
+
     /// 総ページ数の表示（検索中は「ヒット数 / 全数」）。
     var countLabel: some View {
         HStack {
@@ -521,6 +574,32 @@ struct NoteListView: View {
     }
 }
 
+// MARK: - 表示モード
+
+enum NoteListLayout: String, CaseIterable {
+    case detail   // リスト詳細表示（タイトル＋日付＋本文プレビュー）
+    case list     // リスト表示（タイトル＋日付の1行）
+    case card     // カード表示（2列グリッド）
+
+    /// トグル順：詳細 → リスト → カード → 詳細 …
+    var next: NoteListLayout {
+        switch self {
+        case .detail: return .list
+        case .list:   return .card
+        case .card:   return .detail
+        }
+    }
+
+    /// ツールバーに出す現在モードのアイコン。
+    var icon: String {
+        switch self {
+        case .detail: return "list.bullet.rectangle"
+        case .list:   return "list.bullet"
+        case .card:   return "square.grid.2x2"
+        }
+    }
+}
+
 // MARK: - ノート行
 
 struct NoteRowView: View {
@@ -559,5 +638,104 @@ struct NoteRowView: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - ノート行（コンパクト：タイトル＋日付の1行）
+
+struct NoteRowCompactView: View {
+    let note: NoteItem
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(note.shortTitle)
+                .font(.body)
+                .lineLimit(1)
+            if note.isToday {
+                Text("今日")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor)
+                    .clipShape(Capsule())
+            }
+            Spacer(minLength: 8)
+            Text(note.lastModifiedString)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - ノートカード
+
+struct NoteCardView: View {
+    let note: NoteItem
+    @State private var imageURL: URL? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            // タイトル（最大3行）＋「今日」バッジ
+            HStack(alignment: .top, spacing: 5) {
+                Text(note.shortTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(3)
+                if note.isToday {
+                    Text("今日")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor)
+                        .clipShape(Capsule())
+                }
+            }
+
+            Text(note.lastModifiedString)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            // タイトル下の可変エリア：画像があれば画像、なければ本文プレビュー
+            if let imageURL {
+                AsyncImage(url: imageURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    case .failure:
+                        Color(.systemGray5)
+                    default:
+                        Color(.systemGray6)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if let preview = note.preview {
+                Text(preview)
+                    .font(.caption2)
+                    .foregroundStyle(.primary.opacity(0.6))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .aspectRatio(1, contentMode: .fit)   // すべてのカードを正方形に統一
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .task(id: note.id) {
+            // 可視カードだけ本文を引いて先頭の画像URL（https）を検出する
+            if let urlString = await NoteStore.shared.firstImageURL(forID: note.id),
+               let url = URL(string: urlString) {
+                imageURL = url
+            } else {
+                imageURL = nil
+            }
+        }
     }
 }

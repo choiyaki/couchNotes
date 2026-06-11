@@ -209,6 +209,27 @@ actor NoteStore {
         return readItems(stmt, previewTrim: true)
     }
 
+    /// カード表示用：本文先頭にあるリモート画像（https）のURLを返す。無ければ nil。
+    func firstImageURL(forID id: String) -> String? {
+        guard let stmt = prepare("SELECT content FROM notes WHERE id = ? AND deleted = 0;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let content = columnText(stmt, 0) else { return nil }
+        return Self.firstImageURL(in: content)
+    }
+
+    /// Markdown 画像記法 `![alt](https://…)` の最初の URL を取り出す。
+    static func firstImageURL(in body: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#) else {
+            return nil
+        }
+        let range = NSRange(body.startIndex..., in: body)
+        guard let match = re.firstMatch(in: body, range: range),
+              match.numberOfRanges > 1,
+              let r = Range(match.range(at: 1), in: body) else { return nil }
+        return String(body[r])
+    }
+
     // MARK: - バックアップ用エクスポート
 
     /// バックアップ対象ノートを (リポジトリ内パス, 全文) で列挙する。
