@@ -40,6 +40,79 @@ final class NonAutoScrollTextView: UITextView {
     override func layoutSubviews() {
         super.layoutSubviews()
         positionFooter()
+
+        // 画像オーバーレイの再配置はテキスト or 幅が変わった時だけ（スクロール時は子ビューが
+        // コンテンツと一緒に動くため再計算不要）。
+        let w = bounds.width
+        if text != lastImageText || abs(w - lastImageWidth) > 0.5 {
+            lastImageText  = text
+            lastImageWidth = w
+            layoutImagePreviews()
+        }
+    }
+
+    // MARK: - 画像インラインプレビュー（オーバーレイ）
+
+    private var imagePreviews: [Int: EditorImagePreviewView] = [:]
+    private var lastImageText:  String  = "\u{0}"   // 初回必ず実行されるよう番兵
+    private var lastImageWidth: CGFloat = -1
+
+    /// 画像読み込み完了時などに次回 layout で必ず再配置させる。
+    func invalidateImagePreviews() {
+        lastImageWidth = -1
+        setNeedsLayout()
+    }
+
+    /// 画像リンク行の直下（段落余白）に画像ビューを配置する。
+    private func layoutImagePreviews() {
+        guard let regex = MarkdownStyler.imageLinkRegex else { return }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+
+        if matches.isEmpty {
+            imagePreviews.values.forEach { $0.removeFromSuperview() }
+            imagePreviews.removeAll()
+            return
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let contentWidth = bounds.width - textContainerInset.left - textContainerInset.right
+        guard contentWidth > 0 else { return }
+
+        var used = Set<Int>()
+        for (i, m) in matches.enumerated() where m.numberOfRanges > 1 {
+            let urlRange = m.range(at: 1)
+            guard urlRange.location != NSNotFound else { continue }
+            let url = ns.substring(with: urlRange)
+
+            let lineRange  = ns.lineRange(for: m.range)
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
+            let lineRect   = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+            let size = EditorImageStore.shared.displaySize(for: url, contentWidth: contentWidth)
+            let x = textContainerInset.left
+            let y = textContainerInset.top + lineRect.maxY + 6
+
+            let view: EditorImagePreviewView
+            if let existing = imagePreviews[i] {
+                view = existing
+            } else {
+                view = EditorImagePreviewView()
+                addSubview(view)
+                imagePreviews[i] = view
+            }
+            view.url = url
+            view.frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+            view.setImage(EditorImageStore.shared.image(for: url))
+            used.insert(i)
+
+            EditorImageStore.shared.ensureLoaded(url)
+        }
+
+        for (i, v) in imagePreviews where !used.contains(i) {
+            v.removeFromSuperview()
+            imagePreviews[i] = nil
+        }
     }
 
     private func positionFooter() {
@@ -145,11 +218,15 @@ struct MarkdownTextView: UIViewRepresentable {
             object: nil
         )
 
+        // 画像読み込み完了 → 余白(段落)の再スタイル＋オーバーレイ再配置
+        EditorImageStore.shared.onUpdate = { [weak coord] in coord?.reapplyStylingForImageLoad() }
+
         return tv
     }
 
     static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
+        EditorImageStore.shared.onUpdate = nil
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
@@ -431,6 +508,14 @@ extension MarkdownTextView {
                                  fontSize: fontSize, lineSpacing: lineSpacing)
             parent.text = tv.text
             tv.typingAttributes = MarkdownStyler.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
+        }
+
+        /// 画像読み込み完了時：余白（段落スタイル）を更新し、オーバーレイを再配置させる。
+        func reapplyStylingForImageLoad() {
+            guard let tv = textView else { return }
+            MarkdownStyler.apply(to: tv.textStorage, notes: notes,
+                                 fontSize: fontSize, lineSpacing: lineSpacing)
+            (tv as? NonAutoScrollTextView)?.invalidateImagePreviews()
         }
 
         private func clamp(_ loc: Int, in tv: UITextView) -> Int {
@@ -746,7 +831,29 @@ enum MarkdownStyler {
 
         styleWikiLinks(in: storage, range: full, notes: notes)
         styleExternalLinks(in: storage, range: full)
+        styleImageLines(in: storage, lineSpacing: lineSpacing)
         styleBlockIDs(in: storage, range: full, font: blockIDFont)
+    }
+
+    // 画像リンク `![](http…)`（リモート）。capture 1 = URL。
+    static let imageLinkRegex = try? NSRegularExpression(
+        pattern: #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#
+    )
+
+    /// 画像リンク行に「段落下の余白」を設定し、画像オーバーレイの居場所を確保する。
+    /// テキスト（文字）は増やさないのでカーソル挙動・保存本文には影響しない。
+    private static func styleImageLines(in s: NSTextStorage, lineSpacing: CGFloat) {
+        guard let regex = imageLinkRegex else { return }
+        let ns = s.string as NSString
+        let full = NSRange(location: 0, length: s.length)
+        for m in regex.matches(in: s.string, range: full) where m.numberOfRanges > 1 {
+            let url = ns.substring(with: m.range(at: 1))
+            let lineRange = ns.lineRange(for: m.range)
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = lineSpacing
+            para.paragraphSpacing = EditorImageStore.shared.displayHeight(for: url) + 16
+            s.addAttribute(.paragraphStyle, value: para, range: lineRange)
+        }
     }
 
     private static func styleLine(_ line: String, at range: NSRange, in s: NSTextStorage,
