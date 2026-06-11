@@ -5,6 +5,8 @@ import UIKit
 
 extension NSAttributedString.Key {
     static let wikiLinkTarget = NSAttributedString.Key("couchNotes.wikiLinkTarget")
+    /// 外部リンク（http/https）。値は開く URL 文字列。
+    static let externalLinkURL = NSAttributedString.Key("couchNotes.externalLinkURL")
 }
 
 // MARK: - 自動スクロールを抑制する UITextView
@@ -652,6 +654,15 @@ extension MarkdownTextView {
                 return
             }
 
+            // --- 外部リンク判定（グリフ上を実際にタップした場合のみ）→ Safari で開く ---
+            if onGlyph,
+               let urlStr = tv.textStorage.attribute(.externalLinkURL, at: idx, effectiveRange: nil) as? String,
+               let url = URL(string: urlStr) {
+                tv.resignFirstResponder()
+                UIApplication.shared.open(url)
+                return
+            }
+
             // --- チェックボックス判定（グリフ上・先頭6文字以内のみ）---
             guard onGlyph else { return }
             let lineRange    = ns.lineRange(for: NSRange(location: idx, length: 0))
@@ -718,6 +729,8 @@ enum MarkdownStyler {
         storage.removeAttribute(.strikethroughStyle, range: full)
         storage.removeAttribute(.paragraphStyle,     range: full)
         storage.removeAttribute(.wikiLinkTarget,     range: full)
+        storage.removeAttribute(.externalLinkURL,    range: full)
+        storage.removeAttribute(.underlineStyle,     range: full)
 
         // 行間を全体に適用（リスト行は後でぶら下げと合成して上書き）
         if lineSpacing > 0 {
@@ -732,6 +745,7 @@ enum MarkdownStyler {
         }
 
         styleWikiLinks(in: storage, range: full, notes: notes)
+        styleExternalLinks(in: storage, range: full)
         styleBlockIDs(in: storage, range: full, font: blockIDFont)
     }
 
@@ -816,6 +830,43 @@ enum MarkdownStyler {
                            value: exists ? UIColor.systemBlue : UIColor.systemBlue.withAlphaComponent(0.35),
                            range: m.range)
             s.addAttribute(.wikiLinkTarget, value: linkText + ".md", range: m.range)
+        }
+    }
+
+    // 画像でない Markdown リンク `[text](http…)`（先頭の ! を除外）。capture 1 = URL。
+    private static let mdLinkRegex = try? NSRegularExpression(
+        pattern: #"(?<!\!)\[[^\]]*\]\((https?://[^)\s]+)\)"#
+    )
+    // 裸の URL（http/https）。
+    private static let bareURLRegex = try? NSRegularExpression(
+        pattern: #"https?://[^\s)\]]+"#
+    )
+
+    /// 外部リンク（Markdown リンク／裸 URL）に色・下線とタップ用 URL 属性を付ける。
+    private static func styleExternalLinks(in s: NSTextStorage, range: NSRange) {
+        let ns = s.string as NSString
+
+        func mark(_ matchRange: NSRange, url: String) {
+            s.addAttribute(.externalLinkURL, value: url, range: matchRange)
+            s.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: matchRange)
+            s.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: matchRange)
+        }
+
+        // 1) Markdown リンク（`![]()` 画像は除外）
+        if let regex = mdLinkRegex {
+            for m in regex.matches(in: s.string, range: range) where m.numberOfRanges > 1 {
+                let urlRange = m.range(at: 1)
+                guard urlRange.location != NSNotFound else { continue }
+                mark(m.range, url: ns.substring(with: urlRange))
+            }
+        }
+
+        // 2) 裸 URL（既にリンク属性が付いている範囲＝Markdown リンク内は除外）
+        if let regex = bareURLRegex {
+            for m in regex.matches(in: s.string, range: range) {
+                if s.attribute(.externalLinkURL, at: m.range.location, effectiveRange: nil) != nil { continue }
+                mark(m.range, url: ns.substring(with: m.range))
+            }
         }
     }
 
