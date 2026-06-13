@@ -331,6 +331,10 @@ struct NoteDetailView: View {
         extraFrontmatter = parsed.extraLines.joined(separator: "\n")
         let fresh = parsed.body
 
+        // 入ってきた本文が現在の基準と同一なら外部変更ではない（自分の保存のエコー等）。
+        // 未保存中でもバナーを出さないよう、hasUnsavedChanges に関係なく早期 return する。
+        if fresh == content { return }
+
         if !hasUnsavedChanges {
             content        = fresh
             editingContent = fresh
@@ -347,7 +351,9 @@ struct NoteDetailView: View {
         updatedMs        = stored.mtime
         extraFrontmatter = stored.extra ?? ""
         let fresh = stored.body
-        if fresh == content && !hasUnsavedChanges { return }
+        // 入ってきた本文が現在の基準と同一なら外部変更ではない（自分の保存のエコー等）。
+        // 未保存中かどうかに関係なく早期 return する（編集中の誤検知バナーを防ぐ）。
+        if fresh == content { return }
 
         if !hasUnsavedChanges {
             content        = fresh
@@ -506,13 +512,15 @@ struct NoteDetailView: View {
         }
 
         saveStatus = .saving
+        // 実際に保存する本文をスナップショット（保存中にタイプされても基準がズレないように）
+        let savedBody  = editingContent
         // フロントマター（created=ctime / updated=now）を付けて全文を保存
         let nowMs      = Date().timeIntervalSince1970 * 1000
         let createdSec = Int((createdMs ?? nowMs) / 1000)
         let updatedSec = Int(nowMs / 1000)
         let extraLines = extraFrontmatter.isEmpty ? [] : extraFrontmatter.components(separatedBy: "\n")
         let fullText   = FrontmatterParser.compose(
-            createdSec: createdSec, updatedSec: updatedSec, extra: extraLines, body: editingContent
+            createdSec: createdSec, updatedSec: updatedSec, extra: extraLines, body: savedBody
         )
         do {
             try await CouchDBClient.shared.saveNoteContent(id: noteId, text: fullText)
@@ -527,8 +535,9 @@ struct NoteDetailView: View {
                 content: fullText
             )
             await NoteStore.shared.upsert(record)
-            content                 = editingContent
-            hasUnsavedChanges       = false
+            // 基準は「実際に保存した本文」。保存中に打った差分は未保存として残す。
+            content                 = savedBody
+            hasUnsavedChanges       = editingContent != savedBody
             externalChangeAvailable = false
             pendingExternalContent  = ""
             saveStatus              = .saved
