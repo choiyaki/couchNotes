@@ -207,7 +207,11 @@ struct NoteDetailView: View {
                                   hasUnsavedChanges,
                                   !externalChangeAvailable
                             else { return }
-                            await save()
+                            // 保存はデバウンス Task のキャンセル対象から切り離す。
+                            // こうしないと、次の入力で saveDebounceTask をキャンセルした際に
+                            // 進行中の保存（HTTP リクエスト）まで中断され、URLError.cancelled が
+                            // networkError として誤検知され、サーバ側だけ適用される ack ロストを招く。
+                            Task { await save() }
                         }
                     }
             }
@@ -349,10 +353,9 @@ struct NoteDetailView: View {
 
     private func applyExternalChange(record: NoteRecord) async {
         // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
-        guard !saveInFlight else { print("[sync] applyExternalChange SKIP (saveInFlight) id=\(noteId)"); return }
+        guard !saveInFlight else { return }
         await NoteStore.shared.upsert(record)
         let parsed = FrontmatterParser.split(record.content)
-        print("[sync] applyExternalChange id=\(noteId) baseRev \(baseRev ?? "nil") -> \(record.rev ?? "nil") freshLen=\(parsed.body.count) contentLen=\(content.count) hasUnsaved=\(hasUnsavedChanges) willBanner=\(parsed.body != content && hasUnsavedChanges)")
         baseRev          = record.rev
         createdMs        = record.ctime
         updatedMs        = record.mtime
@@ -374,10 +377,9 @@ struct NoteDetailView: View {
 
     private func applyExternalChangeIfNeeded() async {
         // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
-        guard !saveInFlight else { print("[sync] applyExternalChangeIfNeeded SKIP (saveInFlight) id=\(noteId)"); return }
+        guard !saveInFlight else { return }
         // リスナーが既にストアを更新済みなので、そこから最新本文を読む
         guard let stored = await NoteStore.shared.editingNote(noteId) else { return }
-        print("[sync] applyExternalChangeIfNeeded id=\(noteId) baseRev \(baseRev ?? "nil") -> \(stored.rev ?? "nil") freshLen=\(stored.body.count) contentLen=\(content.count) hasUnsaved=\(hasUnsavedChanges) willBanner=\(stored.body != content && hasUnsavedChanges)")
         baseRev          = stored.rev
         createdMs        = stored.ctime
         updatedMs        = stored.mtime
@@ -419,7 +421,6 @@ struct NoteDetailView: View {
             content          = stored.body
             editingContent   = stored.body
             baseRev          = stored.rev
-            print("[sync] loadContent(local) id=\(noteId) baseRev=\(stored.rev ?? "nil")")
             createdMs        = stored.ctime
             updatedMs        = stored.mtime
             extraFrontmatter = stored.extra ?? ""
@@ -590,39 +591,30 @@ struct NoteDetailView: View {
 
         // 3) サーバへ push（楽観ロック：基準 rev とずれていれば 409 で競合検知）
         saveStatus = .saving
-        print("[sync] save push id=\(noteId) baseRev=\(baseRev ?? "nil") bodyLen=\(savedBody.count)")
         do {
             let newRev = try await CouchDBClient.shared.saveNoteContentChecked(
                 id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: baseRev)
-            print("[sync] save OK id=\(noteId) newRev=\(newRev)")
             await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
         } catch CouchDBError.networkError {
             // ネットワークエラー: アラートを出さず、未保存(dirty)を保持して再接続を待つ
-            print("[sync] save networkError id=\(noteId)")
             saveStatus = .unsaved
         } catch CouchDBError.httpError(409, _) {
             // 競合。サーバ側が削除済みか、他端末の編集かで分岐。
-            print("[sync] save 409 id=\(noteId) baseRev=\(baseRev ?? "nil")")
             if let record = try? await CouchDBClient.shared.fetchNoteRecord(id: noteId) {
                 // 編集 vs 編集 → サーバ最新を取り込み、ExternalChangeBanner で解決をユーザに委ねる
-                let serverBody = FrontmatterParser.split(record.content).body
-                print("[sync] 409 server EXISTS rev=\(record.rev ?? "nil") serverLen=\(serverBody.count) contentLen=\(content.count) savedLen=\(savedBody.count) eq(server,content)=\(serverBody == content) eq(server,saved)=\(serverBody == savedBody)")
                 await applyExternalChange(record: record)
                 saveStatus = .unsaved
             } else if let tomb = try? await CouchDBClient.shared.currentLeafRev(id: noteId),
                       let newRev = try? await CouchDBClient.shared.saveNoteContentChecked(
                           id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: tomb) {
                 // 削除 vs 編集 → 墓標の上に編集を復元（データ保全）し、ユーザに通知
-                print("[sync] 409 server DELETED -> recreated newRev=\(newRev)")
                 await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
                 errorMessage = "このノートは他の端末で削除されていましたが、あなたの編集で復元しました。"
             } else {
-                print("[sync] 409 unresolved id=\(noteId) -> unsaved")
                 saveStatus = .unsaved
             }
         } catch {
             // ネットワーク以外のエラー（認証失敗・5xx・デコードエラー等）はアラート
-            print("[sync] save error id=\(noteId) \(error)")
             errorMessage = "保存に失敗しました\n\(error.localizedDescription)"
             saveStatus   = .unsaved
         }
@@ -635,7 +627,6 @@ struct NoteDetailView: View {
         // 基準（content/baseRev）は await の「前」に更新する。
         // markClean でストアが clean になった後に content が古いままだと、その隙間に自分の
         // 保存エコーが届いたとき「外部更新」と誤検知してバナーが出るため。
-        print("[sync] markSaved id=\(noteId) baseRev \(baseRev ?? "nil") -> \(newRev)")
         baseRev                 = newRev
         content                 = savedBody
         hasUnsavedChanges       = editingContent != savedBody

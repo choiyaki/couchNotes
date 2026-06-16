@@ -255,7 +255,6 @@ class CouchDBClient {
         note._rev  = baseRev   // nil なら新規作成（_rev は出力されない）
         let body   = try JSONEncoder().encode(note)
         let (data, code) = try await httpRequest(path: id, method: "PUT", body: body)
-        print("[sync] PUT id=\(id) baseRev=\(baseRev ?? "nil") -> code=\(code) resp=\(String(data: data, encoding: .utf8) ?? "")")
         if code == 409 { throw CouchDBError.httpError(409, "conflict") }
         if code != 200 && code != 201 {
             throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
