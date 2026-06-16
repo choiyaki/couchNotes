@@ -72,7 +72,8 @@ class CouchDBClient {
         let content = try await fetchFullText(from: note.children)
         return NoteRecord(
             id: id, path: note.path, mtime: note.mtime,
-            ctime: note.ctime, size: note.size, content: content
+            ctime: note.ctime, size: note.size, content: content,
+            rev: note._rev
         )
     }
 
@@ -117,7 +118,7 @@ class CouchDBClient {
         // 1) ノートのメタ + children
         let query: [String: Any] = [
             "selector": selector,
-            "fields":   ["_id", "path", "mtime", "ctime", "size", "children", "deleted"],
+            "fields":   ["_id", "_rev", "path", "mtime", "ctime", "size", "children", "deleted"],
             "limit":    99999
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: query) else {
@@ -161,16 +162,38 @@ class CouchDBClient {
             let content = (d.children ?? []).map { chunkData[$0] ?? "" }.joined()
             return NoteRecord(
                 id: d._id, path: d.path, mtime: d.mtime,
-                ctime: d.ctime, size: d.size ?? content.utf8.count, content: content
+                ctime: d.ctime, size: d.size ?? content.utf8.count, content: content,
+                rev: d._rev
             )
         }
     }
 
     /// 指定 id 群のノートを本文込みで一括取得する（_changes の差分取り込み用）。
-    /// deleted:true やルート外などは結果に含まれない（呼び出し側で差集合＝削除を判定する）。
+    /// 削除（トゥームストーン）やルート外などは結果に含まれない（削除は _changes の deleted:true で判定）。
     func fetchNoteRecords(ids: [String]) async throws -> [NoteRecord] {
         guard !ids.isEmpty else { return [] }
         return try await fetchNotes(selector: ["type": ["$eq": "plain"], "_id": ["$in": ids]])
+    }
+
+    /// サーバ上に「生存している」ノート（.md・同期スコープ内）の id→rev マップを返す。
+    /// _all_docs は本文を含まず、削除済み（墓標）は既定で返さないので、リコンシリエーションの
+    /// 「正＝サーバ」の存在集合＋世代をまとめて軽量に取得できる。
+    func liveNoteRevs(folders: [String]) async throws -> [String: String] {
+        let (data, code) = try await httpRequest(path: "_all_docs")
+        if code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let resp = try? JSONDecoder().decode(AllDocsRevResponse.self, from: data) else {
+            throw CouchDBError.decodingError
+        }
+        var out: [String: String] = [:]
+        for row in resp.rows {
+            guard let id = row.id, let rev = row.value?.rev else { continue }
+            guard id.hasSuffix(".md"), !id.hasPrefix("h:"),
+                  SyncScope.shouldSync(id: id, folders: folders) else { continue }
+            out[id] = rev
+        }
+        return out
     }
 
     /// 現在の update_seq を取得（初回インポート後、_changes の起点に使う）
@@ -219,14 +242,55 @@ class CouchDBClient {
         }
     }
 
-    /// ノートを削除（Obsidian LiveSync 互換のソフト削除）。
-    /// ネイティブ削除（_deleted トゥームストーン）だと LiveSync が再アップロードで復活させるため、
-    /// ドキュメントに deleted:true を立てて mtime を更新する。既に無ければ何もしない。
+    /// 本文を保存（楽観ロック）。baseRev を明示し、サーバがそれより進んでいれば 409 を投げる（再取得しない）。
+    /// baseRev=nil は新規作成（既存・墓標があれば 409）。成功時は新しい _rev を返す。
+    /// これにより「編集 vs 編集」「削除 vs 編集」の競合を呼び出し側で検知できる。
+    @discardableResult
+    func saveNoteContentChecked(id: String, path: String, text: String,
+                                ctime: Double, baseRev: String?) async throws -> String {
+        let (chunkIDs, chunks) = makeChunks(text: text)
+        try await putChunks(chunks)
+        var note   = LiveSyncNote(id: id, children: chunkIDs, size: text.utf8.count, ctime: ctime)
+        note.path  = path
+        note._rev  = baseRev   // nil なら新規作成（_rev は出力されない）
+        let body   = try JSONEncoder().encode(note)
+        let (data, code) = try await httpRequest(path: id, method: "PUT", body: body)
+        print("[sync] PUT id=\(id) baseRev=\(baseRev ?? "nil") -> code=\(code) resp=\(String(data: data, encoding: .utf8) ?? "")")
+        if code == 409 { throw CouchDBError.httpError(409, "conflict") }
+        if code != 200 && code != 201 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let rev = obj["rev"] as? String { return rev }
+        return ""
+    }
+
+    /// ドキュメントの現在の _rev を返す（削除済み＝墓標でも取得できる）。存在しなければ nil。
+    /// 墓標の上に新しいリビジョンを作る（削除されたノートに編集を復元する）ために使う。
+    /// _all_docs を keys 指定で引くと、削除済みでも value.rev（と deleted:true）が返る（open_revs より堅牢）。
+    func currentLeafRev(id: String) async throws -> String? {
+        let body = try JSONSerialization.data(withJSONObject: ["keys": [id]])
+        let (data, code) = try await httpRequest(path: "_all_docs", method: "POST", body: body)
+        guard code == 200 else { return nil }
+        guard let resp = try? JSONDecoder().decode(AllDocsRevResponse.self, from: data) else { return nil }
+        return resp.rows.first?.value?.rev
+    }
+
+    /// ノートを削除（CouchDB ネイティブ削除＝トゥームストーン）。
+    /// 単一の Remote CouchDB を正本とするためソフト削除（独自 deleted:true）は使わない。
+    /// _changes に deleted:true として流れ、他端末はそれを唯一の削除信号として反映する。
+    /// 本文フィールドは消え、極小の墓標（_id/_rev/_deleted）だけが残る。既に無ければ何もしない。
     func deleteNote(id: String) async throws {
-        guard var note = try await fetchNote(id: id) else { return }
-        note.deleted = true
-        note.mtime   = Date().timeIntervalSince1970 * 1000
-        try await putNote(note)
+        // 競合（409）に備えて rev を取り直して最大2回まで試行する。
+        for _ in 0..<2 {
+            guard let note = try await fetchNote(id: id), let rev = note._rev else { return }
+            let body = try JSONSerialization.data(withJSONObject: ["_id": id, "_rev": rev, "_deleted": true])
+            let (data, code) = try await httpRequest(path: id, method: "PUT", body: body)
+            if code == 200 || code == 201 { return }
+            if code == 409 { continue }   // 競合：rev を取り直して再試行
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        throw CouchDBError.httpError(409, "削除が競合しました")
     }
 
     /// ノートを別フォルダへ移動する。_id ＝ パスのため「新IDで作成＋旧ID削除」で行う。
@@ -577,11 +641,13 @@ class CouchDBClient {
         path: String,
         method: String = "GET",
         body: Data? = nil,
-        headers: [String: String]? = nil
+        headers: [String: String]? = nil,
+        query: String? = nil
     ) async throws -> (Data, Int) {
         let (base, auth) = try makeBase()
         let encoded = path.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed) ?? path
-        guard let url = URL(string: "\(base)/\(encoded)") else {
+        let urlStr  = "\(base)/\(encoded)" + (query.map { "?\($0)" } ?? "")
+        guard let url = URL(string: urlStr) else {
             throw CouchDBError.invalidSettings
         }
 
@@ -652,6 +718,7 @@ class CouchDBClient {
 private struct FullFindResponse: Decodable {
     struct Doc: Decodable {
         let _id: String
+        let _rev: String?
         let path: String?
         let mtime: Double?
         let ctime: Double?

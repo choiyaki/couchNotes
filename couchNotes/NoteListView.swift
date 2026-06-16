@@ -19,6 +19,12 @@ struct NoteListView: View {
     @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
     @State private var noteToRename: NoteItem? = nil   // タイトル変更の対象
     @State private var renameText  = ""
+    @State private var noteToMove:  NoteItem? = nil    // 単体フォルダ移動の対象
+
+    // 複数選択モード
+    @State private var isSelecting   = false
+    @State private var selectedIDs:  Set<String> = []
+    @State private var showBulkMove  = false
 
     // 検索
     @State private var searchText    = ""
@@ -165,25 +171,39 @@ struct NoteListView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gearshape")
+                if isSelecting {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("キャンセル") { exitSelection() }
                     }
-                }
-                ToolbarItem(placement: .principal) {
-                    HStack(spacing: 6) {
-                        Button {
-                            let next = layout.next
-                            layoutRaw = next.rawValue
-                            saveLayout(next, for: folderFilter)
-                        } label: {
-                            Image(systemName: layout.icon)
+                    ToolbarItem(placement: .principal) {
+                        Text("\(selectedIDs.count)件選択")
+                            .font(.headline)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("移動") { showBulkMove = true }
+                            .disabled(selectedIDs.isEmpty)
+                    }
+                } else {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { showSettings = true } label: {
+                            Image(systemName: "gearshape")
                         }
-                        statusIndicator
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    folderFilterMenu
+                    ToolbarItem(placement: .principal) {
+                        HStack(spacing: 6) {
+                            Button {
+                                let next = layout.next
+                                layoutRaw = next.rawValue
+                                saveLayout(next, for: folderFilter)
+                            } label: {
+                                Image(systemName: layout.icon)
+                            }
+                            statusIndicator
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        folderFilterMenu
+                    }
                 }
             }
             .alert("エラー", isPresented: Binding(
@@ -212,6 +232,27 @@ struct NoteListView: View {
                 initialTitle: trimmedSearch
             ) { title, folder in
                 Task { await createNoteFromSearch(title: title, folder: folder) }
+            }
+        }
+        .sheet(item: $noteToMove) { note in
+            FolderPickerView(
+                folders: SyncScope.normalizedFolders,
+                current: folderKey(of: note)
+            ) { folder in
+                noteToMove = nil
+                Task {
+                    await move(note, to: folder)
+                    await loadNotes()
+                }
+            }
+        }
+        .sheet(isPresented: $showBulkMove) {
+            FolderPickerView(
+                folders: SyncScope.normalizedFolders,
+                current: nil
+            ) { folder in
+                showBulkMove = false
+                Task { await moveSelected(to: folder) }
             }
         }
         .task {
@@ -384,22 +425,19 @@ struct NoteListView: View {
         let nowMs = Date().timeIntervalSince1970 * 1000
         let sec   = Int(nowMs / 1000)
         let fullText = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: "")
-        do {
-            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: fullText)
-            await NoteStore.shared.upsert(NoteRecord(
-                id: naming.id, path: naming.path,
-                mtime: nowMs, ctime: nowMs,
-                size: fullText.utf8.count, content: fullText
-            ))
-            UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
-            await loadNotes()
-            searchText = ""
-            isClosureNavigation = true
-            historyForward = []
-            path.append(naming.id)
-        } catch {
-            errorMessage = "作成に失敗しました\n\(error.localizedDescription)"
-        }
+        // ローカルに dirty で作成（オフラインでも作成可）→ 同期ワーカがサーバへ押し上げる。
+        await NoteStore.shared.saveDirty(NoteRecord(
+            id: naming.id, path: naming.path,
+            mtime: nowMs, ctime: nowMs,
+            size: fullText.utf8.count, content: fullText
+        ))
+        UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
+        await loadNotes()
+        searchText = ""
+        isClosureNavigation = true
+        historyForward = []
+        path.append(naming.id)
+        await SyncEngine.shared.flush()
     }
 
     // MARK: - 一覧本体（表示モード別）
@@ -418,10 +456,17 @@ struct NoteListView: View {
     @ViewBuilder
     private func notesList<Row: View>(@ViewBuilder row: @escaping (NoteItem) -> Row) -> some View {
         List(displayedNotes) { note in
-            NavigationLink(value: note.id) {
-                row(note)
+            if isSelecting {
+                Button { toggleSelection(note) } label: {
+                    selectableRow(note) { row(note) }
+                }
+                .buttonStyle(.plain)
+            } else {
+                NavigationLink(value: note.id) {
+                    row(note)
+                }
+                .contextMenu { contextMenuButtons(for: note) }
             }
-            .contextMenu { contextMenuButtons(for: note) }
         }
         .listStyle(.plain)
         .contentMargins(.top, 4, for: .scrollContent)
@@ -437,11 +482,22 @@ struct NoteListView: View {
                 spacing: 12
             ) {
                 ForEach(displayedNotes) { note in
-                    NavigationLink(value: note.id) {
-                        NoteCardView(note: note)
+                    if isSelecting {
+                        Button { toggleSelection(note) } label: {
+                            NoteCardView(note: note)
+                                .overlay(alignment: .topTrailing) {
+                                    selectionMark(isSelected: selectedIDs.contains(note.id))
+                                        .padding(6)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        NavigationLink(value: note.id) {
+                            NoteCardView(note: note)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu { contextMenuButtons(for: note) }
                     }
-                    .buttonStyle(.plain)
-                    .contextMenu { contextMenuButtons(for: note) }
                 }
             }
             .padding(.horizontal, 16)
@@ -451,6 +507,25 @@ struct NoteListView: View {
         .refreshable { await refresh() }
     }
 
+    /// 選択モードのリスト行：左に選択マーク、右に本来の行内容。
+    @ViewBuilder
+    private func selectableRow<Row: View>(_ note: NoteItem,
+                                          @ViewBuilder content: () -> Row) -> some View {
+        HStack(spacing: 12) {
+            selectionMark(isSelected: selectedIDs.contains(note.id))
+            content()
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// 選択状態を示す丸チェック。
+    private func selectionMark(isSelected: Bool) -> some View {
+        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+            .font(.title3)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+    }
+
     @ViewBuilder
     private func contextMenuButtons(for note: NoteItem) -> some View {
         Button {
@@ -458,6 +533,16 @@ struct NoteListView: View {
             noteToRename = note
         } label: {
             Label("タイトル変更", systemImage: "pencil")
+        }
+        Button {
+            noteToMove = note
+        } label: {
+            Label("フォルダを移動", systemImage: "folder")
+        }
+        Button {
+            enterSelection(with: note)
+        } label: {
+            Label("複数を選択", systemImage: "checkmark.circle")
         }
         Button(role: .destructive) {
             noteToDelete = note
@@ -570,16 +655,81 @@ struct NoteListView: View {
         noteToRename = nil
     }
 
-    /// ノートを削除（サーバ削除 → ローカルストア → 一覧の順で反映）
+    /// ノートを削除。まずローカルで削除予定（pendingDelete）にして一覧から隠し、
+    /// 同期ワーカがサーバへネイティブ削除を押し上げる（オフラインでも操作可・後で同期）。
     private func deleteNote(_ note: NoteItem) async {
-        do {
-            try await CouchDBClient.shared.deleteNote(id: note.id)
-            await NoteStore.shared.delete(note.id)
-            notes.removeAll { $0.id == note.id }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await NoteStore.shared.markPendingDelete(note.id)
+        notes.removeAll { $0.id == note.id }
         noteToDelete = nil
+        await SyncEngine.shared.flush()   // オンラインならその場でサーバ反映
+    }
+
+    // MARK: - 複数選択 / フォルダ移動
+
+    /// note の現在のフォルダキー（_id ベースの小文字、ルートは nil）。
+    private func folderKey(of note: NoteItem) -> String? {
+        let comps = note.id.components(separatedBy: "/")
+        guard comps.count > 1 else { return nil }
+        return comps.dropLast().joined(separator: "/")
+    }
+
+    /// 選択モードに入り、長押ししたノートを最初の選択にする。
+    private func enterSelection(with note: NoteItem) {
+        selectedIDs = [note.id]
+        isSelecting = true
+    }
+
+    /// 選択モードを抜けて選択をクリア。
+    private func exitSelection() {
+        isSelecting = false
+        selectedIDs = []
+    }
+
+    /// 行タップで選択をトグル。
+    private func toggleSelection(_ note: NoteItem) {
+        if selectedIDs.contains(note.id) {
+            selectedIDs.remove(note.id)
+        } else {
+            selectedIDs.insert(note.id)
+        }
+    }
+
+    /// 単体ノートを選んだフォルダ（nil=ルート）へ移動する。一覧の再読込は呼び出し側で行う。
+    private func move(_ note: NoteItem, to folder: String?) async {
+        guard folder?.lowercased() != folderKey(of: note) else { return }
+
+        let filename        = note.id.components(separatedBy: "/").last ?? note.id
+        let displayFilename = (note.path ?? note.id).components(separatedBy: "/").last ?? filename
+        // _id はフォルダも小文字、path はフォルダ原文（Obsidian の実フォルダ名）
+        let newId   = folder.map { "\($0.lowercased())/\(filename)" } ?? filename
+        let newPath = folder.map { "\($0)/\(displayFilename)" }       ?? displayFilename
+
+        do {
+            try await CouchDBClient.shared.moveNote(fromId: note.id, toId: newId, newPath: newPath)
+            // 本文は移動で変えないので、元の content をそのまま新IDへ付け替える。
+            let content = await NoteStore.shared.content(note.id) ?? ""
+            let stored  = await NoteStore.shared.editingNote(note.id)
+            let nowMs   = Date().timeIntervalSince1970 * 1000
+            await NoteStore.shared.upsert(NoteRecord(
+                id: newId, path: newPath,
+                mtime: stored?.mtime ?? nowMs, ctime: stored?.ctime,
+                size: content.utf8.count, content: content
+            ))
+            await NoteStore.shared.delete(note.id)
+        } catch {
+            errorMessage = "「\(note.shortTitle)」の移動に失敗しました\n\(error.localizedDescription)"
+        }
+    }
+
+    /// 選択中のノートをすべて選んだフォルダへ移動する。
+    private func moveSelected(to folder: String?) async {
+        let targets = notes.filter { selectedIDs.contains($0.id) }
+        for note in targets {
+            await move(note, to: folder)
+        }
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        exitSelection()
+        await loadNotes()
     }
 
     /// 同期フォルダ変更の反映：削除フォルダはローカル除去、追加フォルダはバックフィル取得

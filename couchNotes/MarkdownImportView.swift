@@ -68,7 +68,7 @@ struct MarkdownImportView: View {
         do {
             // 1) 読み込み（メインスレッドを塞がないよう別スレッドで）
             let loaded = try await Task.detached(priority: .userInitiated) {
-                try MarkdownImportService.loadFiles(from: url) { p in
+                try await MarkdownImportService.loadFiles(from: url) { p in
                     Task { @MainActor in progress = p * 0.5 }
                 }
             }.value

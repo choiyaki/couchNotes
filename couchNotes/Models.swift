@@ -12,7 +12,7 @@ struct LiveSyncNote: Codable {
     var size: Int
     var type: String
     var eden: [String: String]?
-    var deleted: Bool?            // LiveSync 互換のソフト削除マーカー（未削除時は nil＝出力されない）
+    var deleted: Bool?            // 旧ソフト削除マーカー（移行前の既存文書を隠すための読み取り専用。新規削除はネイティブ削除を使う）
 
     init(id: String, children: [String], size: Int, ctime: Double? = nil) {
         let now = Date().timeIntervalSince1970 * 1000
@@ -110,6 +110,7 @@ struct NoteRecord {
     let ctime: Double?
     let size: Int
     let content: String
+    var rev: String? = nil   // CouchDB の _rev（リコンシリエーションの世代比較用。ローカル書き込み時は nil）
 }
 
 /// エディタ用に取り出したノート（body はフロントマター除去済み）。
@@ -119,6 +120,7 @@ struct StoredNote {
     let mtime: Double?    // 更新時刻（ms）
     let extra: String?    // created/updated 以外のフロントマター行
     let path: String?     // 元のパス（大小保持）
+    var rev: String? = nil   // 同期の基準 _rev（楽観ロック用。未取得は nil）
 }
 
 // MARK: - 新規ノートの命名

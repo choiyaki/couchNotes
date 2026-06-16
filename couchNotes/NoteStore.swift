@@ -55,6 +55,8 @@ actor NoteStore {
         exec("CREATE INDEX IF NOT EXISTS idx_notes_mtime ON notes(mtime DESC);")
         // 既存DBへの列追加（既にあればエラーは無視される）
         exec("ALTER TABLE notes ADD COLUMN frontmatter_extra TEXT;")
+        exec("ALTER TABLE notes ADD COLUMN rev TEXT;")   // リコンシリエーションの世代比較用
+        exec("ALTER TABLE notes ADD COLUMN sync_state TEXT;")   // clean / dirty / pendingDelete（NULL=clean扱い）
         exec("""
         CREATE TABLE IF NOT EXISTS sync_state (
             key   TEXT PRIMARY KEY,
@@ -100,6 +102,20 @@ actor NoteStore {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
+    /// 生存ノートの id→rev マップ（リコンシリエーション用）。rev 未取得は空文字。
+    func idRevMap() -> [String: String] {
+        guard let stmt = prepare("SELECT id, rev FROM notes WHERE deleted = 0;") else { return [:] }
+        defer { sqlite3_finalize(stmt) }
+        var out: [String: String] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idC = sqlite3_column_text(stmt, 0) else { continue }
+            let id  = String(cString: idC)
+            let rev = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+            out[id] = rev
+        }
+        return out
+    }
+
     /// 一覧表示用アイテム（mtime 降順、プレビュー付き）。
     func listItems() -> [NoteItem] {
         // プレビューは先頭 400 文字だけ取り出し、表示側でトリム＆切り詰める。
@@ -134,7 +150,7 @@ actor NoteStore {
 
     /// エディタ用：本文＋作成/更新時刻（ms）＋保持フロントマター＋パス。
     func editingNote(_ id: String) -> StoredNote? {
-        let sql = "SELECT content, ctime, mtime, frontmatter_extra, path FROM notes WHERE id = ? AND deleted = 0;"
+        let sql = "SELECT content, ctime, mtime, frontmatter_extra, path, rev FROM notes WHERE id = ? AND deleted = 0;"
         guard let stmt = prepare(sql) else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
@@ -144,7 +160,8 @@ actor NoteStore {
         let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
         let extra = columnText(stmt, 3)
         let path  = columnText(stmt, 4)
-        return StoredNote(body: body, ctime: ctime, mtime: mtime, extra: extra, path: path)
+        let rev   = columnText(stmt, 5)
+        return StoredNote(body: body, ctime: ctime, mtime: mtime, extra: extra, path: path, rev: rev)
     }
 
     // MARK: - 全文検索
@@ -326,17 +343,81 @@ actor NoteStore {
 
     // MARK: - 更新
 
-    /// 1 件を upsert（ctime は新規時のみ設定し、更新時は保持）。
+    /// 1 件を upsert（サーバ確定＝clean。ctime は新規時のみ設定し、更新時は保持）。
     func upsert(_ r: NoteRecord) {
-        upsert(r, on: db)
+        upsert(r, on: db, state: "clean")
     }
 
-    /// 複数件を 1 トランザクションで一括 upsert（初回インポート用）。
+    /// 複数件を 1 トランザクションで一括 upsert（初回インポート用。サーバ確定＝clean）。
     func upsertMany(_ records: [NoteRecord]) {
         guard !records.isEmpty else { return }
         exec("BEGIN TRANSACTION;")
-        for r in records { upsert(r, on: db) }
+        for r in records { upsert(r, on: db, state: "clean") }
         exec("COMMIT;")
+    }
+
+    /// ローカル編集を未同期（dirty）として永続化する。kill されても残り、後で同期ワーカが押し上げる。
+    func saveDirty(_ r: NoteRecord) {
+        upsert(r, on: db, state: "dirty")
+    }
+
+    /// 同期成功後、clean に戻す（内容は変えない）。rev を渡せば基準 rev も更新する。
+    func markClean(_ id: String, rev: String? = nil) {
+        let sql = rev == nil
+            ? "UPDATE notes SET sync_state = 'clean' WHERE id = ?;"
+            : "UPDATE notes SET sync_state = 'clean', rev = ? WHERE id = ?;"
+        guard let stmt = prepare(sql) else { return }
+        defer { sqlite3_finalize(stmt) }
+        if let rev {
+            sqlite3_bind_text(stmt, 1, rev, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        }
+        sqlite3_step(stmt)
+    }
+
+    /// 削除予定（pendingDelete）にする。一覧・検索からは隠すが、行・本文は残してサーバ削除の押し上げに備える。
+    func markPendingDelete(_ id: String) {
+        guard let stmt = prepare("UPDATE notes SET deleted = 1, sync_state = 'pendingDelete' WHERE id = ?;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+        deleteFTS(id)
+        deleteLinks(id)
+    }
+
+    /// サーバ削除が確定したノートを物理的に行ごと消す。
+    func removeRow(_ id: String) {
+        if let stmt = prepare("DELETE FROM notes WHERE id = ?;") {
+            sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+        deleteFTS(id)
+        deleteLinks(id)
+    }
+
+    /// 未同期（dirty）ノートの id 集合（同期ワーカの押し上げ対象・リコンシリエーションの保護対象）。
+    func dirtyIDs() -> Set<String> {
+        guard let stmt = prepare("SELECT id FROM notes WHERE sync_state = 'dirty' AND deleted = 0;") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { out.insert(String(cString: c)) }
+        }
+        return out
+    }
+
+    /// 削除予定（pendingDelete）の id 集合（同期ワーカの削除対象・リコンシリエーションの保護対象）。
+    func pendingDeleteIDs() -> Set<String> {
+        guard let stmt = prepare("SELECT id FROM notes WHERE sync_state = 'pendingDelete';") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { out.insert(String(cString: c)) }
+        }
+        return out
     }
 
     /// 削除（ソフト削除フラグを立てて一覧／検索から除外）。
@@ -368,21 +449,24 @@ actor NoteStore {
         }
     }
 
-    private func upsert(_ r: NoteRecord, on db: OpaquePointer?) {
+    private func upsert(_ r: NoteRecord, on db: OpaquePointer?, state: String) {
         // フロントマターを分離し、本文のみを保存（表示・検索・プレビューを綺麗に保つ）
         let parsed = FrontmatterParser.split(r.content)
         let body   = parsed.body
         let extra  = parsed.extraLines.joined(separator: "\n")
 
+        // rev は新しい値があればそれを採用し、無ければ（ローカル書き込み等）既存値を保持する。
         let sql = """
-        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, rev, sync_state, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(id) DO UPDATE SET
             path = excluded.path,
             mtime = excluded.mtime,
             size = excluded.size,
             content = excluded.content,
             frontmatter_extra = excluded.frontmatter_extra,
+            rev = COALESCE(excluded.rev, rev),
+            sync_state = excluded.sync_state,
             deleted = 0;
         """
         guard let stmt = prepare(sql) else { return }
@@ -394,6 +478,8 @@ actor NoteStore {
         sqlite3_bind_int64(stmt, 5, Int64(r.size))
         sqlite3_bind_text(stmt, 6, body, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 7, extra, -1, SQLITE_TRANSIENT)
+        bindOptionalText(stmt, 8, r.rev)
+        sqlite3_bind_text(stmt, 9, state, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
 
         // 全文検索・バックリンクは本文のみで索引

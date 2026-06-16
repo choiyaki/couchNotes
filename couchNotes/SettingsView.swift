@@ -26,6 +26,11 @@ struct SettingsView: View {
                         Label("エディタ", systemImage: "textformat")
                     }
                     NavigationLink {
+                        ImageUploadSettingsView()
+                    } label: {
+                        Label("画像アップロード（Gyazo）", systemImage: "photo")
+                    }
+                    NavigationLink {
                         BackupSettingsView()
                     } label: {
                         Label("GitHub バックアップ", systemImage: "arrow.up.circle")
@@ -218,6 +223,65 @@ struct EditorSettingsView: View {
         }
         .navigationTitle("エディタ")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - 画像アップロード（Gyazo）
+
+struct ImageUploadSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var token = ""
+    @State private var saved = false
+
+    var body: some View {
+        Form {
+            Section(
+                header: Text("Gyazo アクセストークン"),
+                footer: Text("キーボードの写真ボタンから画像を Gyazo にアップロードして挿入します。トークンは https://gyazo.com/oauth/applications で取得できます。")
+            ) {
+                SecureField("アクセストークン", text: $token)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            }
+        }
+        .navigationTitle("画像アップロード")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") { save() }
+            }
+        }
+        .onAppear(perform: load)
+        .overlay {
+            if saved {
+                VStack {
+                    Spacer()
+                    Text("✓ 保存しました")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(.green)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                        .padding(.bottom, 40)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut, value: saved)
+    }
+
+    private func load() {
+        token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+    }
+
+    private func save() {
+        KeychainManager.shared.save(key: GyazoUploadService.tokenKey,
+                                    value: token.trimmingCharacters(in: .whitespacesAndNewlines))
+        saved = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            saved = false
+            dismiss()
+        }
     }
 }
 

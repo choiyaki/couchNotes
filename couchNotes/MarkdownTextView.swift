@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 // MARK: - Wiki リンク用カスタム属性キー
 
@@ -194,6 +195,7 @@ struct MarkdownTextView: UIViewRepresentable {
         let accessory = AccessoryContainerView()
         accessory.suggestion.onSelect       = { [weak coord] note in coord?.handleSuggestionTap(note) }
         accessory.toolbar.onPaste           = { [weak coord] in coord?.handlePaste() }
+        accessory.toolbar.onUploadImage     = { [weak coord] in coord?.handleUploadImage() }
         accessory.toolbar.onDoubleBracket   = { [weak coord] in coord?.handleDoubleBracket() }
         accessory.toolbar.onListToggle      = { [weak coord] in coord?.handleListToggle() }
         accessory.toolbar.onMoveLineUp      = { [weak coord] in coord?.handleMoveLineUp() }
@@ -273,7 +275,7 @@ struct MarkdownTextView: UIViewRepresentable {
 // MARK: - Coordinator
 
 extension MarkdownTextView {
-    final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate, PHPickerViewControllerDelegate {
         let parent: MarkdownTextView
         private var isStyling = false
         weak var textView: UITextView?
@@ -284,6 +286,8 @@ extension MarkdownTextView {
         var accessoryView: AccessoryContainerView?
         var footer: BacklinksFooterView?
         var backlinkIDs: [String] = []
+        /// 画像ピッカー表示でフォーカスが外れる前に控えたカーソル位置
+        private var savedImageInsertLocation: Int = 0
 
         init(_ parent: MarkdownTextView) { self.parent = parent }
 
@@ -331,6 +335,83 @@ extension MarkdownTextView {
             tv.insertText(pasteText)   // textViewDidChange 経由でスタイリングと parent.text 反映
         }
 
+        // MARK: 画像アップロード（Gyazo）
+
+        /// 画像ピッカーで選んだ写真を Gyazo にアップロードし、カーソル位置に `![](url)` を挿入する。
+        func handleUploadImage() {
+            guard let tv = textView else { return }
+            let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+            guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                presentAlert(title: "Gyazo 未設定",
+                             message: "設定 →「画像アップロード（Gyazo）」でアクセストークンを登録してください。")
+                return
+            }
+            // ピッカー表示でフォーカスが外れる前にカーソル位置を控える
+            savedImageInsertLocation = tv.selectedRange.location
+
+            var config = PHPickerConfiguration()
+            config.filter = .images
+            config.selectionLimit = 1
+            let picker = PHPickerViewController(configuration: config)
+            picker.delegate = self
+            topViewController()?.present(picker, animated: true)
+        }
+
+        /// アップロードして結果URLを挿入する。
+        @MainActor
+        private func uploadAndInsert(data: Data) async {
+            let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+            do {
+                let url = try await GyazoUploadService.upload(
+                    imageData: data, filename: "image.jpg", mimeType: "image/jpeg", token: token)
+                insertImageMarkdown(url: url)
+            } catch {
+                presentAlert(title: "アップロード失敗", message: error.localizedDescription)
+            }
+        }
+
+        /// 控えておいたカーソル位置に画像マークダウンを差し込む。
+        private func insertImageMarkdown(url: String) {
+            guard let tv = textView else { return }
+            let markdown = "![](\(url))"
+            let loc   = clamp(savedImageInsertLocation, in: tv)
+            let range = NSRange(location: loc, length: 0)
+
+            tv.textStorage.beginEditing()
+            tv.textStorage.replaceCharacters(in: range, with: markdown)
+            tv.textStorage.endEditing()
+
+            tv.selectedRange = NSRange(location: loc + (markdown as NSString).length, length: 0)
+            applyStylingAfterEdit(tv)
+        }
+
+        /// 最前面のビューコントローラ（ピッカー／アラート提示用）。
+        private func topViewController() -> UIViewController? {
+            var top = textView?.window?.rootViewController
+            while let presented = top?.presentedViewController { top = presented }
+            return top
+        }
+
+        private func presentAlert(title: String, message: String) {
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            topViewController()?.present(alert, animated: true)
+        }
+
+        // MARK: PHPickerViewControllerDelegate
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+            guard let provider = results.first?.itemProvider,
+                  provider.canLoadObject(ofClass: UIImage.self) else { return }
+            provider.loadObject(ofClass: UIImage.self) { [weak self] object, _ in
+                guard let self,
+                      let image = object as? UIImage,
+                      let data  = image.jpegData(compressionQuality: 0.85) else { return }
+                Task { await self.uploadAndInsert(data: data) }
+            }
+        }
+
         /// `[[]]` を挿入する。選択範囲があれば囲む。
         func handleDoubleBracket() {
             guard let tv = textView else { return }
@@ -352,10 +433,44 @@ extension MarkdownTextView {
             applyStylingAfterEdit(tv)
         }
 
+        /// 既存のリストマーカー長を返す（無ければ 0）。
+        private func listMarkerLength(_ stripped: String) -> Int {
+            if stripped.hasPrefix("- [ ]") || stripped.hasPrefix("- [x]")
+                || stripped.hasPrefix("* [ ]") || stripped.hasPrefix("* [x]") { return 6 }
+            if stripped.hasPrefix("- ") || stripped.hasPrefix("* ") || stripped.hasPrefix("+ ") { return 2 }
+            return 0
+        }
+
+        /// 現在の行（タブ除去後）に対する「次の状態」のマーカーと、旧マーカー長を返す。
+        /// リスト → チェックボックス → 完了 → リスト の 3 状態サイクル。プレーンは `- ` で開始。
+        private func nextListMarker(for stripped: String) -> (marker: String, oldLen: Int) {
+            if stripped.hasPrefix("- [ ]") || stripped.hasPrefix("* [ ]") {
+                return ("\(stripped.prefix(1)) [x] ", 6)
+            } else if stripped.hasPrefix("- [x]") || stripped.hasPrefix("* [x]") {
+                return ("\(stripped.prefix(1)) ", 6)
+            } else if stripped.hasPrefix("- ") || stripped.hasPrefix("* ") {
+                return ("\(stripped.prefix(1)) [ ] ", 2)
+            } else if stripped.hasPrefix("+ ") {
+                return ("- [ ] ", 2)
+            } else {
+                return ("- ", 0)
+            }
+        }
+
+        /// 行文字列をタブ部分と本体に分解する（末尾改行は除く）。
+        private func splitTabs(_ line: String) -> (tabs: String, stripped: String) {
+            let body = line.hasSuffix("\n") ? String(line.dropLast()) : line
+            let tabs = String(body.prefix(while: { $0 == "\t" }))
+            return (tabs, String(body.dropFirst(tabs.count)))
+        }
+
         /// リスト → チェックボックス → 完了 → リスト の 3 状態トグル。
         /// プレーン行の場合は `- ` を付与してサイクルに入る。
         func handleListToggle() {
             guard let tv = textView else { return }
+            if let block = multilineBlock(in: tv) {
+                listToggleBlock(tv, block: block); return
+            }
             let ns        = tv.text as NSString
             let cursorLoc = tv.selectedRange.location
             let lineRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
@@ -366,28 +481,7 @@ extension MarkdownTextView {
             let tabs     = String(line.prefix(while: { $0 == "\t" }))
             let stripped = String(line.dropFirst(tabs.count))
 
-            let oldMarkerLen: Int
-            let newMarker:    String
-
-            if stripped.hasPrefix("- [ ]") || stripped.hasPrefix("* [ ]") {
-                let m = String(stripped.prefix(1))
-                newMarker    = "\(m) [x] "
-                oldMarkerLen = 6
-            } else if stripped.hasPrefix("- [x]") || stripped.hasPrefix("* [x]") {
-                let m = String(stripped.prefix(1))
-                newMarker    = "\(m) "
-                oldMarkerLen = 6
-            } else if stripped.hasPrefix("- ") || stripped.hasPrefix("* ") {
-                let m = String(stripped.prefix(1))
-                newMarker    = "\(m) [ ] "
-                oldMarkerLen = 2
-            } else if stripped.hasPrefix("+ ") {
-                newMarker    = "- [ ] "
-                oldMarkerLen = 2
-            } else {
-                newMarker    = "- "
-                oldMarkerLen = 0
-            }
+            let (newMarker, oldMarkerLen) = nextListMarker(for: stripped)
 
             let body = String(stripped.dropFirst(oldMarkerLen))
             let newLine = tabs + newMarker + body + (hasNewline ? "\n" : "")
@@ -412,8 +506,42 @@ extension MarkdownTextView {
             applyStylingAfterEdit(tv)
         }
 
+        /// 選択ブロック内の各行を、先頭の非空行から決めた同じマーカーに統一する。
+        private func listToggleBlock(_ tv: UITextView, block: NSRange) {
+            let ns    = tv.text as NSString
+            let lines = lineRanges(in: block, ns: ns)
+
+            // マーカーの基準にする先頭の非空行を探す
+            guard let firstContentLine = lines.first(where: {
+                !splitTabs(ns.substring(with: $0)).stripped.trimmingCharacters(in: .whitespaces).isEmpty
+            }) else { return }
+            let target = nextListMarker(for: splitTabs(ns.substring(with: firstContentLine)).stripped).marker
+
+            var result = ""
+            for lr in lines {
+                let lineStr = ns.substring(with: lr)
+                let (tabs, stripped) = splitTabs(lineStr)
+                if stripped.trimmingCharacters(in: .whitespaces).isEmpty {
+                    result += lineStr   // 空行はそのまま
+                    continue
+                }
+                let body = String(stripped.dropFirst(listMarkerLength(stripped)))
+                result += tabs + target + body + (lineStr.hasSuffix("\n") ? "\n" : "")
+            }
+
+            tv.textStorage.beginEditing()
+            tv.textStorage.replaceCharacters(in: block, with: result)
+            tv.textStorage.endEditing()
+
+            tv.selectedRange = NSRange(location: block.location, length: (result as NSString).length)
+            applyStylingAfterEdit(tv)
+        }
+
         func handleMoveLineUp() {
             guard let tv = textView else { return }
+            if let block = multilineBlock(in: tv) {
+                moveBlockUp(tv, block: block); return
+            }
             let ns        = tv.text as NSString
             let cursorLoc = tv.selectedRange.location
             let currRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
@@ -440,8 +568,59 @@ extension MarkdownTextView {
             applyStylingAfterEdit(tv)
         }
 
+        /// 選択ブロックを 1 行上へ移動し、移動後もブロックを選択状態に保つ。
+        private func moveBlockUp(_ tv: UITextView, block: NSRange) {
+            let ns = tv.text as NSString
+            guard block.location > 0 else { return }
+            let prevRange = ns.lineRange(for: NSRange(location: block.location - 1, length: 0))
+
+            let prevBody  = String(ns.substring(with: prevRange).dropLast())   // 直前行は必ず \n 終わり
+            let blockText = ns.substring(with: block)
+            let blockHasNL = blockText.hasSuffix("\n")
+            let blockBody  = blockHasNL ? String(blockText.dropLast()) : blockText
+
+            let newContent = blockBody + "\n" + prevBody + (blockHasNL ? "\n" : "")
+            let combined = NSRange(location: prevRange.location,
+                                   length: prevRange.length + block.length)
+
+            tv.textStorage.beginEditing()
+            tv.textStorage.replaceCharacters(in: combined, with: newContent)
+            tv.textStorage.endEditing()
+
+            tv.selectedRange = NSRange(location: prevRange.location, length: block.length)
+            applyStylingAfterEdit(tv)
+        }
+
+        /// 選択ブロックを 1 行下へ移動し、移動後もブロックを選択状態に保つ。
+        private func moveBlockDown(_ tv: UITextView, block: NSRange) {
+            let ns = tv.text as NSString
+            let nextStart = block.location + block.length
+            guard nextStart < ns.length else { return }
+            let nextRange = ns.lineRange(for: NSRange(location: nextStart, length: 0))
+
+            let blockBody = String(ns.substring(with: block).dropLast())   // 次行があるので必ず \n 終わり
+            let nextText  = ns.substring(with: nextRange)
+            let nextHasNL = nextText.hasSuffix("\n")
+            let nextBody  = nextHasNL ? String(nextText.dropLast()) : nextText
+
+            let newContent = nextBody + "\n" + blockBody + (nextHasNL ? "\n" : "")
+            let combined = NSRange(location: block.location,
+                                   length: block.length + nextRange.length)
+
+            tv.textStorage.beginEditing()
+            tv.textStorage.replaceCharacters(in: combined, with: newContent)
+            tv.textStorage.endEditing()
+
+            let newBlockStart = block.location + (nextBody as NSString).length + 1
+            tv.selectedRange = NSRange(location: newBlockStart, length: block.length)
+            applyStylingAfterEdit(tv)
+        }
+
         func handleMoveLineDown() {
             guard let tv = textView else { return }
+            if let block = multilineBlock(in: tv) {
+                moveBlockDown(tv, block: block); return
+            }
             let ns        = tv.text as NSString
             let cursorLoc = tv.selectedRange.location
             let currRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
@@ -472,6 +651,9 @@ extension MarkdownTextView {
 
         func handleDecreaseIndent() {
             guard let tv = textView else { return }
+            if let block = multilineBlock(in: tv) {
+                outdentBlock(tv, block: block); return
+            }
             let ns        = tv.text as NSString
             let cursorLoc = tv.selectedRange.location
             let lineRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
@@ -489,6 +671,9 @@ extension MarkdownTextView {
 
         func handleIncreaseIndent() {
             guard let tv = textView else { return }
+            if let block = multilineBlock(in: tv) {
+                indentBlock(tv, block: block); return
+            }
             let ns        = tv.text as NSString
             let cursorLoc = tv.selectedRange.location
             let lineRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
@@ -498,6 +683,39 @@ extension MarkdownTextView {
             tv.textStorage.endEditing()
 
             tv.selectedRange = NSRange(location: clamp(cursorLoc + 1, in: tv), length: 0)
+            applyStylingAfterEdit(tv)
+        }
+
+        /// 選択ブロック内の各行頭にタブを追加し、ブロックを選択状態に保つ。
+        private func indentBlock(_ tv: UITextView, block: NSRange) {
+            let ns    = tv.text as NSString
+            let lines = lineRanges(in: block, ns: ns)
+
+            tv.textStorage.beginEditing()
+            for lr in lines.reversed() {
+                tv.textStorage.replaceCharacters(in: NSRange(location: lr.location, length: 0), with: "\t")
+            }
+            tv.textStorage.endEditing()
+
+            tv.selectedRange = NSRange(location: block.location, length: block.length + lines.count)
+            applyStylingAfterEdit(tv)
+        }
+
+        /// 選択ブロック内の各行頭からタブを 1 つ削除し、ブロックを選択状態に保つ。
+        private func outdentBlock(_ tv: UITextView, block: NSRange) {
+            let ns    = tv.text as NSString
+            let lines = lineRanges(in: block, ns: ns)
+
+            var removed = 0
+            tv.textStorage.beginEditing()
+            for lr in lines.reversed() where ns.substring(with: lr).hasPrefix("\t") {
+                tv.textStorage.replaceCharacters(in: NSRange(location: lr.location, length: 1), with: "")
+                removed += 1
+            }
+            tv.textStorage.endEditing()
+
+            tv.selectedRange = NSRange(location: block.location,
+                                       length: max(0, block.length - removed))
             applyStylingAfterEdit(tv)
         }
 
@@ -520,6 +738,43 @@ extension MarkdownTextView {
 
         private func clamp(_ loc: Int, in tv: UITextView) -> Int {
             max(0, min(loc, tv.text.utf16.count))
+        }
+
+        // MARK: 複数行選択ユーティリティ
+
+        /// 選択範囲を行頭〜行末に拡張したブロック範囲。
+        /// 選択末尾がちょうど行頭の場合、その行は含めない（一般的なエディタと同じ）。
+        private func selectedLinesRange(in tv: UITextView) -> NSRange {
+            let ns  = tv.text as NSString
+            let sel = tv.selectedRange
+            let startLine = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+            let endLoc = sel.location + sel.length
+            let probe  = (sel.length > 0 && endLoc > startLine.location) ? endLoc - 1 : endLoc
+            let endLine = ns.lineRange(for: NSRange(location: min(probe, ns.length), length: 0))
+            return NSRange(location: startLine.location,
+                           length: endLine.location + endLine.length - startLine.location)
+        }
+
+        /// ブロック内の各行の NSRange（末尾改行を含む）。
+        private func lineRanges(in block: NSRange, ns: NSString) -> [NSRange] {
+            var ranges: [NSRange] = []
+            var loc = block.location
+            let end = block.location + block.length
+            while loc < end {
+                let lr = ns.lineRange(for: NSRange(location: loc, length: 0))
+                ranges.append(lr)
+                loc = lr.location + lr.length
+                if lr.length == 0 { break }
+            }
+            return ranges
+        }
+
+        /// 複数行を選択しているときだけブロック範囲を返す。単一行・カーソルのみなら nil。
+        private func multilineBlock(in tv: UITextView) -> NSRange? {
+            guard tv.selectedRange.length > 0 else { return nil }
+            let ns    = tv.text as NSString
+            let block = selectedLinesRange(in: tv)
+            return lineRanges(in: block, ns: ns).count > 1 ? block : nil
         }
 
         /// カーソル直前テキストから [[ 以降の検索クエリを返す。[[ がなければ nil
@@ -882,11 +1137,14 @@ enum MarkdownStyler {
             return
         }
 
-        // リスト項目（タブによるネストに対応）
-        let tabCount    = line.prefix(while: { $0 == "\t" }).count
-        let stripped    = String(line.dropFirst(tabCount))
-        let markerLoc   = range.location + tabCount
-        let markerAvail = max(0, range.length - tabCount)
+        // リスト項目（タブ・半角スペース両方の先頭インデントに対応）
+        let leadingWS   = line.prefix(while: { $0 == "\t" || $0 == " " })
+        let indentCount = leadingWS.count
+        let tabCount    = leadingWS.filter { $0 == "\t" }.count
+        let spaceCount  = leadingWS.filter { $0 == " " }.count
+        let stripped    = String(line.dropFirst(indentCount))
+        let markerLoc   = range.location + indentCount
+        let markerAvail = max(0, range.length - indentCount)
 
         let prefixForMeasure: String
 
@@ -915,12 +1173,13 @@ enum MarkdownStyler {
             return
         }
 
-        // ぶら下げインデント（フォントサイズ比例のタブ幅 + 実際のプレフィックス幅）
+        // ぶら下げインデント（タブはフォントサイズ比例幅、スペースは実測幅 + プレフィックス幅）
         let tabWidth    = fontSize * 1.75
+        let spaceWidth  = (" " as NSString).size(withAttributes: [.font: baseFont]).width
         let prefixWidth = (prefixForMeasure as NSString)
             .size(withAttributes: [.font: baseFont]).width
         let para = NSMutableParagraphStyle()
-        para.headIndent  = CGFloat(tabCount) * tabWidth + prefixWidth
+        para.headIndent  = CGFloat(tabCount) * tabWidth + CGFloat(spaceCount) * spaceWidth + prefixWidth
         para.lineSpacing = lineSpacing
         s.addAttribute(.paragraphStyle, value: para, range: range)
     }
@@ -1047,6 +1306,7 @@ final class SuggestionAccessoryView: UIView {
 /// 後でボタンを追加しやすいように、内部で UIStackView を使った横スクロール構造にしている。
 final class KeyboardToolbarView: UIView {
     var onPaste:           (() -> Void)?
+    var onUploadImage:     (() -> Void)?
     var onDoubleBracket:   (() -> Void)?
     var onListToggle:      (() -> Void)?
     var onMoveLineUp:      (() -> Void)?
@@ -1084,8 +1344,9 @@ final class KeyboardToolbarView: UIView {
             stack.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
         ])
 
-        // ボタン追加（左から: ペースト・[[]]・リストトグル・行↑・行↓・インデント-・インデント+）
+        // ボタン追加（左から: ペースト・写真・[[]]・リストトグル・行↑・行↓・インデント-・インデント+）
         stack.addArrangedSubview(makeButton(systemImage: "doc.on.clipboard") { [weak self] in self?.onPaste?() })
+        stack.addArrangedSubview(makeButton(systemImage: "photo")            { [weak self] in self?.onUploadImage?() })
         stack.addArrangedSubview(makeButton(title: "[[ ]]")                  { [weak self] in self?.onDoubleBracket?() })
         stack.addArrangedSubview(makeButton(systemImage: "checklist")        { [weak self] in self?.onListToggle?() })
         stack.addArrangedSubview(makeButton(systemImage: "chevron.up")       { [weak self] in self?.onMoveLineUp?() })

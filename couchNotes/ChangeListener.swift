@@ -68,10 +68,16 @@ class ChangesListener: ObservableObject {
         // これでアプリ停止中に起きた変更も取りこぼさない。
         var since = await NoteStore.shared.syncValue("last_seq") ?? "now"
 
+        // 起動／foreground 復帰／再起動の都度、まず未同期(dirty)を押し上げ→サーバと突き合わせる。
+        await SyncEngine.shared.flush()
+        await reconcile()
+        var recovered = false   // listener がエラーから復帰したら押し上げ＋整合し直す
+
         while !Task.isCancelled {
             isConnected = true
             do {
                 let response = try await fetchChanges(since: since)
+                if recovered { await SyncEngine.shared.flush(); await reconcile(); recovered = false }
 
                 // この応答バッチ中は同期範囲を一度だけ評価
                 let scopeFolders = SyncScope.normalizedFolders
@@ -93,8 +99,13 @@ class ChangesListener: ObservableObject {
 
                 var didChangeStore = false
 
-                // 更新分はバルク取得 → 一括 upsert。LiveSync のソフト削除（deleted:true）は
-                // 結果に含まれないので、要求 id との差集合を削除として扱う。
+                // 未同期のローカル変更（dirty／pendingDelete）はサーバ更新で上書き・復活させない。
+                let protected = await NoteStore.shared.dirtyIDs()
+                    .union(await NoteStore.shared.pendingDeleteIDs())
+                updateIDs.removeAll { protected.contains($0) }
+
+                // 更新分はバルク取得 → 一括 upsert。削除はネイティブ削除（トゥームストーン）の
+                // deleted:true だけを信号にするため、差集合推定はしない（取得失敗を削除と誤判定しない）。
                 if !updateIDs.isEmpty {
                     let records = try await CouchDBClient.shared.fetchNoteRecords(ids: updateIDs)
                     if !records.isEmpty {
@@ -106,8 +117,6 @@ class ChangesListener: ObservableObject {
                         }
                         didChangeStore = true
                     }
-                    let returned = Set(records.map { $0.id })
-                    for id in updateIDs where !returned.contains(id) { deleteIDs.append(id) }
                 }
 
                 for id in deleteIDs {
@@ -126,12 +135,65 @@ class ChangesListener: ObservableObject {
             } catch is CancellationError {
                 break
             } catch {
-                // エラー時は5秒待って再試行
+                // エラー時は5秒待って再試行。復帰後に整合（取りこぼした削除・更新の収束）。
                 isConnected = false
+                recovered = true
                 try? await Task.sleep(for: .seconds(5))
             }
         }
         isConnected = false
+    }
+
+    // MARK: - リコンシリエーション（背骨）
+
+    /// サーバ（正本）とローカルの存在・世代を突き合わせて収束させる。
+    /// _changes の取りこぼし（listener 断・seq 無効・長期オフライン）に対する最終保証。
+    /// 失敗時は何もしない（次のトリガーで再試行）。
+    func reconcile() async {
+        let folders = SyncScope.normalizedFolders
+        let serverRevs: [String: String]
+        do {
+            serverRevs = try await CouchDBClient.shared.liveNoteRevs(folders: folders)
+        } catch {
+            return
+        }
+
+        let local = await NoteStore.shared.idRevMap()
+        // 未同期ノートは保護：dirty（未送信編集）も pendingDelete（削除予定）も触らない。
+        // dirty=削除/上書きしない、pendingDelete=サーバにまだ在ってもローカルへ復活させない。
+        let protected = await NoteStore.shared.dirtyIDs()
+            .union(await NoteStore.shared.pendingDeleteIDs())
+        var didChange = false
+
+        // 1) ローカルにあってサーバに無い → 削除（取りこぼした削除の収束）。スコープ内のみ。
+        //    サーバ応答が空に見える場合は異常の可能性があるため、誤った全削除を避けて削除はスキップ。
+        if !serverRevs.isEmpty {
+            for (id, _) in local
+            where serverRevs[id] == nil && !protected.contains(id) && SyncScope.shouldSync(id: id, folders: folders) {
+                await NoteStore.shared.delete(id)
+                didChange = true
+            }
+        }
+
+        // 2) サーバにあってローカルに無い／rev 不一致 → 取得して反映（存在＋世代同期）。保護対象は除く。
+        let fetchIDs = serverRevs.compactMap { (id, srev) in
+            (local[id] == srev || protected.contains(id)) ? nil : id
+        }
+        if !fetchIDs.isEmpty,
+           let records = try? await CouchDBClient.shared.fetchNoteRecords(ids: fetchIDs),
+           !records.isEmpty {
+            await NoteStore.shared.upsertMany(records)
+            for r in records {
+                NotificationCenter.default.post(
+                    name: .noteDidChange, object: nil, userInfo: ["noteId": r.id]
+                )
+            }
+            didChange = true
+        }
+
+        if didChange {
+            NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        }
     }
 
     // MARK: - longpoll リクエスト

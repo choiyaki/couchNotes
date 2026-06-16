@@ -60,7 +60,11 @@ struct NoteDetailView: View {
 
     @State private var content        = ""
     @State private var editingContent = ""
+    @State private var baseRev:       String? = nil   // 楽観ロックの基準 _rev（競合検知用）
     @State private var isLoading      = true
+    // 保存の直列化（保存を二重に走らせない＝自分の保存を外部更新と誤検知しないため）
+    @State private var saveInFlight   = false
+    @State private var pendingSave    = false
 
     // フロントマター（YAML created/updated）。content/editingContent は本文のみ。
     @State private var createdMs:        Double? = nil
@@ -81,11 +85,13 @@ struct NoteDetailView: View {
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
 
-    // フォルダ移動・新規作成・タイトル変更
+    // フォルダ移動・新規作成
     @State private var showFolderPicker = false
     @State private var showNewNote      = false
-    @State private var showRename       = false
-    @State private var renameText       = ""
+
+    // 本文上のタイトル欄（編集するとファイル名＝タイトルがリネームされる）
+    @State private var titleDraft       = ""
+    @FocusState private var titleFocused: Bool
 
     /// 現在のフォルダ（正規化キー。ルートは nil）
     private var currentFolderKey: String? {
@@ -105,6 +111,38 @@ struct NoteDetailView: View {
         let source = displayPath ?? noteId
         return source.components(separatedBy: "/").last?
             .replacingOccurrences(of: ".md", with: "") ?? source
+    }
+
+    // MARK: - タイトル欄（本文上に固定表示）
+
+    /// 本文の1行目として表示するタイトル欄。Enter または フォーカスが外れた時に確定（リネーム）。
+    private var titleField: some View {
+        VStack(spacing: 0) {
+            TextField("タイトル", text: $titleDraft, axis: .vertical)
+                .font(.system(size: CGFloat(fontSize) + 1, weight: .bold))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .lineLimit(1...4)
+                .focused($titleFocused)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+                .onChange(of: titleDraft) { _, newVal in
+                    // 変換確定後の「本当のEnter」だけが改行を生む。改行を確定の合図として扱う。
+                    if newVal.contains("\n") {
+                        titleDraft = newVal.replacingOccurrences(of: "\n", with: "")
+                        titleFocused = false   // フォーカスを外す → 下の onChange で確定
+                    }
+                }
+                .onChange(of: titleFocused) { _, focused in
+                    if !focused { Task { await commitTitle() } }
+                }
+
+            // タイトルと本文の境界（うっすら）
+            Divider()
+                .padding(.horizontal, 12)
+                .opacity(0.5)
+        }
     }
 
     // MARK: - Body
@@ -138,6 +176,8 @@ struct NoteDetailView: View {
                     )
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
+
+                titleField
 
                 MarkdownTextView(
                     text: $editingContent,
@@ -184,27 +224,13 @@ struct NoteDetailView: View {
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)   // SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止
         .animation(.easeInOut(duration: 0.25), value: externalChangeAvailable)
-        .navigationTitle(navTitle)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { onGoToList?() } label: {
                     Image(systemName: (NoteListLayout(rawValue: layoutRaw) ?? .detail).icon)
-                }
-            }
-            ToolbarItem(placement: .principal) {
-                Button {
-                    renameText = navTitle
-                    showRename = true
-                } label: {
-                    Text(navTitle)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        // 左右のバーボタンに被らないよう最大幅を制限し、長いタイトルは末尾を省略
-                        .frame(maxWidth: UIScreen.main.bounds.width * 0.55)
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -249,14 +275,6 @@ struct NoteDetailView: View {
                 Task { await createNote(title: title, folder: folder) }
             }
         }
-        .alert("タイトル変更", isPresented: $showRename) {
-            TextField("タイトル", text: $renameText)
-                .autocorrectionDisabled()
-            Button("変更") { Task { await renameNote(to: renameText) } }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("他ページのリンクも更新されます。")
-        }
         .onReceive(
             NotificationCenter.default.publisher(for: .noteDidChange)
         ) { notification in
@@ -281,6 +299,9 @@ struct NoteDetailView: View {
         .task {
             // 最後に開いたノートとして記録
             UserDefaults.standard.set(noteId, forKey: "lastOpenedNoteId")
+            // この画面の save() が押し上げを担うので、同期ワーカはこのノートを飛ばす
+            SyncEngine.shared.activeNoteId = noteId
+            titleDraft = navTitle
             await loadContent()
             await loadBacklinks()
             await pollForChanges()
@@ -289,6 +310,9 @@ struct NoteDetailView: View {
             saveDebounceTask?.cancel()
             if hasUnsavedChanges {
                 Task { await save() }
+            }
+            if SyncEngine.shared.activeNoteId == noteId {
+                SyncEngine.shared.activeNoteId = nil
             }
         }
     }
@@ -324,8 +348,12 @@ struct NoteDetailView: View {
     // MARK: - 外部変更の適用
 
     private func applyExternalChange(record: NoteRecord) async {
+        // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
+        guard !saveInFlight else { print("[sync] applyExternalChange SKIP (saveInFlight) id=\(noteId)"); return }
         await NoteStore.shared.upsert(record)
         let parsed = FrontmatterParser.split(record.content)
+        print("[sync] applyExternalChange id=\(noteId) baseRev \(baseRev ?? "nil") -> \(record.rev ?? "nil") freshLen=\(parsed.body.count) contentLen=\(content.count) hasUnsaved=\(hasUnsavedChanges) willBanner=\(parsed.body != content && hasUnsavedChanges)")
+        baseRev          = record.rev
         createdMs        = record.ctime
         updatedMs        = record.mtime
         extraFrontmatter = parsed.extraLines.joined(separator: "\n")
@@ -345,8 +373,12 @@ struct NoteDetailView: View {
     }
 
     private func applyExternalChangeIfNeeded() async {
+        // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
+        guard !saveInFlight else { print("[sync] applyExternalChangeIfNeeded SKIP (saveInFlight) id=\(noteId)"); return }
         // リスナーが既にストアを更新済みなので、そこから最新本文を読む
         guard let stored = await NoteStore.shared.editingNote(noteId) else { return }
+        print("[sync] applyExternalChangeIfNeeded id=\(noteId) baseRev \(baseRev ?? "nil") -> \(stored.rev ?? "nil") freshLen=\(stored.body.count) contentLen=\(content.count) hasUnsaved=\(hasUnsavedChanges) willBanner=\(stored.body != content && hasUnsavedChanges)")
+        baseRev          = stored.rev
         createdMs        = stored.ctime
         updatedMs        = stored.mtime
         extraFrontmatter = stored.extra ?? ""
@@ -386,6 +418,8 @@ struct NoteDetailView: View {
         if let stored = await NoteStore.shared.editingNote(noteId) {
             content          = stored.body
             editingContent   = stored.body
+            baseRev          = stored.rev
+            print("[sync] loadContent(local) id=\(noteId) baseRev=\(stored.rev ?? "nil")")
             createdMs        = stored.ctime
             updatedMs        = stored.mtime
             extraFrontmatter = stored.extra ?? ""
@@ -401,6 +435,7 @@ struct NoteDetailView: View {
                 let parsed       = FrontmatterParser.split(record.content)
                 content          = parsed.body
                 editingContent   = parsed.body
+                baseRev          = record.rev
                 createdMs        = record.ctime
                 updatedMs        = record.mtime
                 extraFrontmatter = parsed.extraLines.joined(separator: "\n")
@@ -457,14 +492,25 @@ struct NoteDetailView: View {
         }
     }
 
-    /// タイトル変更（本体リネーム＋他ページのリンク書き換え）→ 新IDへ遷移。
-    private func renameNote(to title: String) async {
-        showRename = false
+    /// タイトル欄の確定（リネーム＋他ページのリンク書き換え）→ 新IDへ遷移。
+    /// Enter／フォーカスが外れた時に呼ばれる。変化が無い・空・case のみの変更なら元に戻す。
+    private func commitTitle() async {
+        let newTitle = titleDraft
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !newTitle.isEmpty, newTitle != navTitle else {
+            titleDraft = navTitle   // 空・変更なしは現タイトルへ戻す
+            return
+        }
         do {
-            let newId = try await RenameService.rename(oldId: noteId, oldPath: displayPath, newTitle: title)
+            let newId = try await RenameService.rename(oldId: noteId, oldPath: displayPath, newTitle: newTitle)
             if newId != noteId { onMoved?(newId) }
+        } catch RenameError.unchanged {
+            titleDraft = navTitle   // 実質変化なし（大文字小文字のみ等）は静かに戻す
         } catch {
             errorMessage = error.localizedDescription
+            titleDraft = navTitle   // 失敗時は現タイトルへ戻す
         }
     }
 
@@ -475,20 +521,16 @@ struct NoteDetailView: View {
         let nowMs = Date().timeIntervalSince1970 * 1000
         let sec   = Int(nowMs / 1000)
         let fullText = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: "")
-        do {
-            try await CouchDBClient.shared.createNote(id: naming.id, path: naming.path, text: fullText)
-            let record = NoteRecord(
-                id: naming.id, path: naming.path,
-                mtime: nowMs, ctime: nowMs,
-                size: fullText.utf8.count, content: fullText
-            )
-            await NoteStore.shared.upsert(record)
-            UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
-            NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
-            onCreated?(naming.id)
-        } catch {
-            errorMessage = "作成に失敗しました\n\(error.localizedDescription)"
-        }
+        // ローカルに dirty で作成（オフラインでも作成可）→ 同期ワーカがサーバへ押し上げる。
+        await NoteStore.shared.saveDirty(NoteRecord(
+            id: naming.id, path: naming.path,
+            mtime: nowMs, ctime: nowMs,
+            size: fullText.utf8.count, content: fullText
+        ))
+        UserDefaults.standard.set(naming.id, forKey: "lastOpenedNoteId")
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        onCreated?(naming.id)
+        await SyncEngine.shared.flush()
     }
 
     private func refreshInBackground() async {
@@ -505,60 +547,105 @@ struct NoteDetailView: View {
     // MARK: - 保存
 
     func save() async {
-        // 既にオフラインと分かっているなら通信を試みず即 unsaved
-        guard NetworkMonitor.shared.isOnline else {
-            saveStatus = .unsaved
+        // 保存を直列化：既に保存中なら保留にして即 return。完了後に最新内容で1回だけ再保存する。
+        // （保存を重ねると baseRev が古いまま 2 本目が走り、自分の保存を 409＝外部更新と誤検知してしまう）
+        if saveInFlight {
+            pendingSave = true
             return
         }
+        saveInFlight = true
+        defer {
+            saveInFlight = false
+            if pendingSave {
+                pendingSave = false
+                if hasUnsavedChanges { Task { await save() } }
+            }
+        }
 
-        saveStatus = .saving
         // 実際に保存する本文をスナップショット（保存中にタイプされても基準がズレないように）
         let savedBody  = editingContent
-        // フロントマター（created=ctime / updated=now）を付けて全文を保存
+        // フロントマター（created=ctime / updated=now）を付けて全文を組み立てる
         let nowMs      = Date().timeIntervalSince1970 * 1000
-        let createdSec = Int((createdMs ?? nowMs) / 1000)
+        let createdFor = createdMs ?? nowMs
+        let createdSec = Int(createdFor / 1000)
         let updatedSec = Int(nowMs / 1000)
         let extraLines = extraFrontmatter.isEmpty ? [] : extraFrontmatter.components(separatedBy: "\n")
         let fullText   = FrontmatterParser.compose(
             createdSec: createdSec, updatedSec: updatedSec, extra: extraLines, body: savedBody
         )
+        let record = NoteRecord(
+            id: noteId, path: displayPath ?? noteId,
+            mtime: nowMs, ctime: createdFor, size: fullText.utf8.count, content: fullText
+        )
+
+        // 1) まずローカルに dirty として永続化（オフライン・kill されても編集が残る）。
+        //    基準(content)はまだ動かさない＝push 成功まで「未保存」のまま retry 対象にする。
+        await NoteStore.shared.saveDirty(record)
+
+        // 2) オフラインなら push せず終了。dirty のまま、復帰時に再試行／同期ワーカが押し上げる。
+        guard NetworkMonitor.shared.isOnline else {
+            saveStatus = .unsaved
+            return
+        }
+
+        // 3) サーバへ push（楽観ロック：基準 rev とずれていれば 409 で競合検知）
+        saveStatus = .saving
+        print("[sync] save push id=\(noteId) baseRev=\(baseRev ?? "nil") bodyLen=\(savedBody.count)")
         do {
-            try await CouchDBClient.shared.saveNoteContent(id: noteId, text: fullText)
-            if createdMs == nil { createdMs = nowMs }
-            updatedMs = nowMs
-            let record = NoteRecord(
-                id: noteId,
-                path: displayPath ?? noteId,
-                mtime: nowMs,
-                ctime: createdMs,
-                size: fullText.utf8.count,
-                content: fullText
-            )
-            await NoteStore.shared.upsert(record)
-            // 基準は「実際に保存した本文」。保存中に打った差分は未保存として残す。
-            content                 = savedBody
-            hasUnsavedChanges       = editingContent != savedBody
-            externalChangeAvailable = false
-            pendingExternalContent  = ""
-            saveStatus              = .saved
-            NotificationCenter.default.post(name: .noteSaved, object: nil,
-                                            userInfo: ["noteId": noteId])
-            try? await Task.sleep(for: .seconds(2))
-            if saveStatus == .saved { saveStatus = .idle }
+            let newRev = try await CouchDBClient.shared.saveNoteContentChecked(
+                id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: baseRev)
+            print("[sync] save OK id=\(noteId) newRev=\(newRev)")
+            await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
         } catch CouchDBError.networkError {
-            // ネットワークエラー: アラートを出さず、未保存状態を保持して再接続を待つ
+            // ネットワークエラー: アラートを出さず、未保存(dirty)を保持して再接続を待つ
+            print("[sync] save networkError id=\(noteId)")
             saveStatus = .unsaved
         } catch CouchDBError.httpError(409, _) {
-            // 競合（_rev mismatch）: サーバの最新内容を取得し ExternalChangeBanner で解決をユーザに委ねる
+            // 競合。サーバ側が削除済みか、他端末の編集かで分岐。
+            print("[sync] save 409 id=\(noteId) baseRev=\(baseRev ?? "nil")")
             if let record = try? await CouchDBClient.shared.fetchNoteRecord(id: noteId) {
+                // 編集 vs 編集 → サーバ最新を取り込み、ExternalChangeBanner で解決をユーザに委ねる
+                let serverBody = FrontmatterParser.split(record.content).body
+                print("[sync] 409 server EXISTS rev=\(record.rev ?? "nil") serverLen=\(serverBody.count) contentLen=\(content.count) savedLen=\(savedBody.count) eq(server,content)=\(serverBody == content) eq(server,saved)=\(serverBody == savedBody)")
                 await applyExternalChange(record: record)
+                saveStatus = .unsaved
+            } else if let tomb = try? await CouchDBClient.shared.currentLeafRev(id: noteId),
+                      let newRev = try? await CouchDBClient.shared.saveNoteContentChecked(
+                          id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: tomb) {
+                // 削除 vs 編集 → 墓標の上に編集を復元（データ保全）し、ユーザに通知
+                print("[sync] 409 server DELETED -> recreated newRev=\(newRev)")
+                await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
+                errorMessage = "このノートは他の端末で削除されていましたが、あなたの編集で復元しました。"
+            } else {
+                print("[sync] 409 unresolved id=\(noteId) -> unsaved")
+                saveStatus = .unsaved
             }
-            saveStatus = .unsaved
         } catch {
             // ネットワーク以外のエラー（認証失敗・5xx・デコードエラー等）はアラート
+            print("[sync] save error id=\(noteId) \(error)")
             errorMessage = "保存に失敗しました\n\(error.localizedDescription)"
             saveStatus   = .unsaved
         }
+    }
+
+    /// push 成功後の共通後処理（基準の更新・clean 化・ステータス表示）。
+    private func markSaved(savedBody: String, nowMs: Double, newRev: String) async {
+        if createdMs == nil { createdMs = nowMs }
+        updatedMs = nowMs
+        // 基準（content/baseRev）は await の「前」に更新する。
+        // markClean でストアが clean になった後に content が古いままだと、その隙間に自分の
+        // 保存エコーが届いたとき「外部更新」と誤検知してバナーが出るため。
+        print("[sync] markSaved id=\(noteId) baseRev \(baseRev ?? "nil") -> \(newRev)")
+        baseRev                 = newRev
+        content                 = savedBody
+        hasUnsavedChanges       = editingContent != savedBody
+        externalChangeAvailable = false
+        pendingExternalContent  = ""
+        saveStatus              = .saved
+        await NoteStore.shared.markClean(noteId, rev: newRev)
+        NotificationCenter.default.post(name: .noteSaved, object: nil, userInfo: ["noteId": noteId])
+        try? await Task.sleep(for: .seconds(2))
+        if saveStatus == .saved { saveStatus = .idle }
     }
 }
 
