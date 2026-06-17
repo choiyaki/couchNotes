@@ -274,8 +274,13 @@ struct MarkdownTextView: UIViewRepresentable {
         context.coordinator.footer = footer
 
         let coord = context.coordinator
+        // キーボード上の浮動候補リスト
+        let panel = SuggestionPanelView()
+        panel.isHidden = true
+        panel.onSelect = { [weak coord] note in coord?.handleSuggestionTap(note) }
+        coord.suggestionPanel = panel
+
         let accessory = AccessoryContainerView()
-        accessory.suggestion.onSelect       = { [weak coord] note in coord?.handleSuggestionTap(note) }
         accessory.toolbar.onPaste           = { [weak coord] in coord?.handlePaste() }
         accessory.toolbar.onUploadImage     = { [weak coord] in coord?.handleUploadImage() }
         accessory.toolbar.onDoubleBracket   = { [weak coord] in coord?.handleDoubleBracket() }
@@ -319,6 +324,7 @@ struct MarkdownTextView: UIViewRepresentable {
     static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
         EditorImageStore.shared.onUpdate = nil
+        coordinator.suggestionPanel?.removeFromSuperview()
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
@@ -374,6 +380,9 @@ extension MarkdownTextView {
         var fontSize:    CGFloat = MarkdownStyler.defaultFontSize
         var lineSpacing: CGFloat = MarkdownStyler.defaultLineSpacing
         var accessoryView: AccessoryContainerView?
+        var suggestionPanel: SuggestionPanelView?       // キーボード上の浮動候補リスト
+        private var keyboardTopY: CGFloat = 0           // キーボード（＝アクセサリ）上端の window 座標 Y
+        private var keyboardOverlap: CGFloat = 0        // キーボードが本文に被っている高さ
         var footer: BacklinksFooterView?
         var backlinkIDs: [String] = []
         /// 画像ピッカー表示でフォーカスが外れる前に控えたカーソル位置
@@ -404,17 +413,54 @@ extension MarkdownTextView {
             let lower = query.lowercased()
             let hits  = notes
                 .filter { $0.shortTitle.lowercased().contains(lower) }
-                .prefix(10)
+                .prefix(15)   // 取得は最大15件（画面表示は4件、残りは内部スクロール）
 
             guard !hits.isEmpty else { clearSuggestions(for: tv); return }
 
-            // コンテナ内でサジェストを更新・表示（inputAccessoryView は入れ替えない）
-            accessoryView?.suggestion.update(with: Array(hits))
-            accessoryView?.showSuggestion()
+            showSuggestionPanel(Array(hits))
         }
 
         private func clearSuggestions(for tv: UITextView) {
-            accessoryView?.showToolbar()
+            hideSuggestionPanel()
+        }
+
+        // MARK: 候補パネル（キーボード上の浮動リスト）
+
+        private func showSuggestionPanel(_ items: [NoteItem]) {
+            guard let tv = textView, let window = tv.window, let panel = suggestionPanel else { return }
+            if panel.superview !== window { window.addSubview(panel) }
+            window.bringSubviewToFront(panel)
+            panel.update(with: items)
+            panel.isHidden = false
+            accessoryView?.setSuggesting(true)   // 候補中はツールバー自体を畳む
+            positionSuggestionPanel(in: window)
+            applyBottomInset()                   // 下インセットに候補パネル分を足す
+            revealCaretIfHidden(in: tv)          // カーソル行をパネルの真上まで持ち上げる
+        }
+
+        private func hideSuggestionPanel() {
+            suggestionPanel?.isHidden = true
+            accessoryView?.setSuggesting(false)
+            applyBottomInset()
+        }
+
+        /// キーボード（アクセサリ）上端に密着させて配置する。
+        private func positionSuggestionPanel(in window: UIWindow) {
+            guard let panel = suggestionPanel, !panel.isHidden else { return }
+            let margin: CGFloat = 8
+            let h = panel.preferredHeight
+            let bottom = keyboardTopY > 0 ? keyboardTopY : window.bounds.height
+            panel.frame = CGRect(x: margin, y: bottom - h,
+                                 width: window.bounds.width - margin * 2, height: h)
+        }
+
+        /// 本文の下インセットを「キーボード被り＋（候補表示中はパネル高さ）」に設定する。
+        /// パネル分を足すことで、カーソルがパネルに隠れず真上に来るまでスクロールできる。
+        private func applyBottomInset() {
+            guard let tv = textView else { return }
+            let panelH = (suggestionPanel?.isHidden == false) ? (suggestionPanel?.preferredHeight ?? 0) : 0
+            tv.contentInset.bottom = keyboardOverlap + panelH
+            tv.verticalScrollIndicatorInsets.bottom = keyboardOverlap
         }
 
         // MARK: ツールバーアクション
@@ -923,18 +969,18 @@ extension MarkdownTextView {
             else { return }
 
             let tvMaxY  = tv.convert(CGPoint(x: 0, y: tv.bounds.maxY), to: window).y
-            let overlap = max(0, tvMaxY - kbFrame.minY)
+            keyboardOverlap = max(0, tvMaxY - kbFrame.minY)
+            keyboardTopY    = kbFrame.minY   // 候補パネルの基準（キーボード／アクセサリ上端）
 
-            tv.contentInset.bottom = overlap
-            tv.verticalScrollIndicatorInsets.bottom = overlap
-
+            applyBottomInset()
+            positionSuggestionPanel(in: window)   // 表示中なら追従配置
             revealCaretIfHidden(in: tv)
         }
 
         @objc func keyboardWillHide(_ notification: Notification) {
-            guard let tv = textView else { return }
-            tv.contentInset.bottom = 0
-            tv.verticalScrollIndicatorInsets.bottom = 0
+            keyboardOverlap = 0
+            keyboardTopY = 0
+            hideSuggestionPanel()   // 内部で applyBottomInset()（＝0）も実行
         }
 
         /// 直近の選択範囲。選択操作でどちらの端（開始／終了）が動いたか判定するため保持する。
@@ -1166,18 +1212,26 @@ enum MarkdownStyler {
         options: .anchorsMatchLines
     )
 
+    /// タブの表示幅（見かけ上 ≒ 半角スペース2つ分。等幅フォント前提）。
+    /// ぶら下げインデントの計算とも共有して、折り返し行のズレを防ぐ。
+    static func tabWidth(for fontSize: CGFloat) -> CGFloat { fontSize * 1.2 }
+
+    /// 行間とタブ幅を設定した段落スタイルを作る（全段落で共通の基準）。
+    private static func makeParagraph(lineSpacing: CGFloat, fontSize: CGFloat) -> NSMutableParagraphStyle {
+        let p = NSMutableParagraphStyle()
+        if lineSpacing > 0 { p.lineSpacing = lineSpacing }
+        p.tabStops = []                               // 既定のタブストップを消し…
+        p.defaultTabInterval = tabWidth(for: fontSize) // …一定間隔（≒2スペース）に揃える
+        return p
+    }
+
     static func baseAttributes(fontSize: CGFloat = defaultFontSize,
                                lineSpacing: CGFloat = defaultLineSpacing) -> [NSAttributedString.Key: Any] {
-        var attrs: [NSAttributedString.Key: Any] = [
+        [
             .font: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
             .foregroundColor: UIColor.label,
+            .paragraphStyle: makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize),
         ]
-        if lineSpacing > 0 {
-            let para = NSMutableParagraphStyle()
-            para.lineSpacing = lineSpacing
-            attrs[.paragraphStyle] = para
-        }
-        return attrs
     }
 
     static func apply(to storage: NSTextStorage,
@@ -1199,12 +1253,10 @@ enum MarkdownStyler {
         storage.removeAttribute(.externalLinkURL,    range: full)
         storage.removeAttribute(.underlineStyle,     range: full)
 
-        // 行間を全体に適用（リスト行は後でぶら下げと合成して上書き）
-        if lineSpacing > 0 {
-            let basePara = NSMutableParagraphStyle()
-            basePara.lineSpacing = lineSpacing
-            storage.addAttribute(.paragraphStyle, value: basePara, range: full)
-        }
+        // 行間とタブ幅を全体に適用（リスト・画像行は後で上書き）
+        storage.addAttribute(.paragraphStyle,
+                             value: makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize),
+                             range: full)
 
         (storage.string as NSString).enumerateSubstrings(in: full, options: .byLines) { sub, lineRange, _, _ in
             guard let line = sub else { return }
@@ -1213,7 +1265,7 @@ enum MarkdownStyler {
 
         styleWikiLinks(in: storage, range: full, notes: notes)
         styleExternalLinks(in: storage, range: full)
-        styleImageLines(in: storage, lineSpacing: lineSpacing)
+        styleImageLines(in: storage, lineSpacing: lineSpacing, fontSize: fontSize)
         styleBlockIDs(in: storage, range: full, font: blockIDFont)
     }
 
@@ -1224,15 +1276,14 @@ enum MarkdownStyler {
 
     /// 画像リンク行に「段落下の余白」を設定し、画像オーバーレイの居場所を確保する。
     /// テキスト（文字）は増やさないのでカーソル挙動・保存本文には影響しない。
-    private static func styleImageLines(in s: NSTextStorage, lineSpacing: CGFloat) {
+    private static func styleImageLines(in s: NSTextStorage, lineSpacing: CGFloat, fontSize: CGFloat) {
         guard let regex = imageLinkRegex else { return }
         let ns = s.string as NSString
         let full = NSRange(location: 0, length: s.length)
         for m in regex.matches(in: s.string, range: full) where m.numberOfRanges > 1 {
             let url = ns.substring(with: m.range(at: 1))
             let lineRange = ns.lineRange(for: m.range)
-            let para = NSMutableParagraphStyle()
-            para.lineSpacing = lineSpacing
+            let para = makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize)
             para.paragraphSpacing = EditorImageStore.shared.displayHeight(for: url) + 16
             s.addAttribute(.paragraphStyle, value: para, range: lineRange)
         }
@@ -1300,14 +1351,13 @@ enum MarkdownStyler {
             return
         }
 
-        // ぶら下げインデント（タブはフォントサイズ比例幅、スペースは実測幅 + プレフィックス幅）
-        let tabWidth    = fontSize * 1.75
+        // ぶら下げインデント（タブは共通のタブ幅、スペースは実測幅 + プレフィックス幅）
+        let tabW        = tabWidth(for: fontSize)
         let spaceWidth  = (" " as NSString).size(withAttributes: [.font: baseFont]).width
         let prefixWidth = (prefixForMeasure as NSString)
             .size(withAttributes: [.font: baseFont]).width
-        let para = NSMutableParagraphStyle()
-        para.headIndent  = CGFloat(tabCount) * tabWidth + CGFloat(spaceCount) * spaceWidth + prefixWidth
-        para.lineSpacing = lineSpacing
+        let para = makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize)
+        para.headIndent  = CGFloat(tabCount) * tabW + CGFloat(spaceCount) * spaceWidth + prefixWidth
         s.addAttribute(.paragraphStyle, value: para, range: range)
     }
 
@@ -1372,58 +1422,118 @@ enum MarkdownStyler {
     }
 }
 
-// MARK: - SuggestionAccessoryView
+// MARK: - SuggestionPanelView
 
-final class SuggestionAccessoryView: UIView {
+/// キーボードの真上に浮かぶ、Wiki リンク候補の縦リスト。
+/// inputAccessoryView ではなくアプリのウィンドウに重ねるので、IME を一切触らない。
+final class SuggestionPanelView: UIView {
     var onSelect: ((NoteItem) -> Void)?
 
-    private let scrollView = UIScrollView()
+    private let blur   = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+    private let scroll = UIScrollView()
+    private let stack  = UIStackView()
 
-    // ボタンの高さと縦方向の余白
-    private static let btnH: CGFloat = 30
-    private static let vPad: CGFloat = (44 - btnH) / 2
+    static let rowHeight: CGFloat = 36
+    private static let maxVisibleRows = 4
+    /// 現在の候補数に応じた表示高さ。
+    private(set) var preferredHeight: CGFloat = rowHeight
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 44))
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.showsVerticalScrollIndicator   = false
-        addSubview(scrollView)
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        super.init(frame: .zero)
+        // 上に向かって持ち上がる影（角丸は内側の blur 側でクリップ）
+        layer.shadowColor   = UIColor.black.cgColor
+        layer.shadowOpacity = 0.14
+        layer.shadowRadius  = 10
+        layer.shadowOffset  = CGSize(width: 0, height: -3)
+
+        blur.layer.cornerRadius  = 14
+        blur.layer.cornerCurve   = .continuous
+        blur.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]   // 上だけ角丸
+        blur.clipsToBounds = true
+        addSubview(blur)
+        blur.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            blur.topAnchor.constraint(equalTo: topAnchor),
+            blur.bottomAnchor.constraint(equalTo: bottomAnchor),
+            blur.leadingAnchor.constraint(equalTo: leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+
+        scroll.showsVerticalScrollIndicator = true
+        scroll.alwaysBounceVertical = false
+        blur.contentView.addSubview(scroll)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: blur.contentView.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor),
+        ])
+
+        stack.axis = .vertical
+        stack.spacing = 0
+        scroll.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
 
     func update(with notes: [NoteItem]) {
-        scrollView.subviews.forEach { $0.removeFromSuperview() }
-
-        var x: CGFloat = 12
-
-        for note in notes {
-            var cfg = UIButton.Configuration.filled()
-            cfg.title               = note.shortTitle
-            cfg.baseForegroundColor = .label
-            cfg.baseBackgroundColor = .tertiarySystemFill
-            cfg.cornerStyle         = .medium
-            cfg.buttonSize          = .small
-
-            let btn = UIButton(configuration: cfg)
-            // intrinsicContentSize でタイトル幅を取得してフレームを手動計算
-            let w = max(btn.intrinsicContentSize.width, 44)
-            btn.frame = CGRect(x: x, y: Self.vPad, width: w, height: Self.btnH)
-            btn.addAction(UIAction { [weak self] _ in self?.onSelect?(note) },
-                          for: .touchUpInside)
-            scrollView.addSubview(btn)
-            x += w + 8
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (i, note) in notes.enumerated() {
+            if i > 0 {
+                let sep = UIView()
+                sep.backgroundColor = UIColor.separator.withAlphaComponent(0.4)
+                sep.translatesAutoresizingMaskIntoConstraints = false
+                sep.heightAnchor.constraint(equalToConstant: 1.0 / UIScreen.main.scale).isActive = true
+                stack.addArrangedSubview(sep)
+            }
+            stack.addArrangedSubview(makeRow(note, highlighted: i == 0))
         }
+        let rows = CGFloat(min(notes.count, Self.maxVisibleRows))
+        preferredHeight = max(Self.rowHeight, rows * Self.rowHeight)
+        scroll.setContentOffset(.zero, animated: false)
+    }
 
-        // contentSize を明示的に設定して横スクロールを確実に有効化
-        scrollView.contentSize = CGSize(width: x + 8, height: 44)
-        scrollView.setContentOffset(.zero, animated: false)
+    private func makeRow(_ note: NoteItem, highlighted: Bool) -> UIView {
+        let row = UIControl()
+        row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
+        if highlighted { row.backgroundColor = UIColor.tintColor.withAlphaComponent(0.14) }
+
+        let icon = UIImageView(image: UIImage(systemName: "doc"))
+        icon.tintColor = .tertiaryLabel
+        icon.contentMode = .scaleAspectFit
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let label = UILabel()
+        label.text = note.shortTitle
+        label.font = .systemFont(ofSize: 15)
+        label.textColor = .label
+        label.numberOfLines = 1
+        label.lineBreakMode = .byTruncatingTail
+
+        let h = UIStackView(arrangedSubviews: [icon, label])
+        h.axis = .horizontal
+        h.spacing = 8
+        h.alignment = .center
+        h.isUserInteractionEnabled = false
+        row.addSubview(h)
+        h.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            h.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 14),
+            h.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -14),
+            h.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+        row.addAction(UIAction { [weak self] _ in self?.onSelect?(note) }, for: .touchUpInside)
+        return row
     }
 }
 
@@ -1441,59 +1551,60 @@ final class KeyboardToolbarView: UIView {
     var onDecreaseIndent:  (() -> Void)?
     var onIncreaseIndent:  (() -> Void)?
 
-    private let scrollView = UIScrollView()
-    private let stack      = UIStackView()
+    private let stack = UIStackView()
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 44))
 
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.showsVerticalScrollIndicator   = false
-        addSubview(scrollView)
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-
-        stack.axis      = .horizontal
-        stack.spacing   = 4
-        stack.alignment = .center
-        scrollView.addSubview(stack)
+        stack.axis         = .horizontal
+        stack.spacing      = 5
+        stack.alignment    = .fill
+        stack.distribution = .fillEqually   // 8つを画面幅に等分（横スクロールなし）
+        addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -8),
-            stack.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
         ])
 
-        // ボタン追加（左から: ペースト・写真・[[]]・リストトグル・行↑・行↓・インデント-・インデント+）
-        stack.addArrangedSubview(makeButton(systemImage: "doc.on.clipboard") { [weak self] in self?.onPaste?() })
-        stack.addArrangedSubview(makeButton(systemImage: "photo")            { [weak self] in self?.onUploadImage?() })
-        stack.addArrangedSubview(makeButton(title: "[[ ]]")                  { [weak self] in self?.onDoubleBracket?() })
-        stack.addArrangedSubview(makeButton(systemImage: "checklist")        { [weak self] in self?.onListToggle?() })
-        stack.addArrangedSubview(makeButton(systemImage: "chevron.up")       { [weak self] in self?.onMoveLineUp?() })
-        stack.addArrangedSubview(makeButton(systemImage: "chevron.down")     { [weak self] in self?.onMoveLineDown?() })
-        stack.addArrangedSubview(makeButton(systemImage: "decrease.indent")  { [weak self] in self?.onDecreaseIndent?() })
-        stack.addArrangedSubview(makeButton(systemImage: "increase.indent")  { [weak self] in self?.onIncreaseIndent?() })
+        // ボタン追加（左から: ペースト・写真・[[]]・チェック・行↑・行↓・アウトデント・インデント）
+        stack.addArrangedSubview(makeButton(systemImage: "clipboard")          { [weak self] in self?.onPaste?() })
+        stack.addArrangedSubview(makeButton(systemImage: "photo.badge.plus")   { [weak self] in self?.onUploadImage?() })
+        stack.addArrangedSubview(makeButton(title: "[[ ]]")                    { [weak self] in self?.onDoubleBracket?() })
+        stack.addArrangedSubview(makeButton(systemImage: "checklist")          { [weak self] in self?.onListToggle?() })
+        stack.addArrangedSubview(makeButton(systemImage: "arrow.up")           { [weak self] in self?.onMoveLineUp?() })
+        stack.addArrangedSubview(makeButton(systemImage: "arrow.down")         { [weak self] in self?.onMoveLineDown?() })
+        stack.addArrangedSubview(makeButton(systemImage: "arrow.left.to.line")  { [weak self] in self?.onDecreaseIndent?() })
+        stack.addArrangedSubview(makeButton(systemImage: "arrow.right.to.line") { [weak self] in self?.onIncreaseIndent?() })
     }
     required init?(coder: NSCoder) { fatalError() }
 
     private func makeButton(title: String? = nil,
                             systemImage: String? = nil,
                             action: @escaping () -> Void) -> UIButton {
-        var cfg = UIButton.Configuration.plain()
-        if let title       { cfg.title = title }
-        if let systemImage { cfg.image = UIImage(systemName: systemImage) }
-        cfg.imagePadding = 4
-        cfg.buttonSize   = .small
+        // 各ボタンに薄い角丸背景を付け、境界（タップ範囲）が分かるようにする。背景は薄め。
+        var cfg = UIButton.Configuration.filled()
+        if let title {
+            cfg.title = title
+            cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                var out = incoming
+                out.font = .systemFont(ofSize: 13, weight: .medium)
+                return out
+            }
+        }
+        if let systemImage {
+            cfg.image = UIImage(systemName: systemImage)
+            cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        }
         cfg.baseForegroundColor = .label
+        cfg.baseBackgroundColor = .quaternarySystemFill   // さらに薄く
+        cfg.cornerStyle  = .medium
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4)
 
         let btn = UIButton(configuration: cfg)
+        btn.titleLabel?.numberOfLines = 1   // [[ ]] を1行に
         btn.addAction(UIAction { _ in action() }, for: .touchUpInside)
         return btn
     }
@@ -1501,38 +1612,50 @@ final class KeyboardToolbarView: UIView {
 
 // MARK: - AccessoryContainerView
 
-/// inputAccessoryView として一度だけ attach されるコンテナ。
-/// 内部にツールバーとサジェストを両方持ち、isHidden の切り替えだけで表示モードを変更する。
-/// inputAccessoryView 自体を入れ替えないため、IME の変換状態が維持される。
+/// inputAccessoryView として一度だけ attach されるコンテナ（常駐ツールバー）。
+/// 候補はキーボード上の浮動パネル（SuggestionPanelView）で出すので、ここでは
+/// 候補中にツールバーを隠すだけ。inputAccessoryView 自体を入れ替えないため IME は維持される。
 final class AccessoryContainerView: UIInputView {
-    let toolbar    = KeyboardToolbarView()
-    let suggestion = SuggestionAccessoryView()
+    let toolbar = KeyboardToolbarView()
+    private static let barHeight: CGFloat = 44
+    private var heightConstraint: NSLayoutConstraint!
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 44),
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: AccessoryContainerView.barHeight),
                    inputViewStyle: .keyboard)
-        for v in [toolbar as UIView, suggestion as UIView] {
-            addSubview(v)
-            v.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                v.topAnchor.constraint(equalTo: topAnchor),
-                v.bottomAnchor.constraint(equalTo: bottomAnchor),
-                v.leadingAnchor.constraint(equalTo: leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: trailingAnchor),
-            ])
-        }
-        suggestion.isHidden = true  // 初期状態はツールバー
+        // 高さを Auto Layout で持たせると、制約を変えるだけでキーボード側が追従し、
+        // reloadInputViews（＝IME破壊）なしにバーを畳める。
+        translatesAutoresizingMaskIntoConstraints = false
+        heightConstraint = heightAnchor.constraint(equalToConstant: AccessoryContainerView.barHeight)
+        heightConstraint.isActive = true
+
+        // キーボード標準の濃い灰色を、薄い背景で覆う
+        let bg = UIView()
+        bg.backgroundColor = .secondarySystemBackground
+        addSubview(bg)
+        bg.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            bg.topAnchor.constraint(equalTo: topAnchor),
+            bg.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bg.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bg.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+
+        addSubview(toolbar)
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            toolbar.topAnchor.constraint(equalTo: topAnchor),
+            toolbar.heightAnchor.constraint(equalToConstant: AccessoryContainerView.barHeight),
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func showToolbar() {
-        toolbar.isHidden    = false
-        suggestion.isHidden = true
-    }
-
-    func showSuggestion() {
-        toolbar.isHidden    = true
-        suggestion.isHidden = false
+    /// 候補表示中はツールバー自体を畳んで消す（高さ0）。候補は浮動パネルで表示。
+    func setSuggesting(_ on: Bool) {
+        toolbar.isHidden = on
+        heightConstraint.constant = on ? 0 : AccessoryContainerView.barHeight
     }
 }
 
