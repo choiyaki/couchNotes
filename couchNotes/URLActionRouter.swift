@@ -7,6 +7,8 @@
 //  - couchnotes://new?path=Inbox/買い物&content=...  … 無ければ作成、あれば追記。常に開く
 //  - couchnotes://append?path=20260606&text=...      … 常に作成 or 追記。常に開く
 //  path はフルパス。スラッシュ有り＝フォルダ内、無し＝ルート直下。.md は任意。
+//  open に限り、path がファイル名だけ（スラッシュ無し）の場合はフォルダ配下も含めて
+//  ファイル名一致で検索する（例: open?path=20260617 で Publish/20260617.md を開く）。
 //
 
 import Foundation
@@ -80,11 +82,18 @@ final class URLActionRouter: ObservableObject {
     }
 
     private func openNote(_ target: (id: String, path: String)) async {
+        // 1) フルパス完全一致
         if await NoteStore.shared.editingNote(target.id) != nil {
             noteToOpen = target.id
-        } else {
-            errorMessage = "ノートが見つかりません: \(target.path)"
+            return
         }
+        // 2) path がファイル名だけ（スラッシュ無し）なら、フォルダ配下も含め basename 一致で探す
+        if !target.id.contains("/"),
+           let found = await NoteStore.shared.findIDByBasename(target.id) {
+            noteToOpen = found
+            return
+        }
+        errorMessage = "ノートが見つかりません: \(target.path)"
     }
 
     /// 無ければ作成、あれば追記。完了後に開く。

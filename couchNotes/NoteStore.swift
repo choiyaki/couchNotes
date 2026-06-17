@@ -102,6 +102,20 @@ actor NoteStore {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
+    /// 末尾のファイル名（basename）が一致する生存ノートの id を返す。
+    /// 複数該当する場合は最近更新したものを優先。basenameLower は ".md" 込み・小文字。
+    func findIDByBasename(_ basenameLower: String) -> String? {
+        guard let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 ORDER BY mtime DESC;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let c = sqlite3_column_text(stmt, 0) else { continue }
+            let id   = String(cString: c)   // 保存時に小文字化済み
+            let base = id.components(separatedBy: "/").last ?? id
+            if base == basenameLower { return id }
+        }
+        return nil
+    }
+
     /// 生存ノートの id→rev マップ（リコンシリエーション用）。rev 未取得は空文字。
     func idRevMap() -> [String: String] {
         guard let stmt = prepare("SELECT id, rev FROM notes WHERE deleted = 0;") else { return [:] }
