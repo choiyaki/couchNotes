@@ -16,12 +16,24 @@ extension NSAttributedString.Key {
 /// タップ・選択変更で勝手にスクロールしなくなる。手動ドラッグスクロールはそのまま有効。
 /// カーソルの可視化が必要になったら、別途 contentOffset を直接操作して行う（Phase 2 以降）。
 final class NonAutoScrollTextView: UITextView {
-    /// true の間、自動スクロール（scrollRectToVisible）を無視する
+    /// スクロール制御のマスタースイッチ。
+    /// true  = 自前制御（自動スクロールを抑制し、revealCaretIfHidden で手動追従）
+    /// false = iOS 純正の自動スクロールに委譲（自前追従は無効化）
+    /// ※ 純正委譲は暴走／飛びが再発したため true（自前制御）で運用する。
     var suppressesAutoScroll = true
 
     override func scrollRectToVisible(_ rect: CGRect, animated: Bool) {
         guard !suppressesAutoScroll else { return }
         super.scrollRectToVisible(rect, animated: animated)
+    }
+
+    /// 選択／空白トラックパッド時に UITextInteractionAssistant が回す自動スクロール（animated な
+    /// setContentOffset）も抑制する。これがないと、scrollRectToVisible だけ止めても autoscroll が
+    /// 素通りして下方向へ暴走スクロールしてしまう。カーソルの可視化は revealCaretIfHidden が
+    /// contentOffset を直接操作して行うため、ここを止めても支障はない。
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        if suppressesAutoScroll && animated { return }
+        super.setContentOffset(contentOffset, animated: animated)
     }
 
     // MARK: - ハードウェアキーボード・ショートカット
@@ -925,28 +937,63 @@ extension MarkdownTextView {
             tv.verticalScrollIndicatorInsets.bottom = 0
         }
 
-        /// カーソルがキーボードに隠れている時だけ、隠れている分＋余白だけ下方向に
-        /// スクロールして見せる（Phase 2）。見えている場合や上方向には動かさない。
-        /// scrollRectToVisible は使わず contentOffset を直接設定するため、Phase 1 の
-        /// 自動スクロール抑制と両立する。
+        /// 直近の選択範囲。選択操作でどちらの端（開始／終了）が動いたか判定するため保持する。
+        private var lastSelectedRange = NSRange(location: 0, length: 0)
+
+        /// 1点（caret rect）が上下に隠れそうな時だけ、その点を最小限スクロールして見せる。
+        /// scrollRectToVisible は使わず contentOffset を直接設定するため、自動スクロール抑制と両立する。
+        private func revealCaret(_ caret: CGRect, in tv: UITextView) {
+            guard caret.maxY.isFinite, caret.minY.isFinite else { return }
+
+            let bottomPadding: CGFloat = 60   // キーボード上端からの余白
+            let topPadding:    CGFloat = 24   // ヘッダー側の余白
+            let topInset      = tv.contentInset.top
+            let bottomInset   = tv.contentInset.bottom        // キーボードが隠している高さ
+            let visibleHeight = tv.bounds.height - topInset - bottomInset
+            let visibleTop    = tv.contentOffset.y + topInset
+            let visibleBottom = tv.contentOffset.y + topInset + visibleHeight
+            let maxOffsetY    = max(0, tv.contentSize.height + bottomInset - tv.bounds.height)
+
+            if caret.maxY + bottomPadding > visibleBottom {
+                // 下（キーボード側）に隠れそう → 下へスクロール（下方向のみ）
+                let targetY = min(caret.maxY + bottomPadding - topInset - visibleHeight, maxOffsetY)
+                if targetY > tv.contentOffset.y { tv.contentOffset.y = targetY }
+            } else if caret.minY - topPadding < visibleTop {
+                // 上（ヘッダー側）に隠れそう → 上へスクロール（上方向のみ）
+                let targetY = max(0, caret.minY - topPadding - topInset)
+                if targetY < tv.contentOffset.y { tv.contentOffset.y = targetY }
+            }
+        }
+
+        /// 挿入点（選択の end）を見せる。入力・改行・キーボード表示で使う。
         private func revealCaretIfHidden(in tv: UITextView) {
             guard let range = tv.selectedTextRange else { return }
-            let caret = tv.caretRect(for: range.end)
-            guard caret.maxY.isFinite else { return }
+            lastSelectedRange = tv.selectedRange
+            revealCaret(tv.caretRect(for: range.end), in: tv)
+        }
 
-            let padding: CGFloat = 60   // キーボード上端からの余白（調整可）
-            let visibleHeight = tv.bounds.height - tv.contentInset.bottom
-            let visibleBottom = tv.contentOffset.y + visibleHeight
+        /// 選択変更時：直前と比べて「動いた側の端」だけを追従する。
+        /// 開始ハンドルを動かしている時は終了側の補正をしない（逆も同様）ので、思う方向へ広げられる。
+        private func revealActiveCaret(in tv: UITextView) {
+            guard let sel = tv.selectedTextRange else { return }
+            let new = tv.selectedRange
+            let old = lastSelectedRange
+            lastSelectedRange = new
 
-            // カーソル下端が見える範囲の下端より下＝隠れている時だけ
-            guard caret.maxY + padding > visibleBottom else { return }
+            let newStart = new.location, newEnd = new.location + new.length
+            let oldStart = old.location, oldEnd = old.location + old.length
 
-            let maxOffsetY = max(0, tv.contentSize.height + tv.contentInset.bottom - tv.bounds.height)
-            let targetY = min(caret.maxY + padding - visibleHeight, maxOffsetY)
-            // 下方向のみ反映（上には動かさない）
-            if targetY > tv.contentOffset.y {
-                tv.contentOffset.y = targetY
+            let position: UITextPosition
+            if new.length == 0 {
+                position = sel.end                                   // 単一カーソル
+            } else if newStart != oldStart && newEnd == oldEnd {
+                position = sel.start                                 // 開始ハンドルを操作中
+            } else if newEnd != oldEnd && newStart == oldStart {
+                position = sel.end                                   // 終了ハンドルを操作中
+            } else {
+                position = sel.end                                   // 判定不能時は終了側
             }
+            revealCaret(tv.caretRect(for: position), in: tv)
         }
 
         // MARK: UITextViewDelegate
@@ -1027,6 +1074,8 @@ extension MarkdownTextView {
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !isStyling else { return }
             updateSuggestions(for: textView)
+            // カーソル移動・選択範囲調整で、動いた側の端だけを最小限追従スクロール
+            revealActiveCaret(in: textView)
         }
 
         // MARK: UIGestureRecognizerDelegate
