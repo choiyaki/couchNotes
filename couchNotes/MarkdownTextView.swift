@@ -24,6 +24,76 @@ final class NonAutoScrollTextView: UITextView {
         super.scrollRectToVisible(rect, animated: animated)
     }
 
+    // MARK: - ハードウェアキーボード・ショートカット
+
+    var onShortcutPaste:      (() -> Void)?   // cmd+V
+    var onShortcutListToggle: (() -> Void)?   // cmd+Enter
+    var onShortcutMoveUp:     (() -> Void)?   // cmd+option+↑
+    var onShortcutMoveDown:   (() -> Void)?   // cmd+option+↓
+    var onShortcutIndent:     (() -> Void)?   // cmd+option+→
+    var onShortcutOutdent:    (() -> Void)?   // cmd+option+←
+
+    override var keyCommands: [UIKeyCommand]? {
+        // 単発で押すもの（cmd+V / cmd+Enter）だけ UIKeyCommand で扱う。
+        // 押しっぱなしで連続発火しては困る移動・インデント・Tab は pressesBegan 側で扱う。
+        [
+            UIKeyCommand(input: "v",  modifierFlags: .command, action: #selector(scPaste)),
+            UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(scListToggle)),
+        ]
+    }
+
+    @objc private func scPaste()      { onShortcutPaste?() }
+    @objc private func scListToggle() { onShortcutListToggle?() }
+
+    // MARK: - 押下イベントで扱うショートカット（オートリピート抑止）
+
+    /// 現在押されているショートカットキー。押しっぱなしのリピートを1回だけにするための集合。
+    private var activeShortcutKeyCodes: Set<UIKeyboardHIDUsage> = []
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let unhandled = presses.filter { !handleShortcut($0) }
+        if !unhandled.isEmpty { super.pressesBegan(unhandled, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var supered = Set<UIPress>()
+        for p in presses {
+            if let kc = p.key?.keyCode, activeShortcutKeyCodes.contains(kc) {
+                activeShortcutKeyCodes.remove(kc)
+            } else {
+                supered.insert(p)
+            }
+        }
+        if !supered.isEmpty { super.pressesEnded(supered, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for p in presses { if let kc = p.key?.keyCode { activeShortcutKeyCodes.remove(kc) } }
+        super.pressesCancelled(presses, with: event)
+    }
+
+    /// 該当ショートカットなら実行して true（イベントを消費）。押しっぱなしのリピートは無視する。
+    private func handleShortcut(_ press: UIPress) -> Bool {
+        guard let key = press.key else { return false }
+        let mods = key.modifierFlags.intersection([.command, .alternate, .control, .shift])
+        let kc   = key.keyCode
+        let cmdOpt: UIKeyModifierFlags = [.command, .alternate]
+
+        var action: (() -> Void)? = nil
+        if      kc == .keyboardUpArrow,    mods == cmdOpt { action = onShortcutMoveUp }
+        else if kc == .keyboardDownArrow,  mods == cmdOpt { action = onShortcutMoveDown }
+        else if kc == .keyboardRightArrow, mods == cmdOpt { action = onShortcutIndent }
+        else if kc == .keyboardLeftArrow,  mods == cmdOpt { action = onShortcutOutdent }
+        else if kc == .keyboardTab,        mods.isEmpty   { action = onShortcutIndent }   // Tab
+        else if kc == .keyboardTab,        mods == .shift { action = onShortcutOutdent }  // Shift+Tab
+
+        guard let action else { return false }
+        if activeShortcutKeyCodes.contains(kc) { return true }   // リピートは消費するが実行しない
+        activeShortcutKeyCodes.insert(kc)
+        action()
+        return true
+    }
+
     // MARK: - 本文末尾フッター（バックリンク表示）
 
     /// 本文の下に差し込むフッター。スクロール領域内に配置するため本文と一緒にスクロールする。
@@ -205,6 +275,14 @@ struct MarkdownTextView: UIViewRepresentable {
         coord.accessoryView = accessory
         // inputAccessoryView は一度だけ設定し、以降は入れ替えない（入れ替えは IME を破壊するため）
         tv.inputAccessoryView = accessory
+
+        // ハードウェアキーボードのショートカット（カスタムキーボードの各操作に対応）
+        tv.onShortcutPaste      = { [weak coord] in coord?.handlePaste() }
+        tv.onShortcutListToggle = { [weak coord] in coord?.handleListToggle() }
+        tv.onShortcutMoveUp     = { [weak coord] in coord?.handleMoveLineUp() }
+        tv.onShortcutMoveDown   = { [weak coord] in coord?.handleMoveLineDown() }
+        tv.onShortcutIndent     = { [weak coord] in coord?.handleIncreaseIndent() }
+        tv.onShortcutOutdent    = { [weak coord] in coord?.handleDecreaseIndent() }
 
         // Phase 1: キーボードが隠す高さ分だけ下部スクロール余白を確保するための購読
         NotificationCenter.default.addObserver(
