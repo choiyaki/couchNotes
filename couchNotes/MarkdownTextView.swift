@@ -374,6 +374,8 @@ extension MarkdownTextView {
     final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate, PHPickerViewControllerDelegate {
         let parent: MarkdownTextView
         private var isStyling = false
+        /// 直近のユーザー編集範囲（打鍵時に変更段落だけ再スタイルするため）。programmatic 編集では nil。
+        private var pendingChangeRange: NSRange?
         weak var textView: UITextView?
 
         var notes: [NoteItem] = []
@@ -1051,6 +1053,8 @@ extension MarkdownTextView {
         // MARK: リスト自動補完
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            // 編集後の変更範囲（位置＋置換テキスト長）を控え、textViewDidChange で部分再スタイルに使う
+            pendingChangeRange = NSRange(location: range.location, length: (text as NSString).length)
             guard text == "\n" else { return true }
 
             let ns        = textView.text as NSString
@@ -1108,7 +1112,14 @@ extension MarkdownTextView {
             guard !isStyling else { return }
 
             isStyling = true
-            MarkdownStyler.apply(to: textView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            // 打鍵時は変更段落だけ再スタイル（programmatic 編集では全体 apply にフォールバック）
+            if let changed = pendingChangeRange {
+                MarkdownStyler.applyIncremental(to: textView.textStorage, changed: changed,
+                                                notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            } else {
+                MarkdownStyler.apply(to: textView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            }
+            pendingChangeRange = nil
             isStyling = false
 
             parent.text = textView.text
@@ -1240,11 +1251,46 @@ enum MarkdownStyler {
                       lineSpacing: CGFloat = defaultLineSpacing) {
         let len = storage.length
         guard len > 0 else { return }
-        let full = NSRange(location: 0, length: len)
+        style(storage, range: NSRange(location: 0, length: len),
+              notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+    }
 
+    /// 変更があった範囲の前後の段落だけを再スタイルする（打鍵ごとの軽量パス）。
+    /// このエディタのスタイルは全て行内完結なので段落単位で安全。将来の複数行記法に備え前後±1段落広げる。
+    static func applyIncremental(to storage: NSTextStorage,
+                                 changed: NSRange,
+                                 notes: [NoteItem] = [],
+                                 fontSize: CGFloat = defaultFontSize,
+                                 lineSpacing: CGFloat = defaultLineSpacing) {
+        let len = storage.length
+        guard len > 0 else { return }
+        let ns  = storage.string as NSString
+        let loc = min(max(0, changed.location), len)
+        let safe = NSRange(location: loc, length: min(changed.length, len - loc))
+
+        var para = ns.paragraphRange(for: safe)
+        if para.location > 0 {   // 前の段落へ拡張
+            let prev = ns.paragraphRange(for: NSRange(location: para.location - 1, length: 0))
+            para = NSRange(location: prev.location, length: NSMaxRange(para) - prev.location)
+        }
+        if NSMaxRange(para) < len {   // 次の段落へ拡張
+            let next = ns.paragraphRange(for: NSRange(location: NSMaxRange(para), length: 0))
+            para = NSRange(location: para.location, length: NSMaxRange(next) - para.location)
+        }
+        style(storage, range: para, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+    }
+
+    /// 指定範囲をスタイルする共通処理。属性変更は beginEditing/endEditing でまとめ、
+    /// レイアウトマネージャへの通知を1回に抑える。
+    private static func style(_ storage: NSTextStorage,
+                              range full: NSRange,
+                              notes: [NoteItem],
+                              fontSize: CGFloat,
+                              lineSpacing: CGFloat) {
         let baseFont    = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let blockIDFont = UIFont.monospacedSystemFont(ofSize: max(fontSize * 0.69, 10), weight: .regular)
 
+        storage.beginEditing()
         storage.addAttribute(.font,            value: baseFont,      range: full)
         storage.addAttribute(.foregroundColor, value: UIColor.label, range: full)
         storage.removeAttribute(.strikethroughStyle, range: full)
@@ -1253,7 +1299,7 @@ enum MarkdownStyler {
         storage.removeAttribute(.externalLinkURL,    range: full)
         storage.removeAttribute(.underlineStyle,     range: full)
 
-        // 行間とタブ幅を全体に適用（リスト・画像行は後で上書き）
+        // 行間とタブ幅を範囲全体に適用（リスト・画像行は後で上書き）
         storage.addAttribute(.paragraphStyle,
                              value: makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize),
                              range: full)
@@ -1265,8 +1311,9 @@ enum MarkdownStyler {
 
         styleWikiLinks(in: storage, range: full, notes: notes)
         styleExternalLinks(in: storage, range: full)
-        styleImageLines(in: storage, lineSpacing: lineSpacing, fontSize: fontSize)
+        styleImageLines(in: storage, range: full, lineSpacing: lineSpacing, fontSize: fontSize)
         styleBlockIDs(in: storage, range: full, font: blockIDFont)
+        storage.endEditing()
     }
 
     // 画像リンク `![](http…)`（リモート）。capture 1 = URL。
@@ -1276,10 +1323,9 @@ enum MarkdownStyler {
 
     /// 画像リンク行に「段落下の余白」を設定し、画像オーバーレイの居場所を確保する。
     /// テキスト（文字）は増やさないのでカーソル挙動・保存本文には影響しない。
-    private static func styleImageLines(in s: NSTextStorage, lineSpacing: CGFloat, fontSize: CGFloat) {
+    private static func styleImageLines(in s: NSTextStorage, range full: NSRange, lineSpacing: CGFloat, fontSize: CGFloat) {
         guard let regex = imageLinkRegex else { return }
         let ns = s.string as NSString
-        let full = NSRange(location: 0, length: s.length)
         for m in regex.matches(in: s.string, range: full) where m.numberOfRanges > 1 {
             let url = ns.substring(with: m.range(at: 1))
             let lineRange = ns.lineRange(for: m.range)
