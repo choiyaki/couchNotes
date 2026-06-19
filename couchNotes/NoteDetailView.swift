@@ -50,6 +50,7 @@ struct NoteDetailView: View {
     var onGoToList:   (() -> Void)? = nil
     var onMoved:      ((String) -> Void)? = nil   // 移動後の新しい noteId を親へ通知
     var onCreated:    ((String) -> Void)? = nil   // 新規作成したノートを開くため親へ通知
+    var onSearchCommit: ((String) -> Void)? = nil // Enter：その語で一覧の本文検索を開く
 
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
@@ -85,6 +86,20 @@ struct NoteDetailView: View {
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
 
+    // 検索（詳細画面上：入力中はタイトル候補、Enter で一覧の本文検索へ）
+    @State private var showSearch     = false
+    @State private var searchText     = ""
+    @State private var titleResults:  [NoteItem] = []
+    @State private var searchTask: Task<Void, Never>? = nil
+    @FocusState private var searchFocused: Bool
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var showTitleDropdown: Bool {
+        showSearch && !trimmedSearch.isEmpty && !titleResults.isEmpty
+    }
+
     // フォルダ移動・新規作成
     @State private var showFolderPicker = false
     @State private var showNewNote      = false
@@ -118,31 +133,148 @@ struct NoteDetailView: View {
     /// 本文の1行目として表示するタイトル欄。Enter または フォーカスが外れた時に確定（リネーム）。
     private var titleField: some View {
         VStack(spacing: 0) {
-            TextField("タイトル", text: $titleDraft, axis: .vertical)
-                .font(.system(size: CGFloat(fontSize) + 1, weight: .bold))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .lineLimit(1...4)
-                .focused($titleFocused)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 6)
-                .onChange(of: titleDraft) { _, newVal in
-                    // 変換確定後の「本当のEnter」だけが改行を生む。改行を確定の合図として扱う。
-                    if newVal.contains("\n") {
-                        titleDraft = newVal.replacingOccurrences(of: "\n", with: "")
-                        titleFocused = false   // フォーカスを外す → 下の onChange で確定
+            HStack(alignment: .center, spacing: 8) {
+                TextField("タイトル", text: $titleDraft, axis: .vertical)
+                    .font(.system(size: CGFloat(fontSize) + 1, weight: .bold))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .lineLimit(1...4)
+                    .focused($titleFocused)
+                    .onChange(of: titleDraft) { _, newVal in
+                        // 変換確定後の「本当のEnter」だけが改行を生む。改行を確定の合図として扱う。
+                        if newVal.contains("\n") {
+                            titleDraft = newVal.replacingOccurrences(of: "\n", with: "")
+                            titleFocused = false   // フォーカスを外す → 下の onChange で確定
+                        }
                     }
-                }
-                .onChange(of: titleFocused) { _, focused in
-                    if !focused { Task { await commitTitle() } }
-                }
+                    .onChange(of: titleFocused) { _, focused in
+                        if !focused { Task { await commitTitle() } }
+                    }
+
+                // 保存ステータスは固定サイズの枠で確保し、出ても枠が伸縮しないようにする
+                Color.clear
+                    .frame(width: 22, height: 22)
+                    .overlay { saveStatusView }
+            }
+            .frame(minHeight: 30)   // 1行タイトルでも一定の高さを確保（伸縮防止）
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
 
             // タイトルと本文の境界（うっすら）
             Divider()
                 .padding(.horizontal, 12)
                 .opacity(0.5)
         }
+    }
+
+    // MARK: - 検索（詳細画面）
+
+    var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+            TextField("ノートを検索", text: $searchText)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .onSubmit { commitSearch() }
+                .onChange(of: searchText) { _, q in runSearch(q) }
+            if !searchText.isEmpty {
+                Button { searchText = ""; titleResults = [] } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+        .onAppear { DispatchQueue.main.async { searchFocused = true } }
+    }
+
+    /// 入力中のタイトル候補ドロップダウン（タップでそのノートを開く）。
+    var titleDropdown: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(titleResults) { note in
+                    Button { openFromSearch(note) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc.text")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Text(note.shortTitle)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Divider().padding(.leading, 16)
+                }
+            }
+        }
+        .frame(maxHeight: 280)
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(.separator).opacity(0.5))
+        )
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+        .padding(.horizontal, 12)
+        .padding(.top, 2)
+    }
+
+    private func toggleSearch() {
+        if showSearch {
+            showSearch = false
+            searchText = ""
+            titleResults = []
+            searchFocused = false
+        } else {
+            showSearch = true
+        }
+    }
+
+    /// 入力中：タイトル候補を 200ms デバウンスで更新。
+    private func runSearch(_ query: String) {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { titleResults = []; return }
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+            let r = await NoteStore.shared.searchTitles(trimmed)
+            guard !Task.isCancelled else { return }
+            titleResults = r
+        }
+    }
+
+    /// Enter：その語で一覧の本文検索を開く（一覧へ戻る）。
+    private func commitSearch() {
+        let trimmed = trimmedSearch
+        guard !trimmed.isEmpty else { return }
+        searchFocused = false
+        showSearch = false
+        onSearchCommit?(trimmed)
+    }
+
+    /// タイトル候補タップ：そのノートを開き、検索枠を閉じる。
+    private func openFromSearch(_ item: NoteItem) {
+        showSearch = false
+        searchText = ""
+        titleResults = []
+        searchFocused = false
+        onLinkTap?(item.id)
     }
 
     // MARK: - Body
@@ -176,6 +308,8 @@ struct NoteDetailView: View {
                     )
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
+
+                if showSearch { searchBar }
 
                 titleField
 
@@ -214,6 +348,9 @@ struct NoteDetailView: View {
                             Task { await save() }
                         }
                     }
+                    .overlay(alignment: .top) {
+                        if showTitleDropdown { titleDropdown }
+                    }
             }
 
             if !isLoading {
@@ -221,8 +358,11 @@ struct NoteDetailView: View {
                     folderLabel: currentFolderLabel,
                     createdText: DateDisplay.string(fromMs: createdMs),
                     updatedText: DateDisplay.string(fromMs: updatedMs),
+                    canGoBack: canGoBack,
+                    canGoForward: canGoForward,
                     onFolderTap: { showFolderPicker = true },
-                    onNewTap:    { showNewNote = true }
+                    onGoBack:    { onGoBack?() },
+                    onGoForward: { onGoForward?() }
                 )
             }
         }
@@ -237,21 +377,9 @@ struct NoteDetailView: View {
                     Image(systemName: (NoteListLayout(rawValue: layoutRaw) ?? .detail).icon)
                 }
             }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { onGoBack?() } label: {
-                    Image(systemName: "chevron.backward")
-                }
-                .disabled(!canGoBack)
-
-                Button { onGoForward?() } label: {
-                    Image(systemName: "chevron.forward")
-                }
-                .disabled(!canGoForward)
-
-                saveStatusView
-
-                if isRefreshing {
-                    ProgressView().scaleEffect(0.7)
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { toggleSearch() } label: {
+                    Image(systemName: showSearch ? "xmark" : "magnifyingglass")
                 }
             }
         }
@@ -323,28 +451,25 @@ struct NoteDetailView: View {
 
     // MARK: - 保存ステータス表示
 
+    /// 保存ステータス（アイコンのみ）。idle/editing は非表示。
     @ViewBuilder
     var saveStatusView: some View {
         switch saveStatus {
-        case .idle:
+        case .idle, .editing:
             EmptyView()
-        case .editing:
-            Text("編集中")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         case .saving:
-            ProgressView().scaleEffect(0.8)
+            ProgressView().scaleEffect(0.6)
         case .saved:
-            Label("保存済み", systemImage: "checkmark")
-                .font(.caption)
+            Image(systemName: "checkmark")
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.green)
         case .unsaved:
-            Label("未保存", systemImage: "icloud.slash")
-                .font(.caption)
+            Image(systemName: "icloud.slash")
+                .font(.footnote)
                 .foregroundStyle(.orange)
         case .error:
-            Label("保存失敗", systemImage: "exclamationmark.triangle")
-                .font(.caption)
+            Image(systemName: "exclamationmark.triangle")
+                .font(.footnote)
                 .foregroundStyle(.red)
         }
     }
@@ -680,8 +805,11 @@ struct EditorFooterBar: View {
     let folderLabel: String
     let createdText: String
     let updatedText: String
+    let canGoBack: Bool
+    let canGoForward: Bool
     let onFolderTap: () -> Void
-    let onNewTap: () -> Void
+    let onGoBack: () -> Void
+    let onGoForward: () -> Void
 
     private var dateLine: String {
         var parts: [String] = []
@@ -701,6 +829,25 @@ struct EditorFooterBar: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
             HStack(spacing: 0) {
+                // 左：戻る / 進む
+                Button(action: onGoBack) {
+                    Image(systemName: "chevron.backward").font(.body)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canGoBack)
+                .foregroundStyle(canGoBack ? Color.accentColor : Color.secondary.opacity(0.4))
+
+                Button(action: onGoForward) {
+                    Image(systemName: "chevron.forward").font(.body)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canGoForward)
+                .foregroundStyle(canGoForward ? Color.accentColor : Color.secondary.opacity(0.4))
+                .padding(.leading, 20)
+
+                Spacer()
+
+                // 右：フォルダ選択
                 Button(action: onFolderTap) {
                     HStack(spacing: 5) {
                         Image(systemName: "folder")
@@ -710,15 +857,6 @@ struct EditorFooterBar: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button(action: onNewTap) {
-                    Image(systemName: "square.and.pencil")
-                        .font(.body)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.tint)
             }
         }
         .padding(.horizontal, 16)

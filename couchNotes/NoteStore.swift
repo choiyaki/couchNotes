@@ -180,17 +180,139 @@ actor NoteStore {
 
     // MARK: - 全文検索
 
-    /// 検索：タイトル（ファイル名）一致を先頭に、続けて本文一致を並べる。
-    /// 本文一致は3文字以上で FTS5(trigram)、1〜2文字は LIKE フォールバック。
+    /// 検索：半角／全角空白で区切った各語について「タイトル or 本文に含む」を満たし、
+    /// かつ全語を満たす（AND）ノートを返す。語が1つなら従来の並び（タイトル一致が先頭）。
     func search(_ query: String) -> [NoteItem] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
+        let terms = query.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return [] }
+        if terms.count == 1 { return singleTermSearch(terms[0]) }
+        return andSearch(terms)
+    }
 
+    /// タイトル（ファイル名）に全語(AND)を含むノート（入力中の候補ドロップダウン用）。mtime 降順。
+    func searchTitles(_ query: String) -> [NoteItem] {
+        let terms = query.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return [] }
+        var result: Set<String>? = nil
+        for term in terms {
+            let ids = titleMatchIDs(term.lowercased())
+            result = (result == nil) ? ids : result!.intersection(ids)
+            if result!.isEmpty { return [] }
+        }
+        return items(forIDs: Array(result ?? []))
+    }
+
+    /// 本文に全語(AND)を含むノート（Enter 後の本文検索結果用）。mtime 降順。
+    func searchBodies(_ query: String) -> [NoteItem] {
+        let terms = query.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return [] }
+        var result: Set<String>? = nil
+        for term in terms {
+            let ids = bodyMatchIDs(term)
+            result = (result == nil) ? ids : result!.intersection(ids)
+            if result!.isEmpty { return [] }
+        }
+        return items(forIDs: Array(result ?? []))
+    }
+
+    /// 1語の検索：タイトル（ファイル名）一致を先頭に、続けて本文一致を並べる。
+    /// 本文一致は3文字以上で FTS5(trigram)、1〜2文字は LIKE フォールバック。
+    private func singleTermSearch(_ trimmed: String) -> [NoteItem] {
         let titleHits = titleSearch(trimmed)
         let titleIDs  = Set(titleHits.map(\.id))
         let contentHits = (trimmed.count >= 3 ? ftsSearch(trimmed) : likeSearch(trimmed))
             .filter { !titleIDs.contains($0.id) }
         return titleHits + contentHits
+    }
+
+    /// 複数語の AND 検索：各語ごとに「タイトル or 本文に含む」id 集合を作り、その積集合を取る。
+    /// 並びは「全語がタイトルに含まれるもの」を先頭にし、各群は mtime 降順。
+    private func andSearch(_ terms: [String]) -> [NoteItem] {
+        var result: Set<String>? = nil
+        for term in terms {
+            let ids = titleMatchIDs(term.lowercased()).union(bodyMatchIDs(term))
+            result = (result == nil) ? ids : result!.intersection(ids)
+            if result!.isEmpty { return [] }
+        }
+        guard let ids = result, !ids.isEmpty else { return [] }
+
+        let items = items(forIDs: Array(ids))
+        let termsLower = terms.map { $0.lowercased() }
+        // 全語がタイトル（ファイル名）に含まれるものを優先（各群は items() の mtime 降順を保つ）
+        let titleAll = items.filter { item in
+            let t = item.shortTitle.lowercased()
+            return termsLower.allSatisfy { t.contains($0) }
+        }
+        let titleAllIDs = Set(titleAll.map(\.id))
+        let rest = items.filter { !titleAllIDs.contains($0.id) }
+        return titleAll + rest
+    }
+
+    /// 単一カラム(id)の結果を Set で集める。
+    private func collectIDs(_ stmt: OpaquePointer?) -> Set<String> {
+        guard let stmt else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { out.insert(String(cString: c)) }
+        }
+        return out
+    }
+
+    /// 語をタイトル（ファイル名 basename）に含むノートの id 集合。termLower は小文字。
+    private func titleMatchIDs(_ termLower: String) -> Set<String> {
+        let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 AND lower(id) LIKE ? LIMIT 2000;")
+        sqlite3_bind_text(stmt, 1, "%" + termLower + "%", -1, SQLITE_TRANSIENT)
+        // id にはフォルダ名も含むので、basename（末尾）に含むものだけ採用
+        return collectIDs(stmt).filter {
+            let base = $0.components(separatedBy: "/").last ?? $0
+            return base.contains(termLower)
+        }
+    }
+
+    /// 語を本文に含むノートの id 集合。3文字以上は FTS5(trigram)、1〜2文字は LIKE。
+    private func bodyMatchIDs(_ term: String) -> Set<String> {
+        if term.count >= 3 {
+            let phrase = "\"" + term.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            let stmt = prepare("""
+            SELECT note_fts.id FROM note_fts
+            JOIN notes n ON n.id = note_fts.id
+            WHERE note_fts MATCH ? AND n.deleted = 0 LIMIT 2000;
+            """)
+            sqlite3_bind_text(stmt, 1, phrase, -1, SQLITE_TRANSIENT)
+            return collectIDs(stmt)
+        } else {
+            let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 AND content LIKE ? LIMIT 2000;")
+            sqlite3_bind_text(stmt, 1, "%" + term + "%", -1, SQLITE_TRANSIENT)
+            return collectIDs(stmt)
+        }
+    }
+
+    /// id 群に対応する一覧アイテムを mtime 降順で取得する（IN は 900 件ずつに分割）。
+    private func items(forIDs ids: [String]) -> [NoteItem] {
+        guard !ids.isEmpty else { return [] }
+        var all: [NoteItem] = []
+        var index = 0
+        while index < ids.count {
+            let end = min(index + 900, ids.count)
+            let chunk = Array(ids[index..<end])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+            SELECT id, path, mtime, substr(content, 1, 400)
+            FROM notes
+            WHERE deleted = 0 AND id IN (\(placeholders))
+            ORDER BY mtime DESC;
+            """
+            if let stmt = prepare(sql) {
+                for (i, id) in chunk.enumerated() {
+                    sqlite3_bind_text(stmt, Int32(i + 1), id, -1, SQLITE_TRANSIENT)
+                }
+                all.append(contentsOf: readItems(stmt, previewTrim: true))
+            }
+            index = end
+        }
+        // チャンクをまたぐので全体で mtime 降順に整え、上限200件
+        return Array(all.sorted { ($0.mtime ?? 0) > ($1.mtime ?? 0) }.prefix(200))
     }
 
     /// タイトル（ファイル名）に語句を含むノート。id で粗く絞り、basename で厳密判定。

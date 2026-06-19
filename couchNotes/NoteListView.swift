@@ -27,8 +27,12 @@ struct NoteListView: View {
     @State private var showBulkMove  = false
 
     // 検索
+    @State private var showSearch    = false   // 検索枠の表示（検索ボタンでトグル）
     @State private var searchText    = ""
-    @State private var searchResults: [NoteItem] = []
+    @State private var titleResults: [NoteItem] = []   // 入力中：タイトル一致（ドロップダウン）
+    @State private var bodyResults:  [NoteItem] = []   // Enter後：本文一致（メイン一覧）
+    @State private var searchCommitted = false         // Enter で本文検索を確定したか
+    @State private var suppressSearchChange = false     // 詳細からの確定遷移時、onChange を1回だけ無視
     @State private var searchTask: Task<Void, Never>? = nil
     @State private var showNewNote   = false
     @FocusState private var searchFocused: Bool
@@ -37,9 +41,14 @@ struct NoteListView: View {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// 一覧に表示するノート（検索中は検索結果、そうでなければ全件）。さらにフォルダ絞り込みを適用。
+    /// 入力中のタイトル候補ドロップダウンを出すか。
+    private var showTitleDropdown: Bool {
+        showSearch && !searchCommitted && !trimmedSearch.isEmpty && !titleResults.isEmpty
+    }
+
+    /// 一覧に表示するノート。Enter で本文検索を確定したら本文一致、それ以外は全件（フォルダ絞り込み適用）。
     private var displayedNotes: [NoteItem] {
-        let base = trimmedSearch.isEmpty ? notes : searchResults
+        let base = (searchCommitted && !trimmedSearch.isEmpty) ? bodyResults : notes
         switch folderFilter {
         case "":  return base
         case "/": return base.filter { !$0.id.lowercased().contains("/") }   // ルート直下のみ
@@ -73,10 +82,16 @@ struct NoteListView: View {
                     emptyView
                 } else {
                   VStack(spacing: 0) {
-                    searchBar
+                    if showSearch { searchBar }
                     countLabel
                     noteContent
+                      .overlay(alignment: .top) {
+                          if showTitleDropdown { titleDropdown }
+                      }
+                    footerBar
                   }
+                  // キーボードでフッターを押し上げず、隠れたままにする
+                  .ignoresSafeArea(.keyboard, edges: .bottom)
                   .confirmationDialog(
                         "「\(noteToDelete?.shortTitle ?? "")」を削除しますか？",
                         isPresented: Binding(
@@ -155,6 +170,16 @@ struct NoteListView: View {
                         historyForward = []
                         path.append(newId)
                         Task { await loadNotes() }
+                    },
+                    onSearchCommit: { text in
+                        // 詳細画面で Enter → 一覧へ戻り、その語で本文検索を確定表示
+                        isClosureNavigation = true
+                        path = []
+                        suppressSearchChange = true   // 次の onChange(searchText) を1回スキップ
+                        showSearch = true
+                        searchText = text
+                        searchCommitted = true
+                        Task { bodyResults = await NoteStore.shared.searchBodies(text) }
                     }
                 )
             }
@@ -185,9 +210,7 @@ struct NoteListView: View {
                     }
                 } else {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button { showSettings = true } label: {
-                            Image(systemName: "gearshape")
-                        }
+                        folderFilterMenu
                     }
                     ToolbarItem(placement: .principal) {
                         HStack(spacing: 6) {
@@ -202,7 +225,9 @@ struct NoteListView: View {
                         }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
-                        folderFilterMenu
+                        Button { toggleSearch() } label: {
+                            Image(systemName: showSearch ? "xmark" : "magnifyingglass")
+                        }
                     }
                 }
             }
@@ -215,6 +240,11 @@ struct NoteListView: View {
                 Text(errorMessage ?? "")
             }
             .onChange(of: searchText) { _, query in
+                // 詳細からの確定遷移で text を入れた回は本文検索確定を保つためスキップ
+                if suppressSearchChange {
+                    suppressSearchChange = false
+                    return
+                }
                 runSearch(query)
             }
             .onChange(of: folderFilter) { _, newFolder in
@@ -349,6 +379,35 @@ struct NoteListView: View {
         }
     }
 
+    /// 画面下部のフッター：左＝設定。
+    var footerBar: some View {
+        HStack {
+            Button { showSettings = true } label: {
+                Image(systemName: "gearshape")
+            }
+            Spacer()
+        }
+        .font(.title3)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    /// 検索枠の開閉。開く＝表示＋フォーカス、閉じる＝クリア＋フォーカス解除。
+    private func toggleSearch() {
+        if showSearch {
+            showSearch = false
+            searchText = ""
+            searchFocused = false
+            searchCommitted = false
+            titleResults = []
+            bodyResults = []
+        } else {
+            showSearch = true
+        }
+    }
+
     // MARK: - 初回インポート表示
 
     var importView: some View {
@@ -373,25 +432,28 @@ struct NoteListView: View {
     // MARK: - Empty State
 
     var emptyView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("ノートが見つかりません")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-            Text("設定を確認してください")
-                .font(.subheadline)
-                .foregroundStyle(.tertiary)
-            Button("再読み込み") {
-                Task {
-                    await runInitialImport()
-                    await loadNotes()
+        VStack(spacing: 0) {
+            VStack(spacing: 16) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tertiary)
+                Text("ノートが見つかりません")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text("設定を確認してください")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+                Button("再読み込み") {
+                    Task {
+                        await runInitialImport()
+                        await loadNotes()
+                    }
                 }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            footerBar   // 空状態でも設定（接続）に入れるように
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - データ取得
@@ -401,21 +463,40 @@ struct NoteListView: View {
         notes = await NoteStore.shared.listItems()
     }
 
-    /// 検索（200ms デバウンス）。タイトル一致の有無も判定して「＋」表示を制御。
+    /// 入力中：タイトル一致の候補（ドロップダウン）を 200ms デバウンスで更新する。
+    /// 文字が変わるたびに「入力中モード（未確定）」へ戻す。
     private func runSearch(_ query: String) {
         searchTask?.cancel()
+        searchCommitted = false   // 編集したらドロップダウンモードへ戻す
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            searchResults = []
+            titleResults = []
             return
         }
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled else { return }
-            let results = await NoteStore.shared.search(trimmed)
+            let results = await NoteStore.shared.searchTitles(trimmed)
             guard !Task.isCancelled else { return }
-            searchResults = results
+            titleResults = results
         }
+    }
+
+    /// Enter：本文に語句を含むノートだけをメイン一覧に表示する（確定）。
+    private func commitSearch() {
+        let trimmed = trimmedSearch
+        guard !trimmed.isEmpty else { return }
+        searchFocused = false       // キーボードを閉じる
+        searchCommitted = true
+        Task { bodyResults = await NoteStore.shared.searchBodies(trimmed) }
+    }
+
+    /// タイトル候補をタップ → そのノートを直接開く。
+    private func openFromSearch(_ item: NoteItem) {
+        searchFocused = false
+        isClosureNavigation = true
+        historyForward = []
+        path.append(item.id)
     }
 
     /// 検索語をタイトルに新規ノートを作成して開く（「＋」→ フォルダ選択経由）。
@@ -553,9 +634,9 @@ struct NoteListView: View {
 
     @ViewBuilder
     private var searchEmptyOverlay: some View {
-        if displayedNotes.isEmpty && !trimmedSearch.isEmpty {
+        if searchCommitted && displayedNotes.isEmpty && !trimmedSearch.isEmpty {
             ContentUnavailableView(
-                "一致するノートがありません",
+                "本文に一致するノートがありません",
                 systemImage: "magnifyingglass",
                 description: Text("「＋」で『\(trimmedSearch)』を作成できます")
             )
@@ -598,6 +679,41 @@ struct NoteListView: View {
         .padding(.bottom, 4)
     }
 
+    /// 入力中のタイトル候補ドロップダウン（検索枠の下に重ねて表示。タップで直接開く）。
+    var titleDropdown: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(titleResults) { note in
+                    Button { openFromSearch(note) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc.text")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Text(note.shortTitle)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Divider().padding(.leading, 16)
+                }
+            }
+        }
+        .frame(maxHeight: 280)
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color(.separator).opacity(0.5))
+        )
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+        .padding(.horizontal, 12)
+        .padding(.top, 2)
+    }
+
     var searchBar: some View {
         HStack(spacing: 8) {
             HStack(spacing: 6) {
@@ -608,6 +724,8 @@ struct NoteListView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .focused($searchFocused)
+                    .submitLabel(.search)
+                    .onSubmit { commitSearch() }
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
@@ -637,6 +755,10 @@ struct NoteListView: View {
         .padding(.top, 6)
         .padding(.bottom, 6)
         .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
+        .onAppear {
+            // 検索枠が出た瞬間にフォーカス（マウント直後に確実に当てるため async）
+            DispatchQueue.main.async { searchFocused = true }
+        }
     }
 
     /// タイトル変更（本体リネーム＋他ページのリンク書き換え）
