@@ -183,7 +183,9 @@ struct BackupSettingsView: View {
                     )
                 }
                 await NoteStore.shared.upsertMany(records)
-                resultMessage = "復元完了（\(written) 件）"
+                resultMessage = written == 0
+                    ? "復元完了（変更なし）"
+                    : "復元完了（\(written) 件）"
             }
         } catch {
             resultMessage = error.localizedDescription

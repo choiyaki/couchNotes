@@ -93,6 +93,13 @@ struct NoteDetailView: View {
     @State private var searchTask: Task<Void, Never>? = nil
     @FocusState private var searchFocused: Bool
 
+    // 画面サイズ（向き判定用）。ランドスケープのみ左右に余白を入れる。
+    @State private var editorSize: CGSize = .zero
+    private var landscapeSideInset: CGFloat {
+        guard editorSize.width > editorSize.height else { return 0 }   // 縦置きは余白なし
+        return max(editorSize.width * 0.12, 48)
+    }
+
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -307,18 +314,25 @@ struct NoteDetailView: View {
                         }
                     )
                     .transition(.move(edge: .top).combined(with: .opacity))
+                    .padding(.horizontal, landscapeSideInset)
                 }
 
-                if showSearch { searchBar }
+                if showSearch {
+                    searchBar.padding(.horizontal, landscapeSideInset)
+                }
 
                 titleField
+                    .padding(.horizontal, landscapeSideInset)
 
+                // テキストビューは全幅のまま（スクロールバーが画面端に出る）。
+                // 余白は textContainerInset（テキストの内側）で寄せる。
                 MarkdownTextView(
                     text: $editingContent,
                     notes: notes,
                     backlinks: backlinks,
                     fontSize: CGFloat(fontSize),
                     lineSpacing: CGFloat(lineSpacing),
+                    horizontalInset: landscapeSideInset,
                     onLinkTap: onLinkTap
                 )
                     .onChange(of: editingContent) { _, newVal in
@@ -366,6 +380,13 @@ struct NoteDetailView: View {
                 )
             }
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { editorSize = geo.size }
+                    .onChange(of: geo.size) { _, newSize in editorSize = newSize }
+            }
+        )
         .ignoresSafeArea(.keyboard, edges: .bottom)   // SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止
         .animation(.easeInOut(duration: 0.25), value: externalChangeAvailable)
         .navigationTitle("")

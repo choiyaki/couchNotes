@@ -236,6 +236,7 @@ struct MarkdownTextView: UIViewRepresentable {
     var backlinks: [NoteItem] = []
     var fontSize:    CGFloat = MarkdownStyler.defaultFontSize
     var lineSpacing: CGFloat = MarkdownStyler.defaultLineSpacing
+    var horizontalInset: CGFloat = 0   // テキストの左右内側余白（ランドスケープ時の余白用。ビューは全幅のまま）
     var onLinkTap: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -251,7 +252,7 @@ struct MarkdownTextView: UIViewRepresentable {
         tv.isScrollEnabled      = true
         tv.alwaysBounceVertical = true
         tv.keyboardDismissMode  = .interactive
-        tv.textContainerInset   = UIEdgeInsets(top: 12, left: 12, bottom: 80, right: 12)
+        tv.textContainerInset   = UIEdgeInsets(top: 12, left: 12 + horizontalInset, bottom: 80, right: 12 + horizontalInset)
         tv.typingAttributes     = MarkdownStyler.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
 
         let tap = UITapGestureRecognizer(
@@ -329,6 +330,14 @@ struct MarkdownTextView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.notes = notes
+
+        // ランドスケープ余白：テキストの左右内側インセットを向きの変化に追従させる（ビュー幅は変えない）。
+        let targetLR = 12 + horizontalInset
+        if abs(uiView.textContainerInset.left - targetLR) > 0.5 {
+            uiView.textContainerInset.left  = targetLR
+            uiView.textContainerInset.right = targetLR
+            uiView.setNeedsLayout()
+        }
 
         // バックリンクフッターの更新（テキスト変更とは独立に反映する）
         let ids = backlinks.map(\.id)

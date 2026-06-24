@@ -490,9 +490,9 @@ class CouchDBClient {
 
     // MARK: - 復元（GitHub バックアップからの一括書き戻し）
 
-    /// (path, content) 群を CouchDB へ一括投入する（上書き＋追記）。戻り値＝書き込んだノート数。
+    /// (path, content) 群を CouchDB へ一括投入する（上書き＋追記）。戻り値＝実際に書き込んだノート数。
     /// id は path を小文字化（LiveSync 仕様）、ctime/mtime はフロントマターの created/updated から復元。
-    /// チャンクは内容アドレス（h:<sha>）なので既存分は conflict として無視する。progress は 0...1。
+    /// 既にリモートと同一内容のノート／チャンクは送らず（差分のみ）、送信は最大 5 並列。progress は 0...1。
     func restore(files: [(path: String, content: String)],
                  progress: @escaping @Sendable (Double) -> Void) async throws -> Int {
         guard !files.isEmpty else { return 0 }
@@ -513,23 +513,39 @@ class CouchDBClient {
             notes.append(note)
         }
 
-        // 2. チャンクを一括投入（既存 h: は不変＝conflict は無視）
-        let chunkDocs = try chunkMap.values.map { try encodeDoc($0) }
-        try await bulkPut(chunkDocs, batchSize: 100, ignoreConflict: true) { frac in
-            progress(frac * 0.5)
+        // 2. 既存ノートの _rev と children を取得（軸C：無変更ノートのスキップ判定）
+        let existing = try await existingNoteState(ids: notes.map { $0._id })
+        progress(0.05)
+
+        // 3. 差分判定：children（内容アドレス列）が一致するノートは無変更としてスキップ。
+        //    変更／新規だけに _rev を載せて書き込み対象にする。
+        var notesToWrite: [LiveSyncNote] = []
+        for note in notes {
+            if let e = existing[note._id], e.children == note.children { continue }
+            var n = note
+            n._rev = existing[note._id]?.rev
+            notesToWrite.append(n)
+        }
+        guard !notesToWrite.isEmpty else { progress(1); return 0 }   // 何も変わっていない
+
+        // 4. 書き込むノートが参照するチャンクのうち、リモートに無いものだけ算出（軸A）
+        let neededChunkIDs = Set(notesToWrite.flatMap { $0.children })
+        let presentChunks = Set(try await existingRevs(ids: Array(neededChunkIDs)).keys)
+        let missingChunks = neededChunkIDs.subtracting(presentChunks).compactMap { chunkMap[$0] }
+        progress(0.10)
+
+        // 5. 不足チャンクを並列投入（内容アドレスなので conflict は無視）
+        let chunkBodies = try makeBatchBodies(missingChunks.map { try encodeDoc($0) }, batchSize: 50)
+        try await bulkPutParallel(chunkBodies, lanes: 5, ignoreConflict: true) { frac in
+            progress(0.10 + frac * 0.60)
         }
 
-        // 3. 既存ノートの _rev を解決して上書き、新規はそのまま作成
-        let revs = try await existingRevs(ids: notes.map { $0._id })
-        let noteDocs: [[String: Any]] = try notes.map { note in
-            var dict = try encodeDoc(note)
-            if let rev = revs[note._id] { dict["_rev"] = rev }
-            return dict
+        // 6. ノートを並列投入（_rev 付きで上書き、新規はそのまま作成）
+        let noteBodies = try makeBatchBodies(notesToWrite.map { try encodeDoc($0) }, batchSize: 100)
+        try await bulkPutParallel(noteBodies, lanes: 5, ignoreConflict: false) { frac in
+            progress(0.70 + frac * 0.30)
         }
-        try await bulkPut(noteDocs, batchSize: 200, ignoreConflict: false) { frac in
-            progress(0.5 + frac * 0.5)
-        }
-        return notes.count
+        return notesToWrite.count
     }
 
     /// 指定 id 群の現在の _rev を _all_docs でまとめて取得する（存在しないものは含まれない）。
@@ -554,32 +570,87 @@ class CouchDBClient {
         return result
     }
 
-    /// _bulk_docs で複数ドキュメントをバッチ投入する。ignoreConflict=true なら conflict は無視。
-    private func bulkPut(_ docs: [[String: Any]],
-                         batchSize: Int,
-                         ignoreConflict: Bool,
-                         progress: @Sendable (Double) -> Void) async throws {
-        guard !docs.isEmpty else { progress(1); return }
+    /// 指定 id 群の現在の _rev と children を _all_docs?include_docs=true でまとめて取得する。
+    /// children は無変更判定（軸C）に使う。doc がデコードできない／墓標の場合は children を空にし、
+    /// _rev だけは拾って上書き時の conflict を防ぐ。
+    private func existingNoteState(ids: [String]) async throws -> [String: (rev: String, children: [String])] {
+        var result: [String: (rev: String, children: [String])] = [:]
+        let batchSize = 1000
         var index = 0
-        while index < docs.count {
-            let end = min(index + batchSize, docs.count)
-            let body = try JSONSerialization.data(withJSONObject: ["docs": Array(docs[index..<end])])
-            let (data, code) = try await httpRequest(path: "_bulk_docs", method: "POST", body: body)
-            if code != 201 && code != 200 {
+        while index < ids.count {
+            let end = min(index + batchSize, ids.count)
+            let body = try JSONSerialization.data(withJSONObject: ["keys": Array(ids[index..<end])])
+            let (data, code) = try await httpRequest(path: "_all_docs", method: "POST",
+                                                     body: body, query: "include_docs=true")
+            if code != 200 {
                 throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
             }
-            // 各ドキュメントの結果を確認（conflict 以外のエラーは中断）
-            if let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                for r in results {
-                    if let err = r["error"] as? String {
-                        if err == "conflict" && ignoreConflict { continue }
-                        let reason = (r["reason"] as? String) ?? err
-                        throw CouchDBError.httpError(code, "bulk_docs: \(err) (\(reason))")
-                    }
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let rows = obj["rows"] as? [[String: Any]] {
+                for row in rows {
+                    guard let id = row["id"] as? String,
+                          let value = row["value"] as? [String: Any],
+                          let rev = value["rev"] as? String else { continue }
+                    let children = ((row["doc"] as? [String: Any])?["children"] as? [String]) ?? []
+                    result[id] = (rev, children)
                 }
             }
             index = end
-            progress(Double(end) / Double(docs.count))
+        }
+        return result
+    }
+
+    /// docs を _bulk_docs 用のバッチ本体（{"docs":[...]}）に事前変換する。
+    /// Data は Sendable なので、並列タスクへ安全に渡せる。
+    private func makeBatchBodies(_ docs: [[String: Any]], batchSize: Int) throws -> [Data] {
+        var bodies: [Data] = []
+        var index = 0
+        while index < docs.count {
+            let end = min(index + batchSize, docs.count)
+            bodies.append(try JSONSerialization.data(withJSONObject: ["docs": Array(docs[index..<end])]))
+            index = end
+        }
+        return bodies
+    }
+
+    /// 事前生成したバッチ本体を最大 lanes 並列で _bulk_docs に送る（往復遅延を隠す）。progress は 0...1。
+    /// 各レーンが stride で担当バッチを分担。await 中はネットワーク待ちで実際に並走する。
+    private func bulkPutParallel(_ bodies: [Data],
+                                 lanes: Int,
+                                 ignoreConflict: Bool,
+                                 progress: @escaping @Sendable (Double) -> Void) async throws {
+        guard !bodies.isEmpty else { progress(1); return }
+        let counter = ProgressCounter(total: bodies.count, report: progress)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for lane in 0..<min(lanes, bodies.count) {
+                group.addTask {
+                    var i = lane
+                    while i < bodies.count {
+                        try await self.postBulk(bodies[i], ignoreConflict: ignoreConflict)
+                        await counter.tick()
+                        i += lanes
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    /// 1バッチ（{"docs":[...]}）を _bulk_docs に POST し、conflict 以外のエラーは throw。
+    private func postBulk(_ body: Data, ignoreConflict: Bool) async throws {
+        let (data, code) = try await httpRequest(path: "_bulk_docs", method: "POST", body: body)
+        if code != 201 && code != 200 {
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        // 各ドキュメントの結果を確認（conflict 以外のエラーは中断）
+        if let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            for r in results {
+                if let err = r["error"] as? String {
+                    if err == "conflict" && ignoreConflict { continue }
+                    let reason = (r["reason"] as? String) ?? err
+                    throw CouchDBError.httpError(code, "bulk_docs: \(err) (\(reason))")
+                }
+            }
         }
     }
 
@@ -739,6 +810,23 @@ private struct PurgeFindResponse: Decodable {
 }
 
 /// _all_docs で rev を取得する用
+/// 並列バッチ送信の完了数を集計し、進捗（0...1）を通知する。
+private actor ProgressCounter {
+    private var done = 0
+    private let total: Int
+    private let report: @Sendable (Double) -> Void
+
+    init(total: Int, report: @escaping @Sendable (Double) -> Void) {
+        self.total = total
+        self.report = report
+    }
+
+    func tick() {
+        done += 1
+        report(Double(done) / Double(max(total, 1)))
+    }
+}
+
 private struct AllDocsRevResponse: Decodable {
     struct Row: Decodable {
         let id: String?

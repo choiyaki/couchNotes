@@ -91,8 +91,45 @@ struct GitHubBackupClient {
     // MARK: - 復元（pull）
 
     /// リポジトリの全 .md ファイルを取得して (path, content) で返す（一方向の復元用）。
-    /// GraphQL でまとめ取りするのでファイル数が多くても少ないリクエストで済む。progress は 0...1。
+    /// まず tarball を1リクエストで取得・展開する（4000件規模でも軽い）。失敗時は GraphQL 経路へ退避。
+    /// progress は 0...1。
     func filesForRestore(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+        do {
+            return try await filesFromTarball(progress: progress)
+        } catch {
+            // tarball のダウンロード・展開に失敗したら従来の GraphQL 経路で復元を試みる
+            return try await filesFromGraphQL(progress: progress)
+        }
+    }
+
+    /// tarball（GET /repos/{owner}/{repo}/tarball/{branch}）を取得し、ローカルで .md を取り出す。
+    private func filesFromTarball(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+        progress(0)
+        let data = try await downloadTarball()
+        progress(0.7)   // ダウンロードが大半。展開・抽出はローカルで速い
+        let entries = try TarGzReader.entries(from: data)
+
+        var result: [(path: String, content: String)] = []
+        for (rawPath, bytes) in entries {
+            // tarball のパスは "owner-repo-<sha>/相対パス"。先頭1階層を剥がす
+            guard let slash = rawPath.firstIndex(of: "/") else { continue }
+            let path = String(rawPath[rawPath.index(after: slash)...])
+            guard path.hasSuffix(".md") else { continue }
+            result.append((path, String(decoding: bytes, as: UTF8.self)))
+        }
+        result.sort { $0.path < $1.path }
+        progress(1)
+        return result
+    }
+
+    private func downloadTarball() async throws -> Data {
+        let (data, code) = try await request("GET", "tarball/\(branch)")
+        guard code == 200 else { throw error(data, code) }
+        return data
+    }
+
+    /// 旧経路：HEAD ツリーから .md を列挙し、GraphQL で本文をまとめ取りする。
+    private func filesFromGraphQL(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
         let paths = try await allMarkdownPaths()
         guard !paths.isEmpty else { return [] }
 

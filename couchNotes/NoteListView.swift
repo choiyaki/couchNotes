@@ -73,8 +73,24 @@ struct NoteListView: View {
     @State private var historyForward:     [String] = []
     @State private var isClosureNavigation = false   // クロージャ起因の path 変化を swipe と区別
 
+    // 画面遷移アニメーション。true に戻すと標準のスライド演出（横からの迫り出し）が復活する。
+    private static let animateNavigation = false
+
+    /// path 書き換えに適用するトランザクション。上記フラグに従ってアニメーションを抑制する。
+    private var navTransaction: Transaction {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !Self.animateNavigation
+        return transaction
+    }
+
+    /// プログラムによる path 書き換え（プッシュ／ポップ）を navTransaction 経由で実行する。
+    private func navigate(_ mutate: () -> Void) {
+        withTransaction(navTransaction) { mutate() }
+    }
+
     var body: some View {
-        NavigationStack(path: $path) {
+        // バインディング経由の書き換え（NavigationLink タップ・スワイプ戻し）にも同じ抑制を適用。
+        NavigationStack(path: $path.transaction(navTransaction)) {
             Group {
                 if isImporting {
                     importView
@@ -139,28 +155,30 @@ struct NoteListView: View {
                         }?.id ?? targetId
                         isClosureNavigation = true
                         historyForward = []
-                        path.append(resolved)
+                        navigate { path.append(resolved) }
                     },
                     onGoBack: {
                         guard path.count > 1, let current = path.last else { return }
                         isClosureNavigation = true
                         historyForward.append(current)
-                        path.removeLast()
+                        navigate { path.removeLast() }
                     },
                     onGoForward: {
                         guard let next = historyForward.popLast() else { return }
                         isClosureNavigation = true
-                        path.append(next)
+                        navigate { path.append(next) }
                     },
                     onGoToList: {
                         isClosureNavigation = true
-                        path = []
+                        navigate { path = [] }
                     },
                     onMoved: { newId in
                         // 移動後：ナビゲーション先を新IDへ差し替え、一覧も更新
                         isClosureNavigation = true
-                        if path.isEmpty { path = [newId] }
-                        else { path[path.count - 1] = newId }
+                        navigate {
+                            if path.isEmpty { path = [newId] }
+                            else { path[path.count - 1] = newId }
+                        }
                         historyForward = []
                         Task { await loadNotes() }
                     },
@@ -168,13 +186,13 @@ struct NoteListView: View {
                         // 新規作成：そのノートを開く（履歴に積む）
                         isClosureNavigation = true
                         historyForward = []
-                        path.append(newId)
+                        navigate { path.append(newId) }
                         Task { await loadNotes() }
                     },
                     onSearchCommit: { text in
                         // 詳細画面で Enter → 一覧へ戻り、その語で本文検索を確定表示
                         isClosureNavigation = true
-                        path = []
+                        navigate { path = [] }
                         suppressSearchChange = true   // 次の onChange(searchText) を1回スキップ
                         showSearch = true
                         searchText = text
@@ -299,7 +317,7 @@ struct NoteListView: View {
             if let lastId = UserDefaults.standard.string(forKey: "lastOpenedNoteId"),
                !lastId.isEmpty,
                notes.contains(where: { $0.id == lastId }) {
-                path = [lastId]
+                navigate { path = [lastId] }
             }
 
             ChangesListener.shared.start()
@@ -314,7 +332,7 @@ struct NoteListView: View {
                 if path.last != id {
                     isClosureNavigation = true
                     historyForward = []
-                    path.append(id)
+                    navigate { path.append(id) }
                 }
                 urlRouter.noteToOpen = nil
             }
@@ -496,7 +514,7 @@ struct NoteListView: View {
         searchFocused = false
         isClosureNavigation = true
         historyForward = []
-        path.append(item.id)
+        navigate { path.append(item.id) }
     }
 
     /// 検索語をタイトルに新規ノートを作成して開く（「＋」→ フォルダ選択経由）。
@@ -517,7 +535,7 @@ struct NoteListView: View {
         searchText = ""
         isClosureNavigation = true
         historyForward = []
-        path.append(naming.id)
+        navigate { path.append(naming.id) }
         await SyncEngine.shared.flush()
     }
 
@@ -543,9 +561,12 @@ struct NoteListView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                NavigationLink(value: note.id) {
+                Button {
+                    navigate { path.append(note.id) }
+                } label: {
                     row(note)
                 }
+                .buttonStyle(.plain)
                 .contextMenu { contextMenuButtons(for: note) }
             }
         }
@@ -555,37 +576,58 @@ struct NoteListView: View {
         .refreshable { await refresh() }
     }
 
-    /// カード表示（iPhone：2列グリッド）。
+    /// カード表示。iPhone は 2 列、iPad は画面幅から列数を算出してカード幅を iPhone とそろえる。
     private var notesGrid: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                spacing: 12
-            ) {
-                ForEach(displayedNotes) { note in
-                    if isSelecting {
-                        Button { toggleSelection(note) } label: {
-                            NoteCardView(note: note)
-                                .overlay(alignment: .topTrailing) {
-                                    selectionMark(isSelected: selectedIDs.contains(note.id))
-                                        .padding(6)
-                                }
+        GeometryReader { geo in
+            let cfg = Self.gridConfig(width: geo.size.width, height: geo.size.height)
+            ScrollView {
+                LazyVGrid(columns: cfg.columns, spacing: 12) {
+                    ForEach(displayedNotes) { note in
+                        if isSelecting {
+                            Button { toggleSelection(note) } label: {
+                                NoteCardView(note: note)
+                                    .overlay(alignment: .topTrailing) {
+                                        selectionMark(isSelected: selectedIDs.contains(note.id))
+                                            .padding(6)
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button {
+                                navigate { path.append(note.id) }
+                            } label: {
+                                NoteCardView(note: note)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu { contextMenuButtons(for: note) }
                         }
-                        .buttonStyle(.plain)
-                    } else {
-                        NavigationLink(value: note.id) {
-                            NoteCardView(note: note)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu { contextMenuButtons(for: note) }
                     }
                 }
+                .padding(.horizontal, cfg.hPadding)
+                .padding(.top, 4)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
+            .overlay { searchEmptyOverlay }
+            .refreshable { await refresh() }
         }
-        .overlay { searchEmptyOverlay }
-        .refreshable { await refresh() }
+    }
+
+    /// カードグリッドの列定義と左右余白を画面幅から決める。
+    /// - 狭い幅（iPhone 縦）は従来どおり 2 列・余白 16。
+    /// - 広い幅（iPad / 横向き）はカード幅を iPhone 相当（≈172pt）にそろえて列数を増やし、
+    ///   横向きでは両端に広めの余白を取って画面いっぱいに広がらないようにする。
+    private static func gridConfig(width: CGFloat, height: CGFloat) -> (columns: [GridItem], hPadding: CGFloat) {
+        let spacing: CGFloat = 12
+        guard width >= 600 else {
+            return ([GridItem(.flexible(), spacing: spacing),
+                     GridItem(.flexible(), spacing: spacing)], 16)
+        }
+        let isLandscape = width > height
+        let sidePadding: CGFloat = isLandscape ? max(width * 0.10, 48) : 24
+        let target: CGFloat = 172            // iPhone のカード幅相当
+        let usable = width - sidePadding * 2
+        let count = max(2, Int((usable + spacing) / (target + spacing)))
+        let columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: count)
+        return (columns, sidePadding)
     }
 
     /// 選択モードのリスト行：左に選択マーク、右に本来の行内容。
@@ -768,7 +810,7 @@ struct NoteListView: View {
             // 万一そのノートを開いていたら遷移先も差し替え
             if let idx = path.firstIndex(of: note.id) {
                 isClosureNavigation = true
-                path[idx] = newId
+                navigate { path[idx] = newId }
             }
             await loadNotes()
         } catch {
