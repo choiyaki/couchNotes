@@ -88,24 +88,56 @@ struct GitHubBackupClient {
         return entries.count
     }
 
-    // MARK: - 復元（pull）
+    // MARK: - コミット履歴（タイムマシン）
 
-    /// リポジトリの全 .md ファイルを取得して (path, content) で返す（一方向の復元用）。
-    /// まず tarball を1リクエストで取得・展開する（4000件規模でも軽い）。失敗時は GraphQL 経路へ退避。
-    /// progress は 0...1。
-    func filesForRestore(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
-        do {
-            return try await filesFromTarball(progress: progress)
-        } catch {
-            // tarball のダウンロード・展開に失敗したら従来の GraphQL 経路で復元を試みる
-            return try await filesFromGraphQL(progress: progress)
+    /// バックアップの1コミット＝「ある時点の状態」。
+    struct BackupCommit: Identifiable {
+        let sha: String
+        let message: String
+        let date: Date
+        var id: String { sha }
+    }
+
+    /// ブランチのコミット履歴を新しい順に取得する（各コミットが復元可能な過去のスナップショット）。
+    func listCommits(limit: Int = 50) async throws -> [BackupCommit] {
+        let (data, code) = try await request("GET", "commits?sha=\(branch)&per_page=\(limit)")
+        guard code == 200 else { throw error(data, code) }
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw GitHubBackupError(message: "コミット履歴の取得に失敗しました。")
+        }
+        let iso = ISO8601DateFormatter()
+        return arr.compactMap { item in
+            guard let sha = item["sha"] as? String,
+                  let commit = item["commit"] as? [String: Any] else { return nil }
+            let message = (commit["message"] as? String) ?? ""
+            let dateStr = ((commit["committer"] as? [String: Any])?["date"] as? String) ?? ""
+            let date = iso.date(from: dateStr) ?? .distantPast
+            return BackupCommit(sha: sha, message: message, date: date)
         }
     }
 
-    /// tarball（GET /repos/{owner}/{repo}/tarball/{branch}）を取得し、ローカルで .md を取り出す。
-    private func filesFromTarball(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+    // MARK: - 復元（pull）
+
+    /// リポジトリの全 .md ファイルを取得して (path, content) で返す（一方向の復元用）。
+    /// `ref` に commit SHA を渡すとその時点の状態を取得（タイムマシン）。nil ならブランチ先端。
+    /// まず tarball を1リクエストで取得・展開する（4000件規模でも軽い）。失敗時は GraphQL 経路へ退避。
+    /// progress は 0...1。
+    func filesForRestore(ref: String? = nil,
+                         progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+        let r = ref ?? branch
+        do {
+            return try await filesFromTarball(ref: r, progress: progress)
+        } catch {
+            // tarball のダウンロード・展開に失敗したら従来の GraphQL 経路で復元を試みる
+            return try await filesFromGraphQL(ref: r, progress: progress)
+        }
+    }
+
+    /// tarball（GET /repos/{owner}/{repo}/tarball/{ref}）を取得し、ローカルで .md を取り出す。
+    private func filesFromTarball(ref: String,
+                                  progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
         progress(0)
-        let data = try await downloadTarball()
+        let data = try await downloadTarball(ref: ref)
         progress(0.7)   // ダウンロードが大半。展開・抽出はローカルで速い
         let entries = try TarGzReader.entries(from: data)
 
@@ -122,15 +154,16 @@ struct GitHubBackupClient {
         return result
     }
 
-    private func downloadTarball() async throws -> Data {
-        let (data, code) = try await request("GET", "tarball/\(branch)")
+    private func downloadTarball(ref: String) async throws -> Data {
+        let (data, code) = try await request("GET", "tarball/\(ref)")
         guard code == 200 else { throw error(data, code) }
         return data
     }
 
-    /// 旧経路：HEAD ツリーから .md を列挙し、GraphQL で本文をまとめ取りする。
-    private func filesFromGraphQL(progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
-        let paths = try await allMarkdownPaths()
+    /// 旧経路：対象 ref のツリーから .md を列挙し、GraphQL で本文をまとめ取りする。
+    private func filesFromGraphQL(ref: String,
+                                  progress: @escaping @Sendable (Double) -> Void) async throws -> [(path: String, content: String)] {
+        let paths = try await allMarkdownPaths(ref: ref)
         guard !paths.isEmpty else { return [] }
 
         var result: [(path: String, content: String)] = []
@@ -139,7 +172,7 @@ struct GitHubBackupClient {
         while index < paths.count {
             let end = min(index + batchSize, paths.count)
             let batch = Array(paths[index..<end])
-            let contents = try await fetchContentsBatch(batch)
+            let contents = try await fetchContentsBatch(batch, ref: ref)
             for (i, path) in batch.enumerated() {
                 if let text = contents[i] { result.append((path, text)) }
             }
@@ -149,24 +182,28 @@ struct GitHubBackupClient {
         return result
     }
 
-    /// HEAD コミットのツリーから .md パスを列挙する。
-    private func allMarkdownPaths() async throws -> [String] {
-        let head = try await currentHead()
-        guard head.exists, let headSha = head.sha,
-              let treeSha = try await commitTreeSha(headSha) else {
-            return []
+    /// 対象 ref（commit SHA またはブランチ名）のツリーから .md パスを列挙する。
+    private func allMarkdownPaths(ref: String) async throws -> [String] {
+        // ref が commit SHA ならそのツリーを直接、ブランチ名なら HEAD を解決してから取る。
+        let treeSha: String?
+        if let t = try await commitTreeSha(ref) {
+            treeSha = t
+        } else {
+            let head = try await currentHead()
+            guard head.exists, let headSha = head.sha else { return [] }
+            treeSha = try await commitTreeSha(headSha)
         }
-        guard let blobs = try await treeBlobs(treeSha) else {
+        guard let treeSha, let blobs = try await treeBlobs(treeSha) else {
             throw GitHubBackupError(message: "リポジトリが大きすぎて一覧を取得できませんでした。")
         }
         return blobs.keys.filter { $0.hasSuffix(".md") }.sorted()
     }
 
     /// GraphQL で複数パスの Blob.text をまとめて取得する。戻り値は paths と同じ並び（取得不可は nil）。
-    private func fetchContentsBatch(_ paths: [String]) async throws -> [String?] {
+    private func fetchContentsBatch(_ paths: [String], ref: String) async throws -> [String?] {
         var fields = ""
         for (i, path) in paths.enumerated() {
-            let expr = "\(branch):\(path)"
+            let expr = "\(ref):\(path)"
             fields += "f\(i): object(expression: \(Self.graphQLString(expr))) { ... on Blob { text } }\n"
         }
         let query = "query { repository(owner: \(Self.graphQLString(owner)), name: \(Self.graphQLString(repo))) {\n\(fields)} }"

@@ -15,6 +15,7 @@ struct BackupSettingsView: View {
     @State private var progress = 0.0
     @State private var resultMessage: String?
     @State private var pendingRestore: BackupTarget? = nil
+    @State private var historyTarget: BackupTarget? = nil
 
     var body: some View {
         List {
@@ -62,6 +63,14 @@ struct BackupSettingsView: View {
         } message: {
             Text("リポジトリの内容で現在のノートを上書きします（同名は上書き・無いものは追加）。ローカルにしか無いノートは削除されません。")
         }
+        .sheet(item: $historyTarget) { target in
+            NavigationStack {
+                BackupHistoryView(target: target) { sha in
+                    historyTarget = nil
+                    Task { await restore(target, ref: sha) }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -83,6 +92,14 @@ struct BackupSettingsView: View {
             if runningTargetId == target.id {
                 ProgressView()
             } else {
+                Button {
+                    historyTarget = target
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath").font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .tint(.blue)
+                .disabled(runningTargetId != nil)
                 Button {
                     pendingRestore = target
                 } label: {
@@ -146,8 +163,9 @@ struct BackupSettingsView: View {
         runningTargetId = nil
     }
 
-    /// リポジトリの全 .md を取得し、CouchDB へ一括書き戻す（上書き＋追記）。
-    private func restore(_ target: BackupTarget) async {
+    /// リポジトリの .md を取得し、CouchDB へ一括書き戻す（上書き＋追記）。
+    /// `ref` に commit SHA を渡すとその時点の状態へ復元する（タイムマシン）。nil なら最新。
+    private func restore(_ target: BackupTarget, ref: String? = nil) async {
         guard let token = BackupStore.token(for: target.id), !token.isEmpty,
               !target.owner.trimmingCharacters(in: .whitespaces).isEmpty,
               !target.repo.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -161,7 +179,7 @@ struct BackupSettingsView: View {
         do {
             let client = GitHubBackupClient(owner: target.owner, repo: target.repo, branch: branch, token: token)
             // 取得（0...0.5）→ 書き戻し（0.5...1）の2フェーズで進捗表示
-            let files = try await client.filesForRestore { p in
+            let files = try await client.filesForRestore(ref: ref) { p in
                 Task { @MainActor in progress = p * 0.5 }
             }
             if files.isEmpty {
@@ -259,5 +277,99 @@ struct BackupTargetEditor: View {
         BackupStore.upsert(target)
         BackupStore.setToken(token, for: target.id)
         onChange()
+    }
+}
+
+// MARK: - 復元する時点を選ぶ（タイムマシン）
+
+/// バックアップのコミット履歴を「○月○日 HH:mm の状態」として並べ、選んだ時点へ復元する。
+/// 実際の復元（確認・進捗・書き戻し）は親の restore(_:ref:) に委ねる。
+struct BackupHistoryView: View {
+    @Environment(\.dismiss) private var dismiss
+    let target: BackupTarget
+    let onSelect: (String) -> Void   // 選んだコミットの SHA を親へ
+
+    @State private var commits: [GitHubBackupClient.BackupCommit] = []
+    @State private var loading = true
+    @State private var errorMessage: String?
+    @State private var pendingCommit: GitHubBackupClient.BackupCommit?
+
+    var body: some View {
+        Group {
+            if loading {
+                ProgressView("履歴を取得中…")
+            } else if let errorMessage {
+                ContentUnavailableView("履歴を取得できません",
+                                       systemImage: "exclamationmark.triangle",
+                                       description: Text(errorMessage))
+            } else if commits.isEmpty {
+                ContentUnavailableView("バックアップ履歴がありません",
+                                       systemImage: "clock")
+            } else {
+                List(commits) { commit in
+                    Button {
+                        pendingCommit = commit
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(DateDisplay.ymdhm.string(from: commit.date))
+                                .font(.body).foregroundStyle(.primary)
+                            Text(relative(commit.date))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("復元する時点")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("閉じる") { dismiss() }
+            }
+        }
+        .task { await load() }
+        .confirmationDialog(
+            pendingCommit.map { "\(DateDisplay.ymdhm.string(from: $0.date)) の状態に復元しますか？" } ?? "",
+            isPresented: Binding(
+                get: { pendingCommit != nil },
+                set: { if !$0 { pendingCommit = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingCommit
+        ) { commit in
+            Button("この時点に復元", role: .destructive) {
+                pendingCommit = nil
+                onSelect(commit.sha)
+            }
+            Button("キャンセル", role: .cancel) { pendingCommit = nil }
+        } message: { _ in
+            Text("この時点のリポジトリ内容で現在のノートを上書きします（同名は上書き・無いものは追加）。ローカルにしか無いノートは削除されません。")
+        }
+    }
+
+    private func load() async {
+        loading = true
+        errorMessage = nil
+        guard let token = BackupStore.token(for: target.id), !token.isEmpty,
+              !target.owner.trimmingCharacters(in: .whitespaces).isEmpty,
+              !target.repo.trimmingCharacters(in: .whitespaces).isEmpty else {
+            errorMessage = "オーナー・リポジトリ・トークンを設定してください。"
+            loading = false
+            return
+        }
+        let branch = target.branch.trimmingCharacters(in: .whitespaces).isEmpty ? "main" : target.branch
+        let client = GitHubBackupClient(owner: target.owner, repo: target.repo, branch: branch, token: token)
+        do {
+            commits = try await client.listCommits()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        loading = false
+    }
+
+    private func relative(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ja_JP")
+        return f.localizedString(for: date, relativeTo: Date())
     }
 }
