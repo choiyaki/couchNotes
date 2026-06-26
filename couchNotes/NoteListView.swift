@@ -32,7 +32,6 @@ struct NoteListView: View {
     @State private var titleResults: [NoteItem] = []   // 入力中：タイトル一致（ドロップダウン）
     @State private var bodyResults:  [NoteItem] = []   // Enter後：本文一致（メイン一覧）
     @State private var searchCommitted = false         // Enter で本文検索を確定したか
-    @State private var suppressSearchChange = false     // 詳細からの確定遷移時、onChange を1回だけ無視
     @State private var searchTask: Task<Void, Never>? = nil
     @State private var showNewNote   = false
     @FocusState private var searchFocused: Bool
@@ -193,9 +192,8 @@ struct NoteListView: View {
                         // 詳細画面で Enter → 一覧へ戻り、その語で本文検索を確定表示
                         isClosureNavigation = true
                         navigate { path = [] }
-                        suppressSearchChange = true   // 次の onChange(searchText) を1回スキップ
                         showSearch = true
-                        searchText = text
+                        searchText = text   // SearchBar 子ビューが live に追従して語を表示
                         searchCommitted = true
                         Task { bodyResults = await NoteStore.shared.searchBodies(text) }
                     }
@@ -256,14 +254,6 @@ struct NoteListView: View {
                 Button("OK") { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")
-            }
-            .onChange(of: searchText) { _, query in
-                // 詳細からの確定遷移で text を入れた回は本文検索確定を保つためスキップ
-                if suppressSearchChange {
-                    suppressSearchChange = false
-                    return
-                }
-                runSearch(query)
             }
             .onChange(of: folderFilter) { _, newFolder in
                 // フォルダを切り替えたら、そのフォルダに保存された表示形式へ
@@ -481,7 +471,8 @@ struct NoteListView: View {
         notes = await NoteStore.shared.listItems()
     }
 
-    /// 入力中：タイトル一致の候補（ドロップダウン）を 200ms デバウンスで更新する。
+    /// 入力中：タイトル一致の候補（ドロップダウン）を更新する。
+    /// デバウンスは入力を抱える `SearchBar` 子ビュー側で行うため、ここでは即時に検索する。
     /// 文字が変わるたびに「入力中モード（未確定）」へ戻す。
     private func runSearch(_ query: String) {
         searchTask?.cancel()
@@ -492,8 +483,6 @@ struct NoteListView: View {
             return
         }
         searchTask = Task {
-            try? await Task.sleep(for: .milliseconds(200))
-            guard !Task.isCancelled else { return }
             let results = await NoteStore.shared.searchTitles(trimmed)
             guard !Task.isCancelled else { return }
             titleResults = results
@@ -757,50 +746,27 @@ struct NoteListView: View {
     }
 
     var searchBar: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                    .font(.subheadline)
-                TextField("ノートを検索", text: $searchText)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .focused($searchFocused)
-                    .submitLabel(.search)
-                    .onSubmit { commitSearch() }
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                        searchFocused = false   // キーボードも閉じる
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            Button {
-                showNewNote = true
-            } label: {
-                Image(systemName: "plus.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(canCreateFromSearch ? Color.accentColor : Color.secondary.opacity(0.35))
-            }
-            .disabled(!canCreateFromSearch)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 6)
-        .animation(.easeInOut(duration: 0.15), value: canCreateFromSearch)
-        .onAppear {
-            // 検索枠が出た瞬間にフォーカス（マウント直後に確実に当てるため async）
-            DispatchQueue.main.async { searchFocused = true }
-        }
+        SearchBar(
+            text: $searchText,
+            focused: $searchFocused,
+            canCreate: canCreateFromSearch,
+            onQueryChange: { q in
+                searchText = q          // 親の派生値（＋ボタン活性・新規ノート初期タイトル）を更新
+                runSearch(q)            // タイトル候補ドロップダウンを更新
+            },
+            onSubmit: { q in
+                searchText = q
+                commitSearch()          // Enter：本文検索を確定
+            },
+            onClear: {
+                searchText = ""
+                titleResults = []
+                bodyResults = []
+                searchCommitted = false
+                searchFocused = false   // キーボードも閉じる
+            },
+            onCreate: { showNewNote = true }
+        )
     }
 
     /// タイトル変更（本体リネーム＋他ページのリンク書き換え）
@@ -937,6 +903,95 @@ struct NoteListView: View {
             await NoteStore.shared.setSyncValue("last_seq", seq)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 検索バー（入力を子ビューに隔離）
+
+/// 入力中の文字を自前の `@State`（live）で抱え、親 `NoteListView` を毎打鍵で再描画させない。
+/// 親へは「デバウンス後・Enter確定・クリア時」だけ伝える。これで大きな一覧の作り直しが止まる。
+private struct SearchBar: View {
+    @Binding var text: String                  // 親 searchText（派生値の参照元。確定/デバウンス/クリアで同期）
+    @FocusState.Binding var focused: Bool
+    let canCreate: Bool
+    let onQueryChange: (String) -> Void        // デバウンス後（タイトル候補の更新）
+    let onSubmit: (String) -> Void             // Enter（本文検索の確定）
+    let onClear: () -> Void
+    let onCreate: () -> Void
+
+    @State private var live = ""               // 入力中の文字はここで完結
+    @State private var debounce: Task<Void, Never>? = nil
+    @State private var syncingFromParent = false   // 親→live の同期時、検索トリガを誤発火させない
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+                TextField("ノートを検索", text: $live)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .focused($focused)
+                    .submitLabel(.search)
+                    .onSubmit {
+                        debounce?.cancel()
+                        onSubmit(live)
+                    }
+                if !live.isEmpty {
+                    Button {
+                        debounce?.cancel()
+                        live = ""
+                        onClear()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            Button {
+                onCreate()
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(canCreate ? Color.accentColor : Color.secondary.opacity(0.35))
+            }
+            .disabled(!canCreate)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+        .animation(.easeInOut(duration: 0.15), value: canCreate)
+        .onChange(of: live) { _, q in
+            if syncingFromParent { syncingFromParent = false; return }
+            debounce?.cancel()
+            debounce = Task {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                onQueryChange(q)
+            }
+        }
+        .onChange(of: text) { _, newValue in
+            // 親が外部から検索語を変えた（詳細画面からの確定遷移）→ フィールドへ反映（検索は起こさない）
+            if newValue != live {
+                syncingFromParent = true
+                live = newValue
+            }
+        }
+        .onAppear {
+            if text != live {           // 確定遷移などで既に語が入っている場合に表示
+                syncingFromParent = true
+                live = text
+            }
+            // 検索枠が出た瞬間にフォーカス（マウント直後に確実に当てるため async）
+            DispatchQueue.main.async { focused = true }
         }
     }
 }

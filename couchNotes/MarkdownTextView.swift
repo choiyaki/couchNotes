@@ -39,6 +39,7 @@ final class NonAutoScrollTextView: UITextView {
     // MARK: - ハードウェアキーボード・ショートカット
 
     var onShortcutPaste:      (() -> Void)?   // cmd+V
+    var onMenuPaste:          (() -> Void)?   // 編集メニュー「ペースト」
     var onShortcutListToggle: (() -> Void)?   // cmd+Enter
     var onShortcutMoveUp:     (() -> Void)?   // cmd+option+↑
     var onShortcutMoveDown:   (() -> Void)?   // cmd+option+↓
@@ -56,6 +57,12 @@ final class NonAutoScrollTextView: UITextView {
 
     @objc private func scPaste()      { onShortcutPaste?() }
     @objc private func scListToggle() { onShortcutListToggle?() }
+
+    // 編集メニューの「ペースト」。画像なら Gyazo アップロード、テキストなら通常挿入へ
+    // ハンドラ側で振り分ける。未配線なら標準動作にフォールバック。
+    override func paste(_ sender: Any?) {
+        if let onMenuPaste { onMenuPaste() } else { super.paste(sender) }
+    }
 
     // MARK: - 押下イベントで扱うショートカット（オートリピート抑止）
 
@@ -296,6 +303,7 @@ struct MarkdownTextView: UIViewRepresentable {
 
         // ハードウェアキーボードのショートカット（カスタムキーボードの各操作に対応）
         tv.onShortcutPaste      = { [weak coord] in coord?.handlePaste() }
+        tv.onMenuPaste          = { [weak coord] in coord?.handlePaste() }
         tv.onShortcutListToggle = { [weak coord] in coord?.handleListToggle() }
         tv.onShortcutMoveUp     = { [weak coord] in coord?.handleMoveLineUp() }
         tv.onShortcutMoveDown   = { [weak coord] in coord?.handleMoveLineDown() }
@@ -478,6 +486,21 @@ extension MarkdownTextView {
 
         func handlePaste() {
             guard let tv = textView else { return }
+
+            // 画像優先（スクショ等はテキスト表現も併せ持つことがあるため先に判定）。
+            // クリップボードに画像があれば、プレースホルダを即挿入して裏で Gyazo にアップロードする。
+            if UIPasteboard.general.hasImages, let payload = imagePayloadFromPasteboard() {
+                let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+                guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    presentAlert(title: "Gyazo 未設定",
+                                 message: "設定 →「画像アップロード（Gyazo）」でアクセストークンを登録してください。")
+                    return
+                }
+                uploadWithPlaceholder(data: payload.data, filename: payload.filename,
+                                      mimeType: payload.mimeType, at: tv.selectedRange.location)
+                return
+            }
+
             guard let pasteText = UIPasteboard.general.string, !pasteText.isEmpty else { return }
             tv.insertText(pasteText)   // textViewDidChange 経由でスタイリングと parent.text 反映
         }
@@ -504,31 +527,69 @@ extension MarkdownTextView {
             topViewController()?.present(picker, animated: true)
         }
 
-        /// アップロードして結果URLを挿入する。
-        @MainActor
-        private func uploadAndInsert(data: Data) async {
-            let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
-            do {
-                let url = try await GyazoUploadService.upload(
-                    imageData: data, filename: "image.jpg", mimeType: "image/jpeg", token: token)
-                insertImageMarkdown(url: url)
-            } catch {
-                presentAlert(title: "アップロード失敗", message: error.localizedDescription)
+        /// クリップボードの画像をアップロード用データに変換する。
+        /// スクショ等の PNG は再エンコードせずそのまま使い、透過・文字の鮮明さを保つ。
+        /// 無ければ UIImage から JPEG(0.85) にフォールバック。
+        private func imagePayloadFromPasteboard() -> (data: Data, filename: String, mimeType: String)? {
+            let pb = UIPasteboard.general
+            if let png = pb.data(forPasteboardType: "public.png") {
+                return (png, "image.png", "image/png")
+            }
+            if let image = pb.image, let jpeg = image.jpegData(compressionQuality: 0.85) {
+                return (jpeg, "image.jpg", "image/jpeg")
+            }
+            return nil
+        }
+
+        /// `![アップロード中…]()` プレースホルダを即挿入し、裏で Gyazo にアップロード。
+        /// 完了で本文中の同プレースホルダを `![](url)` に差し替える（失敗時は除去＋アラート）。
+        private func uploadWithPlaceholder(data: Data, filename: String, mimeType: String, at location: Int) {
+            // UUID で一意化。連続ペーストや置換待ち中の編集があっても取り違えない。
+            let placeholder = "![アップロード中…](upload://\(UUID().uuidString))"
+            insertPlaceholder(placeholder, at: location)
+            Task { @MainActor in
+                let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+                do {
+                    let url = try await GyazoUploadService.upload(
+                        imageData: data, filename: filename, mimeType: mimeType, token: token)
+                    replacePlaceholder(placeholder, with: "![](\(url))")
+                } catch {
+                    replacePlaceholder(placeholder, with: "")   // 失敗：プレースホルダを取り除く
+                    presentAlert(title: "アップロード失敗", message: error.localizedDescription)
+                }
             }
         }
 
-        /// 控えておいたカーソル位置に画像マークダウンを差し込む。
-        private func insertImageMarkdown(url: String) {
+        /// 指定位置にプレースホルダ文字列を挿入し、カーソルをその直後へ。
+        private func insertPlaceholder(_ placeholder: String, at location: Int) {
             guard let tv = textView else { return }
-            let markdown = "![](\(url))"
-            let loc   = clamp(savedImageInsertLocation, in: tv)
-            let range = NSRange(location: loc, length: 0)
+            let loc = clamp(location, in: tv)
 
             tv.textStorage.beginEditing()
-            tv.textStorage.replaceCharacters(in: range, with: markdown)
+            tv.textStorage.replaceCharacters(in: NSRange(location: loc, length: 0), with: placeholder)
             tv.textStorage.endEditing()
 
-            tv.selectedRange = NSRange(location: loc + (markdown as NSString).length, length: 0)
+            tv.selectedRange = NSRange(location: loc + (placeholder as NSString).length, length: 0)
+            applyStylingAfterEdit(tv)
+        }
+
+        /// 本文中のプレースホルダ文字列を検索して置換する。
+        /// ユーザが既に消していたら（見つからなければ）何もしない。
+        private func replacePlaceholder(_ placeholder: String, with replacement: String) {
+            guard let tv = textView else { return }
+            let range = (tv.text as NSString).range(of: placeholder)
+            guard range.location != NSNotFound else { return }
+
+            tv.textStorage.beginEditing()
+            tv.textStorage.replaceCharacters(in: range, with: replacement)
+            tv.textStorage.endEditing()
+
+            // カーソルがプレースホルダより後ろにあれば、長さ差ぶん補正してズレを防ぐ。
+            let delta = (replacement as NSString).length - range.length
+            let sel = tv.selectedRange
+            if sel.location >= range.location + range.length {
+                tv.selectedRange = NSRange(location: max(0, sel.location + delta), length: sel.length)
+            }
             applyStylingAfterEdit(tv)
         }
 
@@ -551,11 +612,15 @@ extension MarkdownTextView {
             picker.dismiss(animated: true)
             guard let provider = results.first?.itemProvider,
                   provider.canLoadObject(ofClass: UIImage.self) else { return }
+            let location = savedImageInsertLocation   // ピッカーを開いた時点のカーソル位置
             provider.loadObject(ofClass: UIImage.self) { [weak self] object, _ in
                 guard let self,
                       let image = object as? UIImage,
                       let data  = image.jpegData(compressionQuality: 0.85) else { return }
-                Task { await self.uploadAndInsert(data: data) }
+                Task { @MainActor in
+                    self.uploadWithPlaceholder(data: data, filename: "image.jpg",
+                                               mimeType: "image/jpeg", at: location)
+                }
             }
         }
 
@@ -567,6 +632,7 @@ extension MarkdownTextView {
             let selected = ns.substring(with: range)
             let inserted = "[[\(selected)]]"
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: range, with: inserted)
             tv.textStorage.endEditing()
@@ -633,6 +699,7 @@ extension MarkdownTextView {
             let body = String(stripped.dropFirst(oldMarkerLen))
             let newLine = tabs + newMarker + body + (hasNewline ? "\n" : "")
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: lineRange, with: newLine)
             tv.textStorage.endEditing()
@@ -676,6 +743,7 @@ extension MarkdownTextView {
                 result += tabs + target + body + (lineStr.hasSuffix("\n") ? "\n" : "")
             }
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: block, with: result)
             tv.textStorage.endEditing()
@@ -707,6 +775,7 @@ extension MarkdownTextView {
                                    length: prevRange.length + currRange.length)
             let cursorInCurr = cursorLoc - currRange.location
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: combined, with: newContent)
             tv.textStorage.endEditing()
@@ -730,6 +799,7 @@ extension MarkdownTextView {
             let combined = NSRange(location: prevRange.location,
                                    length: prevRange.length + block.length)
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: combined, with: newContent)
             tv.textStorage.endEditing()
@@ -754,6 +824,7 @@ extension MarkdownTextView {
             let combined = NSRange(location: block.location,
                                    length: block.length + nextRange.length)
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: combined, with: newContent)
             tv.textStorage.endEditing()
@@ -786,6 +857,7 @@ extension MarkdownTextView {
                                    length: currRange.length + nextRange.length)
             let cursorInCurr = cursorLoc - currRange.location
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: combined, with: newContent)
             tv.textStorage.endEditing()
@@ -807,6 +879,7 @@ extension MarkdownTextView {
             let line      = ns.substring(with: lineRange)
             guard line.hasPrefix("\t") else { return }
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: NSRange(location: lineRange.location, length: 1), with: "")
             tv.textStorage.endEditing()
@@ -825,6 +898,7 @@ extension MarkdownTextView {
             let cursorLoc = tv.selectedRange.location
             let lineRange = ns.lineRange(for: NSRange(location: cursorLoc, length: 0))
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(in: NSRange(location: lineRange.location, length: 0), with: "\t")
             tv.textStorage.endEditing()
@@ -838,6 +912,7 @@ extension MarkdownTextView {
             let ns    = tv.text as NSString
             let lines = lineRanges(in: block, ns: ns)
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             for lr in lines.reversed() {
                 tv.textStorage.replaceCharacters(in: NSRange(location: lr.location, length: 0), with: "\t")
@@ -852,8 +927,10 @@ extension MarkdownTextView {
         private func outdentBlock(_ tv: UITextView, block: NSRange) {
             let ns    = tv.text as NSString
             let lines = lineRanges(in: block, ns: ns)
+            guard lines.contains(where: { ns.substring(with: $0).hasPrefix("\t") }) else { return }
 
             var removed = 0
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             for lr in lines.reversed() where ns.substring(with: lr).hasPrefix("\t") {
                 tv.textStorage.replaceCharacters(in: NSRange(location: lr.location, length: 1), with: "")
@@ -885,6 +962,23 @@ extension MarkdownTextView {
 
         private func clamp(_ loc: Int, in tv: UITextView) -> Int {
             max(0, min(loc, tv.text.utf16.count))
+        }
+
+        /// 構造編集の前に呼ぶ。textStorage の直接編集は UITextView 標準の UndoManager に
+        /// 乗らないため、操作前の本文全体と選択範囲を控え、「1操作＝1ステップ」で巻き戻せる
+        /// undo を登録する。undo 実行時に現在状態を再登録することで redo も成立する。
+        private func registerStructuralUndo(_ tv: UITextView) {
+            let beforeText = tv.text ?? ""
+            let beforeSel  = tv.selectedRange
+            tv.undoManager?.registerUndo(withTarget: self) { coord in
+                guard let tv = coord.textView else { return }
+                coord.registerStructuralUndo(tv)   // redo 用に「今の状態」を登録してから巻き戻す
+                tv.text = beforeText
+                let len = (beforeText as NSString).length
+                let loc = max(0, min(beforeSel.location, len))
+                tv.selectedRange = NSRange(location: loc, length: max(0, min(beforeSel.length, len - loc)))
+                coord.applyStylingAfterEdit(tv)     // 再スタイル＋ parent.text 反映
+            }
         }
 
         // MARK: 複数行選択ユーティリティ
@@ -953,6 +1047,7 @@ extension MarkdownTextView {
             }
 
             let replacement = "[[\(note.shortTitle)]]"
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(
                 in: NSRange(location: replaceStart, length: replaceLen + tailLen),
@@ -1093,6 +1188,7 @@ extension MarkdownTextView {
                 return true
             }
 
+            registerStructuralUndo(textView)
             if afterMarker.isEmpty {
                 // 空のリスト項目 → 行全体のマーカーを除去してリストを終了
                 let lineContentRange = NSRange(location: lineRange.location,
@@ -1208,6 +1304,7 @@ extension MarkdownTextView {
             else if line.hasPrefix("- [x]") || line.hasPrefix("* [x]") { replacement = "[ ]" }
             else    { return }
 
+            registerStructuralUndo(tv)
             tv.textStorage.beginEditing()
             tv.textStorage.replaceCharacters(
                 in: NSRange(location: lineRange.location + 2, length: 3),
