@@ -14,7 +14,6 @@ struct BackupSettingsView: View {
     @State private var isRestoring = false
     @State private var progress = 0.0
     @State private var resultMessage: String?
-    @State private var pendingRestore: BackupTarget? = nil
     @State private var historyTarget: BackupTarget? = nil
 
     var body: some View {
@@ -44,24 +43,6 @@ struct BackupSettingsView: View {
             Button("OK") { resultMessage = nil }
         } message: {
             Text(resultMessage ?? "")
-        }
-        .confirmationDialog(
-            "このバックアップから復元しますか？",
-            isPresented: Binding(
-                get: { pendingRestore != nil },
-                set: { if !$0 { pendingRestore = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("復元する", role: .destructive) {
-                if let target = pendingRestore {
-                    pendingRestore = nil
-                    Task { await restore(target) }
-                }
-            }
-            Button("キャンセル", role: .cancel) { pendingRestore = nil }
-        } message: {
-            Text("リポジトリの内容で現在のノートを上書きします（同名は上書き・無いものは追加）。ローカルにしか無いノートは削除されません。")
         }
         .sheet(item: $historyTarget) { target in
             NavigationStack {
@@ -99,14 +80,6 @@ struct BackupSettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .tint(.blue)
-                .disabled(runningTargetId != nil)
-                Button {
-                    pendingRestore = target
-                } label: {
-                    Image(systemName: "arrow.down.circle").font(.title2)
-                }
-                .buttonStyle(.borderless)
-                .tint(.orange)
                 .disabled(runningTargetId != nil)
                 Button {
                     Task { await backup(target) }
