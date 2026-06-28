@@ -200,6 +200,11 @@ struct NoteListView: View {
                 )
             }
             .onChange(of: path) { oldPath, newPath in
+                // 一覧（root）を表示中に閉じたら起動時も一覧から始める。
+                // ノートを開くと NoteDetailView 側が id を記録するので、ここでは一覧復帰時のクリアだけ担う。
+                if newPath.isEmpty {
+                    UserDefaults.standard.set("", forKey: "lastOpenedNoteId")
+                }
                 if isClosureNavigation {
                     isClosureNavigation = false
                 } else if oldPath.count > newPath.count {
