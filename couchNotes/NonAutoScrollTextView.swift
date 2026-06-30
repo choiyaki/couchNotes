@@ -76,6 +76,16 @@ final class NonAutoScrollTextView: UITextView {
         if let onMenuPaste { onMenuPaste() } else { super.paste(sender) }
     }
 
+    // UITextView 既定の canPerformAction はクリップボードがテキストを持つ時しか
+    // paste: を許可しないため、画像だけをコピーした状態だと編集メニューに「ペースト」が
+    // 出ない。画像 or テキストがあれば許可して、paste(_:) 経由で画像ペーストに繋ぐ。
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) {
+            return UIPasteboard.general.hasImages || UIPasteboard.general.hasStrings
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
     // MARK: - 押下イベントで扱うショートカット（オートリピート抑止）
 
     /// 現在押されているショートカットキー。押しっぱなしのリピートを1回だけにするための集合。
