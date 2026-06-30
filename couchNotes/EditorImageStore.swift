@@ -20,6 +20,13 @@ final class EditorImageStore {
     static let landscapeHeight:   CGFloat = 150   // 横向き
     static let placeholderHeight: CGFloat = 200   // 読み込み前の枠
 
+    /// 同一行に複数枚並べるときの画像間ギャップ（pt）。
+    static let imageGap: CGFloat = 8
+
+    /// エディタのコンテンツ幅（textContainerInset を除いた本文幅）。
+    /// 割合指定・均等割りの算出に使う。レイアウト時にビューが更新する。
+    var contentWidth: CGFloat = 0
+
     private let cache = NSCache<NSURL, UIImage>()
     private var inflight = Set<String>()
 
@@ -37,8 +44,37 @@ final class EditorImageStore {
         return img.size.width >= img.size.height ? Self.landscapeHeight : Self.portraitHeight
     }
 
-    /// 実表示サイズ。高さは向き固定、幅はアスペクト比（コンテンツ幅で上限クリップ）。
-    func displaySize(for url: String, contentWidth: CGFloat) -> CGSize {
+    /// 表示サイズを決める統一ロジック。
+    /// - alt の `|NN` 指定があれば コンテンツ幅 × NN%。
+    /// - 指定なしで同一行に複数枚あれば 均等割り（ギャップを差し引いて枚数で等分）。
+    /// - 指定なしで単独なら 従来の向き固定サイズ。
+    func displaySize(for url: String, alt: String,
+                     contentWidth: CGFloat, countOnLine: Int, gap: CGFloat) -> CGSize {
+        // 幅未確定（レイアウト前）は向き固定にフォールバックして予約高さを確保する。
+        guard contentWidth > 0 else {
+            return CGSize(width: 0, height: displayHeight(for: url))
+        }
+        if let frac = MarkdownStyler.widthFraction(fromAlt: alt) {
+            return sizeForWidth(contentWidth * frac, url: url)
+        }
+        if countOnLine > 1 {
+            let w = (contentWidth - gap * CGFloat(countOnLine - 1)) / CGFloat(countOnLine)
+            return sizeForWidth(max(w, 1), url: url)
+        }
+        return naturalSize(for: url, contentWidth: contentWidth)
+    }
+
+    /// 指定幅での表示サイズ（高さ = 幅 ÷ アスペクト比）。未取得時はプレースホルダ高さ。
+    private func sizeForWidth(_ width: CGFloat, url: String) -> CGSize {
+        guard let img = image(for: url), img.size.width > 0, img.size.height > 0 else {
+            return CGSize(width: width, height: Self.placeholderHeight)
+        }
+        let aspect = img.size.width / img.size.height
+        return CGSize(width: width, height: width / aspect)
+    }
+
+    /// 従来の表示サイズ。高さは向き固定、幅はアスペクト比（コンテンツ幅で上限クリップ）。
+    private func naturalSize(for url: String, contentWidth: CGFloat) -> CGSize {
         guard let img = image(for: url), img.size.width > 0, img.size.height > 0 else {
             return CGSize(width: min(contentWidth, 160), height: Self.placeholderHeight)
         }

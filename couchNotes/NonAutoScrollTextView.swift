@@ -129,11 +129,17 @@ final class NonAutoScrollTextView: UITextView {
         positionFooter()
 
         // 画像オーバーレイの再配置はテキスト or 幅が変わった時だけ（スクロール時は子ビューが
-        // コンテンツと一緒に動くため再計算不要）。
+        // コンテンツと一緒に動くため再計算不要）。force フラグは画像読み込み後など、幅・本文が
+        // 変わらなくても再配置したいときに使う（幅変化と区別して再スタイルの無限ループを防ぐ）。
         let w = bounds.width
-        if text != lastImageText || abs(w - lastImageWidth) > 0.5 {
+        let widthChanged = abs(w - lastImageWidth) > 0.5
+        if forceImageRelayout || text != lastImageText || widthChanged {
+            forceImageRelayout = false
             lastImageText  = text
             lastImageWidth = w
+            EditorImageStore.shared.contentWidth = w - textContainerInset.left - textContainerInset.right
+            // 幅が変わると割合指定・均等割り画像の高さが変わるので、段落余白を再計算させる。
+            if widthChanged { EditorImageStore.shared.onUpdate?() }
             layoutImagePreviews()
         }
     }
@@ -143,20 +149,20 @@ final class NonAutoScrollTextView: UITextView {
     private var imagePreviews: [Int: EditorImagePreviewView] = [:]
     private var lastImageText:  String  = "\u{0}"   // 初回必ず実行されるよう番兵
     private var lastImageWidth: CGFloat = -1
+    private var forceImageRelayout = false
 
     /// 画像読み込み完了時などに次回 layout で必ず再配置させる。
     func invalidateImagePreviews() {
-        lastImageWidth = -1
+        forceImageRelayout = true
         setNeedsLayout()
     }
 
     /// 画像リンク行の直下（段落余白）に画像ビューを配置する。
+    /// 同一行に複数枚あるときは左から横並び（割合指定 or 均等割り）に並べる。
     private func layoutImagePreviews() {
-        guard let regex = MarkdownStyler.imageLinkRegex else { return }
-        let ns = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        let groups = MarkdownStyler.imageLineGroups(in: text)
 
-        if matches.isEmpty {
+        if groups.isEmpty {
             imagePreviews.values.forEach { $0.removeFromSuperview() }
             imagePreviews.removeAll()
             return
@@ -165,35 +171,40 @@ final class NonAutoScrollTextView: UITextView {
         layoutManager.ensureLayout(for: textContainer)
         let contentWidth = bounds.width - textContainerInset.left - textContainerInset.right
         guard contentWidth > 0 else { return }
+        EditorImageStore.shared.contentWidth = contentWidth
 
+        let gap = EditorImageStore.imageGap
         var used = Set<Int>()
-        for (i, m) in matches.enumerated() where m.numberOfRanges > 1 {
-            let urlRange = m.range(at: 1)
-            guard urlRange.location != NSNotFound else { continue }
-            let url = ns.substring(with: urlRange)
-
-            let lineRange  = ns.lineRange(for: m.range)
-            let glyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
+        var idx  = 0
+        for group in groups {
+            guard let first = group.first else { continue }
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: first.lineRange, actualCharacterRange: nil)
             let lineRect   = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-
-            let size = EditorImageStore.shared.displaySize(for: url, contentWidth: contentWidth)
-            let x = textContainerInset.left
             let y = textContainerInset.top + lineRect.maxY + 6
+            var x = textContainerInset.left
 
-            let view: EditorImagePreviewView
-            if let existing = imagePreviews[i] {
-                view = existing
-            } else {
-                view = EditorImagePreviewView()
-                addSubview(view)
-                imagePreviews[i] = view
+            for im in group {
+                let size = EditorImageStore.shared.displaySize(
+                    for: im.url, alt: im.alt, contentWidth: contentWidth,
+                    countOnLine: group.count, gap: gap)
+
+                let view: EditorImagePreviewView
+                if let existing = imagePreviews[idx] {
+                    view = existing
+                } else {
+                    view = EditorImagePreviewView()
+                    addSubview(view)
+                    imagePreviews[idx] = view
+                }
+                view.url = im.url
+                view.frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+                view.setImage(EditorImageStore.shared.image(for: im.url))
+                used.insert(idx)
+
+                EditorImageStore.shared.ensureLoaded(im.url)
+                x += size.width + gap
+                idx += 1
             }
-            view.url = url
-            view.frame = CGRect(x: x, y: y, width: size.width, height: size.height)
-            view.setImage(EditorImageStore.shared.image(for: url))
-            used.insert(i)
-
-            EditorImageStore.shared.ensureLoaded(url)
         }
 
         for (i, v) in imagePreviews where !used.contains(i) {

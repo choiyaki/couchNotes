@@ -112,23 +112,105 @@ enum MarkdownStyler {
         storage.endEditing()
     }
 
-    // 画像リンク `![](http…)`（リモート）。capture 1 = URL。
+    // 画像リンク `![alt](http…)`（リモート）。capture 1 = alt（`|30` 幅指定を含む）、capture 2 = URL。
     static let imageLinkRegex = try? NSRegularExpression(
-        pattern: #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#
+        pattern: #"!\[([^\]]*)\]\((https?://[^)\s]+)\)"#
     )
 
-    /// 画像リンク行に「段落下の余白」を設定し、画像オーバーレイの居場所を確保する。
-    /// テキスト（文字）は増やさないのでカーソル挙動・保存本文には影響しない。
-    private static func styleImageLines(in s: NSTextStorage, range full: NSRange, lineSpacing: CGFloat, fontSize: CGFloat) {
-        guard let regex = imageLinkRegex else { return }
-        let ns = s.string as NSString
-        for m in regex.matches(in: s.string, range: full) where m.numberOfRanges > 1 {
-            let url = ns.substring(with: m.range(at: 1))
+    /// 本文中の 1 枚の画像リンク。
+    struct ImageMatch {
+        let alt: String
+        let url: String
+        let matchRange: NSRange
+        let lineRange: NSRange
+    }
+
+    /// 画像リンクを「同一行ごと」にまとめて返す。マッチは出現順なので、
+    /// 連続して同じ行に属するものを 1 グループにまとめれば横並びの単位になる。
+    static func imageLineGroups(in text: String, range: NSRange? = nil) -> [[ImageMatch]] {
+        guard let regex = imageLinkRegex else { return [] }
+        let ns = text as NSString
+        let scope = range ?? NSRange(location: 0, length: ns.length)
+        var groups: [[ImageMatch]] = []
+        var currentLine = NSRange(location: NSNotFound, length: 0)
+        for m in regex.matches(in: text, range: scope) where m.numberOfRanges > 2 {
+            let urlR = m.range(at: 2)
+            guard urlR.location != NSNotFound else { continue }
+            let altR = m.range(at: 1)
+            let alt  = altR.location != NSNotFound ? ns.substring(with: altR) : ""
+            let url  = ns.substring(with: urlR)
             let lineRange = ns.lineRange(for: m.range)
-            let para = makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize)
-            para.paragraphSpacing = EditorImageStore.shared.displayHeight(for: url) + 16
-            s.addAttribute(.paragraphStyle, value: para, range: lineRange)
+            let im = ImageMatch(alt: alt, url: url, matchRange: m.range, lineRange: lineRange)
+            if NSEqualRanges(lineRange, currentLine), !groups.isEmpty {
+                groups[groups.count - 1].append(im)
+            } else {
+                groups.append([im])
+                currentLine = lineRange
+            }
         }
+        return groups
+    }
+
+    /// alt テキスト内の `|30` 形式から表示幅の割合（0〜1）を取り出す。無ければ nil。
+    static func widthFraction(fromAlt alt: String) -> CGFloat? {
+        guard let bar = alt.firstIndex(of: "|") else { return nil }
+        let digits = alt[alt.index(after: bar)...].prefix { $0.isNumber }
+        guard let pct = Double(digits), pct > 0 else { return nil }
+        return CGFloat(min(pct, 100) / 100)
+    }
+
+    /// 画像記法 `![alt](url)` のテキストを通常より小さく表示する倍率。
+    static let imageMarkerFontScale: CGFloat = 0.85
+
+    /// 画像記法のフォント（小さめ・等幅で本文と揃える）。
+    static func imageMarkerFont(fontSize: CGFloat) -> UIFont {
+        UIFont.monospacedSystemFont(ofSize: fontSize * imageMarkerFontScale, weight: .regular)
+    }
+
+    /// 画像リンク行に「段落下の余白」を設定し、画像オーバーレイの居場所を確保する。
+    /// 併せて画像記法テキストを小さめフォント＋既定の薄い灰色にする（カーソル追従の色は
+    /// applyImageMarkerFocus で上書きする）。テキスト（文字）は増やさないのでカーソル挙動・
+    /// 保存本文には影響しない。予約する高さは行内画像の最大高（割合指定・均等割りを反映）。
+    private static func styleImageLines(in s: NSTextStorage, range full: NSRange, lineSpacing: CGFloat, fontSize: CGFloat) {
+        let groups = imageLineGroups(in: s.string, range: full)
+        guard !groups.isEmpty else { return }
+        let contentWidth = EditorImageStore.shared.contentWidth
+        let markerFont = imageMarkerFont(fontSize: fontSize)
+        for group in groups {
+            guard let first = group.first else { continue }
+            var rowHeight: CGFloat = 0
+            for im in group {
+                let size = EditorImageStore.shared.displaySize(
+                    for: im.url, alt: im.alt, contentWidth: contentWidth,
+                    countOnLine: group.count, gap: EditorImageStore.imageGap)
+                rowHeight = max(rowHeight, size.height)
+                s.addAttribute(.font,            value: markerFont,          range: im.matchRange)
+                s.addAttribute(.foregroundColor, value: UIColor.tertiaryLabel, range: im.matchRange)
+            }
+            let para = makeParagraph(lineSpacing: lineSpacing, fontSize: fontSize)
+            para.paragraphSpacing = rowHeight + 16
+            s.addAttribute(.paragraphStyle, value: para, range: first.lineRange)
+        }
+    }
+
+    /// カーソル（選択範囲）が掛かっている画像記法だけ通常色、その他は薄い灰色に塗り直す。
+    /// 色属性のみを画像記法の範囲だけ更新する軽量パス（全文の再スタイルはしない）。
+    /// 選択変更・編集後・画像読み込み後に呼ぶ。
+    static func applyImageMarkerFocus(to s: NSTextStorage, selection: NSRange) {
+        let groups = imageLineGroups(in: s.string)
+        guard !groups.isEmpty else { return }
+        let selEnd = selection.location + selection.length
+        s.beginEditing()
+        for group in groups {
+            for im in group {
+                let lineEnd = im.lineRange.location + im.lineRange.length
+                // 選択範囲が画像記法の行に少しでも掛かっていれば「フォーカス中」とみなす。
+                let focused = selection.location <= lineEnd && selEnd >= im.lineRange.location
+                let color: UIColor = focused ? .label : .tertiaryLabel
+                s.addAttribute(.foregroundColor, value: color, range: im.matchRange)
+            }
+        }
+        s.endEditing()
     }
 
     private static func styleLine(_ line: String, at range: NSRange, in s: NSTextStorage,

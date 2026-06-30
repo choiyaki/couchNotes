@@ -157,6 +157,7 @@ struct MarkdownTextView: UIViewRepresentable {
             uiView.text = text
         }
         MarkdownStyler.apply(to: uiView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+        MarkdownStyler.applyImageMarkerFocus(to: uiView.textStorage, selection: uiView.selectedRange)
         uiView.contentOffset = savedOffset
     }
 }
@@ -724,8 +725,14 @@ extension MarkdownTextView {
         private func applyStylingAfterEdit(_ tv: UITextView) {
             MarkdownStyler.apply(to: tv.textStorage, notes: notes,
                                  fontSize: fontSize, lineSpacing: lineSpacing)
+            applyImageMarkerFocus(tv)
             parent.text = tv.text
             tv.typingAttributes = MarkdownStyler.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
+        }
+
+        /// 画像記法の文字色をカーソル位置に追従させる（カーソル行＝通常色、他＝薄い灰色）。
+        private func applyImageMarkerFocus(_ tv: UITextView) {
+            MarkdownStyler.applyImageMarkerFocus(to: tv.textStorage, selection: tv.selectedRange)
         }
 
         /// 画像読み込み完了時：余白（段落スタイル）を更新し、オーバーレイを再配置させる。
@@ -733,6 +740,7 @@ extension MarkdownTextView {
             guard let tv = textView else { return }
             MarkdownStyler.apply(to: tv.textStorage, notes: notes,
                                  fontSize: fontSize, lineSpacing: lineSpacing)
+            applyImageMarkerFocus(tv)
             (tv as? NonAutoScrollTextView)?.invalidateImagePreviews()
         }
 
@@ -833,6 +841,7 @@ extension MarkdownTextView {
             tv.selectedRange = NSRange(location: replaceStart + (replacement as NSString).length, length: 0)
 
             MarkdownStyler.apply(to: tv.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            applyImageMarkerFocus(tv)
             parent.text = tv.text
             clearSuggestions(for: tv)
         }
@@ -983,6 +992,7 @@ extension MarkdownTextView {
             }
 
             MarkdownStyler.apply(to: textView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            applyImageMarkerFocus(textView)
             parent.text = textView.text
             updateSuggestions(for: textView)
             revealCaretIfHidden(in: textView)   // Phase 4: リスト行の改行でカーソルが隠れたら見せる
@@ -1000,6 +1010,7 @@ extension MarkdownTextView {
             } else {
                 MarkdownStyler.apply(to: textView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
             }
+            applyImageMarkerFocus(textView)
             pendingChangeRange = nil
             isStyling = false
 
@@ -1012,6 +1023,8 @@ extension MarkdownTextView {
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !isStyling else { return }
             updateSuggestions(for: textView)
+            // カーソルが乗っている画像記法だけ通常色に、他は薄い灰色に塗り直す
+            applyImageMarkerFocus(textView)
             // カーソル移動・選択範囲調整で、動いた側の端だけを最小限追従スクロール
             revealActiveCaret(in: textView)
         }
@@ -1088,6 +1101,7 @@ extension MarkdownTextView {
             )
             tv.textStorage.endEditing()
             MarkdownStyler.apply(to: tv.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
+            applyImageMarkerFocus(tv)
             parent.text = tv.text
         }
     }
