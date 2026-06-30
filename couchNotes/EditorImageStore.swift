@@ -73,18 +73,18 @@ final class EditorImageStore {
         return CGSize(width: width, height: width / aspect)
     }
 
-    /// 従来の表示サイズ。高さは向き固定、幅はアスペクト比（コンテンツ幅で上限クリップ）。
+    /// 幅指定なし・単独画像の表示サイズ。アスペクト比を保ったまま「横幅＋縦幅」が
+    /// 本文幅の 100% になるよう調整する（縦長は小さめ、横長は大きめに収まる）。
     private func naturalSize(for url: String, contentWidth: CGFloat) -> CGSize {
         guard let img = image(for: url), img.size.width > 0, img.size.height > 0 else {
             return CGSize(width: min(contentWidth, 160), height: Self.placeholderHeight)
         }
-        let aspect  = img.size.width / img.size.height
-        let targetH = aspect >= 1 ? Self.landscapeHeight : Self.portraitHeight
-        var w = targetH * aspect
-        var h = targetH
-        if w > contentWidth {        // 極端に横長なら幅で頭打ち
-            w = contentWidth
-            h = w / aspect
+        let aspect = img.size.width / img.size.height        // w / h
+        let budget = contentWidth                            // w + h の合計（本文幅の100%）
+        let h = budget / (aspect + 1)
+        let w = aspect * h
+        if w > contentWidth {                                // 念のため幅はコンテンツ幅で頭打ち
+            return CGSize(width: contentWidth, height: contentWidth / aspect)
         }
         return CGSize(width: w, height: h)
     }

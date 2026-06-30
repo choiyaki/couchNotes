@@ -33,6 +33,21 @@ final class NonAutoScrollTextView: UITextView {
         super.setContentOffset(contentOffset, animated: animated)
     }
 
+    /// キャレットの高さをその位置のフォント行高にクランプする。
+    /// 画像行は段落下余白（画像の予約スペース）を持つため、TextKit では段落最終行の
+    /// キャレット矩形がその余白分まで縦に伸びてしまう。文字の高さに合わせて詰める（行頭基準は維持）。
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        var rect = super.caretRect(for: position)
+        let len = textStorage.length
+        guard len > 0 else { return rect }
+        let idx = min(max(0, offset(from: beginningOfDocument, to: position)), len - 1)
+        if let font = textStorage.attribute(.font, at: idx, effectiveRange: nil) as? UIFont,
+           rect.height > font.lineHeight + 1 {
+            rect.size.height = font.lineHeight
+        }
+        return rect
+    }
+
     // MARK: - ハードウェアキーボード・ショートカット
 
     var onShortcutPaste:      (() -> Void)?   // cmd+V
