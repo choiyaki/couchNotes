@@ -154,7 +154,26 @@ struct MarkdownTextView: UIViewRepresentable {
         // スクロール位置だけは保つ（カーソル位置・自動スクロールには一切触れない）。
         let savedOffset = uiView.contentOffset
         if textChanged {
+            let hadFocus = uiView.isFirstResponder
+            // UITextView.text への代入は selectedRange を末尾へリセットする。
+            // 根本対策（古い自己エコーの破棄）は NoteDetailView 側で行うが、
+            // 別経路で差し替えが起きてもカーソルを失わないよう、ここで保存・復元する保険を張る。
+            let savedSel = uiView.selectedRange
+            // [cursor-diag] 編集中の差し替え（＝カーソルが飛びうる瞬間）を記録。
+            if hadFocus {
+                let old = uiView.text ?? ""
+                let oldLen = (old as NSString).length
+                let newLen = (text as NSString).length
+                let tailDiff = old.hasSuffix("\n") != text.hasSuffix("\n")
+                let crlfDiff = old.contains("\r\n") != text.contains("\r\n")
+                NSLog("[cursor-diag] updateUIView replacing text while editing: oldSel=\(savedSel.location)/\(oldLen) newLen=\(newLen) tailNewlineDiff=\(tailDiff) crlfDiff=\(crlfDiff)")
+            }
             uiView.text = text
+            if hadFocus {
+                let len = (uiView.text as NSString).length
+                let loc = min(savedSel.location, len)
+                uiView.selectedRange = NSRange(location: loc, length: min(savedSel.length, len - loc))
+            }
         }
         MarkdownStyler.apply(to: uiView.textStorage, notes: notes, fontSize: fontSize, lineSpacing: lineSpacing)
         MarkdownStyler.applyImageMarkerFocus(to: uiView.textStorage, selection: uiView.selectedRange)

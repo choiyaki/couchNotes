@@ -500,6 +500,13 @@ struct NoteDetailView: View {
     private func applyExternalChange(record: NoteRecord) async {
         // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
         guard !saveInFlight else { return }
+        // 自分の保存エコー／_changes に流れる途中世代（rev 世代が基準以下）は無視する。
+        // 内容が違って見えても古い自己エコーで、適用すると編集中のカーソルが末尾へ飛ぶ。
+        // baseRev 等を stale 値で汚す前に弾く（次回保存の誤 409 も防ぐ）。
+        guard isGenuinelyNewer(record.rev) else {
+            NSLog("[cursor-diag] applyExternalChange: ignored stale echo rev=\(record.rev ?? "nil") base=\(baseRev ?? "nil")")
+            return
+        }
         await NoteStore.shared.upsert(record)
         let parsed = FrontmatterParser.split(record.content)
         baseRev          = record.rev
@@ -513,6 +520,7 @@ struct NoteDetailView: View {
         if fresh == content { return }
 
         if !hasUnsavedChanges {
+            logExternalReassign(source: "applyExternalChange", fresh: fresh)
             content        = fresh
             editingContent = fresh
         } else {
@@ -521,11 +529,50 @@ struct NoteDetailView: View {
         }
     }
 
+    /// [cursor-diag] editingContent を外部値で差し替える直前に、現行値との差分概要を記録する。
+    /// 「fresh == content は外れたが内容は実質同じ（末尾改行/改行コードだけ違う）」を炙り出す。
+    private func logExternalReassign(source: String, fresh: String) {
+        let cur = editingContent
+        guard fresh != cur else {
+            NSLog("[cursor-diag] \(source): reassign with IDENTICAL editingContent (redundant)")
+            return
+        }
+        let curLen = (cur as NSString).length
+        let newLen = (fresh as NSString).length
+        let trimmedEqual = cur.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == fresh.trimmingCharacters(in: .whitespacesAndNewlines)
+        let crlfDiff = cur.contains("\r\n") != fresh.contains("\r\n")
+        NSLog("[cursor-diag] \(source): editingContent reassign curLen=\(curLen) newLen=\(newLen) trimmedEqual=\(trimmedEqual) crlfDiff=\(crlfDiff)")
+    }
+
+    /// CouchDB の _rev "N-hash" から世代 N を取り出す。形式不正なら nil。
+    private func revGeneration(_ rev: String?) -> Int? {
+        guard let rev, let dash = rev.firstIndex(of: "-"),
+              let gen = Int(rev[rev.startIndex..<dash]) else { return nil }
+        return gen
+    }
+
+    /// 受信 rev が現在の基準 baseRev より「新しい世代」か。
+    /// 基準不明なら true（受け入れ）、受信不明なら false（無視）。
+    /// _changes に流れる自分の保存エコーや途中世代（rev 世代が基準以下）を弾くために使う。
+    /// 内容差で判定すると、古い世代でも本文が違って見えて適用→カーソルが末尾へ飛ぶため、
+    /// 世代の単調性で「本物の外部変更」だけを通す。
+    private func isGenuinelyNewer(_ incomingRev: String?) -> Bool {
+        guard let inc = revGeneration(incomingRev) else { return false }
+        guard let base = revGeneration(baseRev) else { return true }
+        return inc > base
+    }
+
     private func applyExternalChangeIfNeeded() async {
         // 保存進行中に届く変更はほぼ自分のエコー。誤バナーを避けて適用しない（本物は次回ポーリング／409 で拾う）。
         guard !saveInFlight else { return }
         // リスナーが既にストアを更新済みなので、そこから最新本文を読む
         guard let stored = await NoteStore.shared.editingNote(noteId) else { return }
+        // 自分の保存エコー／途中世代（rev 世代が基準以下）は無視する。詳細は applyExternalChange 参照。
+        guard isGenuinelyNewer(stored.rev) else {
+            NSLog("[cursor-diag] applyExternalChangeIfNeeded: ignored stale echo rev=\(stored.rev ?? "nil") base=\(baseRev ?? "nil")")
+            return
+        }
         baseRev          = stored.rev
         createdMs        = stored.ctime
         updatedMs        = stored.mtime
@@ -536,6 +583,7 @@ struct NoteDetailView: View {
         if fresh == content { return }
 
         if !hasUnsavedChanges {
+            logExternalReassign(source: "applyExternalChangeIfNeeded", fresh: fresh)
             content        = fresh
             editingContent = fresh
         } else {
