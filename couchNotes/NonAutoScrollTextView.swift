@@ -151,7 +151,6 @@ final class NonAutoScrollTextView: UITextView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        positionFooter()
 
         // 画像オーバーレイの再配置はテキスト or 幅が変わった時だけ（スクロール時は子ビューが
         // コンテンツと一緒に動くため再計算不要）。force フラグは画像読み込み後など、幅・本文が
@@ -167,6 +166,10 @@ final class NonAutoScrollTextView: UITextView {
             if widthChanged { EditorImageStore.shared.onUpdate?() }
             layoutImagePreviews()
         }
+
+        // フッターは画像配置の後に置く。段落下余白に描かれる画像の底より下へ回すため、
+        // 画像フレームが最新になった状態で参照する必要がある。
+        positionFooter()
     }
 
     // MARK: - 画像インラインプレビュー（オーバーレイ）
@@ -254,14 +257,18 @@ final class NonAutoScrollTextView: UITextView {
             verticalFittingPriority: .fittingSizeLevel
         ).height
 
-        // 本文の実際の終端位置の下にフッターを置く
+        // 本文の実際の終端位置の下にフッターを置く。ただし画像は段落下余白にオーバーレイ描画され、
+        // その分は usedRect に含まれないことがあるので、一番下の画像の底も基準に含めて重なりを防ぐ。
         layoutManager.ensureLayout(for: textContainer)
-        let textHeight = layoutManager.usedRect(for: textContainer).height
-        let y = textContainerInset.top + textHeight + footerGap
+        let textHeight   = layoutManager.usedRect(for: textContainer).height
+        let textBottom   = textContainerInset.top + textHeight
+        let imagesBottom = imagePreviews.values.map { $0.frame.maxY }.max() ?? 0
+        let y = max(textBottom, imagesBottom) + footerGap
         footer.frame = CGRect(x: textContainerInset.left, y: y, width: width, height: height)
 
-        // フッター分の下部余白を確保（差分がある時だけ更新して再レイアウトの無限ループを防ぐ）
-        let needed = footerGap + height + defaultBottomInset
+        // フッター（と画像のはみ出し）分の下部余白を確保。差分がある時だけ更新して再レイアウトの
+        // 無限ループを防ぐ。画像が本文終端より下へ伸びる場合はその分も余白に反映される。
+        let needed = (y + height) - textBottom + defaultBottomInset
         if abs(textContainerInset.bottom - needed) > 0.5 {
             textContainerInset.bottom = needed
         }

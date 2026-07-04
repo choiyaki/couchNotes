@@ -8,8 +8,21 @@ struct NoteListView: View {
     @AppStorage("noteList_layout") private var layoutRaw = NoteListLayout.detail.rawValue
     private var layout: NoteListLayout { NoteListLayout(rawValue: layoutRaw) ?? .detail }
 
-    // フォルダ絞り込み："" = すべて／"/" = ルート直下のみ／それ以外 = フォルダ名（配下を表示）
+    // フォルダ絞り込み（複数選択）：改行区切りで選択キーを保存する。
+    // 空 = すべて／"/" = ルート直下／それ以外 = フォルダ名（配下）。複数選択は OR で表示。
     @AppStorage("noteList_folderFilter") private var folderFilter = ""
+
+    /// 選択中のフォルダキー集合（空 = すべて表示）。
+    private var selectedFolders: Set<String> {
+        get { Set(folderFilter.split(separator: "\n").map(String.init)) }
+        nonmutating set { folderFilter = newValue.sorted().joined(separator: "\n") }
+    }
+
+    /// レイアウト保存キー。単一選択時はそのフォルダ、それ以外（なし／複数）は「すべて」("")。
+    private var layoutKey: String {
+        let sel = selectedFolders
+        return sel.count == 1 ? sel.first! : ""
+    }
 
     @State private var notes: [NoteItem] = []
     @State private var path: [String]    = []
@@ -20,6 +33,7 @@ struct NoteListView: View {
     @State private var noteToRename: NoteItem? = nil   // タイトル変更の対象
     @State private var renameText  = ""
     @State private var noteToMove:  NoteItem? = nil    // 単体フォルダ移動の対象
+    @State private var showFolderMenu = false          // フォルダ絞り込みポップアップの表示
 
     // 複数選択モード
     @State private var isSelecting   = false
@@ -48,12 +62,18 @@ struct NoteListView: View {
     /// 一覧に表示するノート。Enter で本文検索を確定したら本文一致、それ以外は全件（フォルダ絞り込み適用）。
     private var displayedNotes: [NoteItem] {
         let base = (searchCommitted && !trimmedSearch.isEmpty) ? bodyResults : notes
-        switch folderFilter {
-        case "":  return base
-        case "/": return base.filter { !$0.id.lowercased().contains("/") }   // ルート直下のみ
-        default:
-            let prefix = folderFilter.lowercased() + "/"
-            return base.filter { $0.id.lowercased().hasPrefix(prefix) }       // 配下（サブフォルダ含む）
+        let sel = selectedFolders
+        guard !sel.isEmpty else { return base }                               // すべて
+        return base.filter { note in
+            let lid = note.id.lowercased()
+            for key in sel {
+                if key == "/" {
+                    if !lid.contains("/") { return true }                     // ルート直下
+                } else if lid.hasPrefix(key.lowercased() + "/") {
+                    return true                                               // 配下（サブフォルダ含む）
+                }
+            }
+            return false
         }
     }
 
@@ -136,6 +156,8 @@ struct NoteListView: View {
                     }
                 }
             }
+            .overlay(alignment: .topLeading) { folderMenuOverlay }
+            .animation(.easeOut(duration: 0.12), value: showFolderMenu)
             .navigationTitle("ノート")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: String.self) { noteId in
@@ -238,7 +260,7 @@ struct NoteListView: View {
                             Button {
                                 let next = layout.next
                                 layoutRaw = next.rawValue
-                                saveLayout(next, for: folderFilter)
+                                saveLayout(next, for: layoutKey)
                             } label: {
                                 Image(systemName: layout.icon)
                             }
@@ -260,9 +282,9 @@ struct NoteListView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
-            .onChange(of: folderFilter) { _, newFolder in
-                // フォルダを切り替えたら、そのフォルダに保存された表示形式へ
-                layoutRaw = savedLayout(for: newFolder).rawValue
+            .onChange(of: folderFilter) { _, _ in
+                // 選択を切り替えたら、対応するキーに保存された表示形式へ
+                layoutRaw = savedLayout(for: layoutKey).rawValue
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -299,8 +321,8 @@ struct NoteListView: View {
             }
         }
         .task {
-            // 現在のフォルダに保存された表示形式を反映
-            layoutRaw = savedLayout(for: folderFilter).rawValue
+            // 現在の選択に保存された表示形式を反映
+            layoutRaw = savedLayout(for: layoutKey).rawValue
             // 起動: ストアを開く → 空なら全件インポート → 一覧をロード → リスナー開始
             await NoteStore.shared.bootstrap()
             if await NoteStore.shared.count() == 0 {
@@ -377,19 +399,89 @@ struct NoteListView: View {
         }
     }
 
-    /// フォルダ絞り込みメニュー（すべて／ルート／同期フォルダ）。選択中は塗りつぶしアイコン。
+    /// フォルダ絞り込みボタン。タップでドロップダウンを開閉（再タップで閉じる）。
+    /// 実体のパネルは `folderMenuOverlay`（自前の overlay）で描画する。UIKit の `.popover`
+    /// を使うと Mac Catalyst で表示トランジション中にクラッシュするため、SwiftUI だけで完結させる。
     var folderFilterMenu: some View {
-        Menu {
-            Picker("フォルダで絞り込み", selection: $folderFilter) {
-                Text("すべて").tag("")
-                Text("ルート").tag("/")
-                ForEach(SyncScope.normalizedFolders, id: \.self) { folder in
-                    Text(folder).tag(folder)
+        Button { showFolderMenu.toggle() } label: {
+            Image(systemName: selectedFolders.isEmpty ? "folder" : "folder.fill")
+        }
+    }
+
+    /// フォルダ絞り込みドロップダウン。ボタン直下（コンテンツ左上）に浮かせる。
+    /// 外側タップで閉じ、フォルダ行は開いたまま複数トグルできる。
+    @ViewBuilder
+    var folderMenuOverlay: some View {
+        if showFolderMenu {
+            ZStack(alignment: .topLeading) {
+                // 外側タップで閉じる透明バックドロップ
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .onTapGesture { showFolderMenu = false }
+                folderFilterList
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color(.systemBackground))
+                            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                    )
+                    .padding(.leading, 8)
+                    .padding(.top, 4)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    /// ドロップダウンの中身。フォルダは開いたまま複数トグル可。「すべて」は選択解除して閉じる。
+    private var folderFilterList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                selectedFolders = []
+                showFolderMenu = false
+            } label: {
+                filterRow(title: "すべて", checked: selectedFolders.isEmpty)
+            }
+            .buttonStyle(.plain)
+            Divider()
+            ScrollView {
+                VStack(spacing: 0) {
+                    folderToggleRow("ルート", key: "/")
+                    ForEach(SyncScope.normalizedFolders, id: \.self) { folder in
+                        folderToggleRow(folder, key: folder)
+                    }
                 }
             }
-        } label: {
-            Image(systemName: folderFilter.isEmpty ? "folder" : "folder.fill")
+            .frame(maxHeight: 320)
         }
+        .frame(minWidth: 220)
+        .padding(.vertical, 6)
+    }
+
+    /// フォルダ1件分のトグル行。タップしてもポップアップは閉じない。
+    @ViewBuilder
+    private func folderToggleRow(_ title: String, key: String) -> some View {
+        Button {
+            var sel = selectedFolders
+            if sel.contains(key) { sel.remove(key) } else { sel.insert(key) }
+            selectedFolders = sel
+        } label: {
+            filterRow(title: title, checked: selectedFolders.contains(key))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// チェックマーク付きの行レイアウト。
+    private func filterRow(title: String, checked: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark")
+                .font(.footnote)
+                .opacity(checked ? 1 : 0)
+            Text(title)
+            Spacer(minLength: 12)
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 
     /// 画面下部のフッター：左＝設定。
@@ -1101,7 +1193,8 @@ struct NoteRowCompactView: View {
 
 struct NoteCardView: View {
     let note: NoteItem
-    @State private var imageURL: URL? = nil
+    @State private var imageURL: URL? = nil       // このノートが画像を持つか（レイアウト判断用）
+    @State private var uiImage: UIImage? = nil     // 読み込み済みのサムネイル本体
 
     var body: some View {
         // Color で正方形を確定（横幅基準）し、内容をオーバーレイ。はみ出す画像は上下をクリップ。
@@ -1135,20 +1228,17 @@ struct NoteCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     // タイトル下の残り領域：画像があれば画像、なければ本文プレビュー
-                    if let imageURL {
+                    if imageURL != nil {
                         // Color.clear に画像を overlay することで、画像の本来サイズが
                         // 領域の高さを膨らませない（残り領域にフィットさせ、はみ出しはクリップ）。
                         Color.clear
                             .overlay {
-                                AsyncImage(url: imageURL) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image.resizable().aspectRatio(contentMode: .fill)
-                                    case .failure:
-                                        Color(.systemGray5)
-                                    default:
-                                        Color(.systemGray6)
-                                    }
+                                if let uiImage {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                } else {
+                                    Color(.systemGray6)   // 読み込み中／失敗時の枠
                                 }
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1169,12 +1259,21 @@ struct NoteCardView: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .task(id: note.id) {
             // 可視カードだけ本文を引いて先頭の画像URL（https）を検出する
-            if let urlString = await NoteStore.shared.firstImageURL(forID: note.id),
-               let url = URL(string: urlString) {
-                imageURL = url
-            } else {
+            guard let urlString = await NoteStore.shared.firstImageURL(forID: note.id),
+                  let url = URL(string: urlString) else {
                 imageURL = nil
+                uiImage = nil
+                return
             }
+            imageURL = url
+            // キャッシュ済みなら即描画。無ければキャッシュ付きローダで取得（再利用に強い）。
+            if let cached = ThumbnailLoader.shared.cached(url) {
+                uiImage = cached
+                return
+            }
+            uiImage = nil
+            let img = await ThumbnailLoader.shared.image(for: url)
+            if !Task.isCancelled { uiImage = img }
         }
     }
 }

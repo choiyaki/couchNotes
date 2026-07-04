@@ -131,17 +131,26 @@ class CouchDBClient {
         guard let resp = try? JSONDecoder().decode(FullFindResponse.self, from: data) else {
             throw CouchDBError.decodingError
         }
+        return try await assembleNotes(from: resp.docs, progress: progress)
+    }
 
-        let docs = resp.docs.filter {
+    /// ノート文書（メタ＋children）から本文を組み立てる。
+    /// 全ノートのチャンクIDを集約 → `_bulk_get` で一括取得 → 本文を連結する。
+    /// - progress: 0...1 のダウンロード進捗（チャンク取得ベース）
+    private func assembleNotes(
+        from rawDocs: [FullFindResponse.Doc],
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> [NoteRecord] {
+        let docs = rawDocs.filter {
             $0._id.hasSuffix(".md") && !$0._id.hasPrefix("h:") && $0.deleted != true
         }
 
-        // 2) 全チャンクIDを集約・重複排除（内容ハッシュなので自然に共有される）
+        // 1) 全チャンクIDを集約・重複排除（内容ハッシュなので自然に共有される）
         var chunkIDset = Set<String>()
         for d in docs { for c in (d.children ?? []) { chunkIDset.insert(c) } }
         let allChunkIDs = Array(chunkIDset)
 
-        // 3) _bulk_get で 1000 件ずつバッチ取得
+        // 2) _bulk_get で 1000 件ずつバッチ取得
         var chunkData: [String: String] = [:]
         let batchSize = 1000
         let total = max(allChunkIDs.count, 1)
@@ -157,7 +166,7 @@ class CouchDBClient {
             index = end
         }
 
-        // 4) 本文を組み立て
+        // 3) 本文を組み立て
         return docs.map { d in
             let content = (d.children ?? []).map { chunkData[$0] ?? "" }.joined()
             return NoteRecord(
@@ -168,11 +177,36 @@ class CouchDBClient {
         }
     }
 
-    /// 指定 id 群のノートを本文込みで一括取得する（_changes の差分取り込み用）。
-    /// 削除（トゥームストーン）やルート外などは結果に含まれない（削除は _changes の deleted:true で判定）。
+    /// 指定 id 群のノートを本文込みで一括取得する（_changes の差分取り込み・リコンシリエーション用）。
+    /// id が既知なので `_find`（Mango フルスキャン）ではなく `_all_docs` の keys 取得で主キー索引を直に引く。
+    /// 削除（トゥームストーン）や存在しない id は doc が返らないため結果に含まれない（削除は deleted:true で判定）。
     func fetchNoteRecords(ids: [String]) async throws -> [NoteRecord] {
         guard !ids.isEmpty else { return [] }
-        return try await fetchNotes(selector: ["type": ["$eq": "plain"], "_id": ["$in": ids]])
+        let docs = try await fetchNoteDocsByKeys(ids: ids)
+        return try await assembleNotes(from: docs)
+    }
+
+    /// 指定 id 群のノート文書（メタ＋children）を `_all_docs?include_docs=true` の keys 取得でまとめて引く。
+    /// 主キー索引で直接引くため、件数に依らず高速。削除・不在の id は doc が nil のため除外される。
+    private func fetchNoteDocsByKeys(ids: [String]) async throws -> [FullFindResponse.Doc] {
+        var out: [FullFindResponse.Doc] = []
+        let batchSize = 1000
+        var index = 0
+        while index < ids.count {
+            let end  = min(index + batchSize, ids.count)
+            let body = try JSONSerialization.data(withJSONObject: ["keys": Array(ids[index..<end])])
+            let (data, code) = try await httpRequest(path: "_all_docs", method: "POST",
+                                                     body: body, query: "include_docs=true")
+            if code != 200 {
+                throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+            }
+            guard let resp = try? JSONDecoder().decode(AllDocsFullResponse.self, from: data) else {
+                throw CouchDBError.decodingError
+            }
+            for row in resp.rows { if let doc = row.doc { out.append(doc) } }
+            index = end
+        }
+        return out
     }
 
     /// サーバ上に「生存している」ノート（.md・同期スコープ内）の id→rev マップを返す。
@@ -732,11 +766,14 @@ class CouchDBClient {
             req.setValue(value, forHTTPHeaderField: key)
         }
 
+        let timer = SyncTimer()
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            syncLog.debug("HTTP \(method, privacy: .public) \(path, privacy: .public) → \(code) \(data.count)B \(timer.elapsedMs)ms")
             return (data, code)
         } catch {
+            syncLog.debug("HTTP \(method, privacy: .public) \(path, privacy: .public) → ERROR \(timer.elapsedMs)ms \(error.localizedDescription, privacy: .public)")
             throw CouchDBError.networkError(error)
         }
     }
@@ -833,6 +870,13 @@ private struct AllDocsRevResponse: Decodable {
         struct Value: Decodable { let rev: String? }
         let value: Value?
     }
+    let rows: [Row]
+}
+
+/// _all_docs?include_docs=true の keys 取得用（ノート文書を直接引く）。
+/// 削除・不在の行は doc が無いため nil としてデコードされ、呼び出し側で除外される。
+private struct AllDocsFullResponse: Decodable {
+    struct Row: Decodable { let doc: FullFindResponse.Doc? }
     let rows: [Row]
 }
 

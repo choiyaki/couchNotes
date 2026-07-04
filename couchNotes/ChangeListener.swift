@@ -29,6 +29,10 @@ class ChangesListener: ObservableObject {
 
     @Published var isConnected = false
 
+    /// 全件リコンシリエーション（安全網）の定期実行間隔。
+    /// 通常起動はこの間 last_seq からの差分取得で追従し、全件突き合わせは走らせない。
+    private static let reconcileInterval: TimeInterval = 24 * 3600
+
     private var listenerTask: Task<Void, Never>?
 
     private init() {
@@ -66,18 +70,37 @@ class ChangesListener: ObservableObject {
     private func listenLoop() async {
         // 前回終了時の last_seq から再開（無ければ現在から）。
         // これでアプリ停止中に起きた変更も取りこぼさない。
-        var since = await NoteStore.shared.syncValue("last_seq") ?? "now"
+        let storedSeq = await NoteStore.shared.syncValue("last_seq")
+        var since = storedSeq ?? "now"
 
-        // 起動／foreground 復帰／再起動の都度、まず未同期(dirty)を押し上げ→サーバと突き合わせる。
+        // まず未同期(dirty)を押し上げる（pull より前に必要・軽量）。
+        let flushTimer = SyncTimer()
         await SyncEngine.shared.flush()
-        await reconcile()
+        syncLog.info("startup flush 完了 \(flushTimer.elapsedMs)ms")
+
+        // 全件リコンシリエーション（安全網）は必要時のみ実施（レバー1）。
+        // 通常起動は下の longpoll が last_seq からの差分で追従するため走らせない。
+        // 実施する場合も longpoll を待たせないよう背後で流す（レバー3）。
+        if await shouldFullReconcile(storedSeq: storedSeq) {
+            Task { @MainActor in
+                let t = SyncTimer()
+                if await self.reconcile() { await self.stampReconcile() }
+                syncLog.info("startup reconcile（背景）完了 \(t.elapsedMs)ms")
+            }
+        } else {
+            syncLog.info("startup reconcile スキップ（last_seq から差分取得）")
+        }
         var recovered = false   // listener がエラーから復帰したら押し上げ＋整合し直す
 
         while !Task.isCancelled {
             isConnected = true
             do {
                 let response = try await fetchChanges(since: since)
-                if recovered { await SyncEngine.shared.flush(); await reconcile(); recovered = false }
+                if recovered {
+                    await SyncEngine.shared.flush()
+                    if await reconcile() { await stampReconcile() }
+                    recovered = false
+                }
 
                 // この応答バッチ中は同期範囲を一度だけ評価
                 let scopeFolders = SyncScope.normalizedFolders
@@ -148,15 +171,19 @@ class ChangesListener: ObservableObject {
 
     /// サーバ（正本）とローカルの存在・世代を突き合わせて収束させる。
     /// _changes の取りこぼし（listener 断・seq 無効・長期オフライン）に対する最終保証。
-    /// 失敗時は何もしない（次のトリガーで再試行）。
-    func reconcile() async {
+    /// - Returns: サーバ側の一覧取得に成功したか（成功時のみ「実施済み」として時刻を刻める）。
+    @discardableResult
+    func reconcile() async -> Bool {
         let folders = SyncScope.normalizedFolders
         let serverRevs: [String: String]
+        let liveRevsTimer = SyncTimer()
         do {
             serverRevs = try await CouchDBClient.shared.liveNoteRevs(folders: folders)
         } catch {
-            return
+            syncLog.info("reconcile liveNoteRevs 失敗 \(liveRevsTimer.elapsedMs)ms")
+            return false
         }
+        syncLog.info("reconcile liveNoteRevs 完了 \(liveRevsTimer.elapsedMs)ms / スコープ内ノート \(serverRevs.count)件")
 
         let local = await NoteStore.shared.idRevMap()
         // 未同期ノートは保護：dirty（未送信編集）も pendingDelete（削除予定）も触らない。
@@ -179,9 +206,12 @@ class ChangesListener: ObservableObject {
         let fetchIDs = serverRevs.compactMap { (id, srev) in
             (local[id] == srev || protected.contains(id)) ? nil : id
         }
+        syncLog.info("reconcile 取得対象 \(fetchIDs.count)件（差分/新規）")
+        let fetchTimer = SyncTimer()
         if !fetchIDs.isEmpty,
            let records = try? await CouchDBClient.shared.fetchNoteRecords(ids: fetchIDs),
            !records.isEmpty {
+            syncLog.info("reconcile fetchNoteRecords 完了 \(fetchTimer.elapsedMs)ms / \(records.count)件")
             await NoteStore.shared.upsertMany(records)
             for r in records {
                 NotificationCenter.default.post(
@@ -194,6 +224,22 @@ class ChangesListener: ObservableObject {
         if didChange {
             NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
         }
+        return true
+    }
+
+    /// 全件リコンシリエーションの実施時刻を記録する（定期実行の判定に使う）。
+    private func stampReconcile() async {
+        await NoteStore.shared.setSyncValue("last_reconcile", String(Int(Date().timeIntervalSince1970)))
+    }
+
+    /// 全件リコンシリエーション（安全網）を今回実施すべきか。
+    /// 初回（last_seq 未保存）は必須。以降は前回実施から一定時間経過で定期実行する。
+    /// 通常起動は longpoll が last_seq からの差分で追従するため実施しない。
+    private func shouldFullReconcile(storedSeq: String?) async -> Bool {
+        guard let storedSeq, storedSeq != "now", !storedSeq.isEmpty else { return true }
+        guard let raw = await NoteStore.shared.syncValue("last_reconcile"),
+              let last = Double(raw) else { return true }
+        return Date().timeIntervalSince1970 - last >= Self.reconcileInterval
     }
 
     // MARK: - longpoll リクエスト
