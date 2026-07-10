@@ -48,7 +48,7 @@ struct NoteListView: View {
     @State private var searchCommitted = false         // Enter で本文検索を確定したか
     @State private var searchTask: Task<Void, Never>? = nil
     @State private var showNewNote   = false
-    @FocusState private var searchFocused: Bool
+    @State private var searchFocused = false
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1010,7 +1010,7 @@ struct NoteListView: View {
 /// 親へは「デバウンス後・Enter確定・クリア時」だけ伝える。これで大きな一覧の作り直しが止まる。
 private struct SearchBar: View {
     @Binding var text: String                  // 親 searchText（派生値の参照元。確定/デバウンス/クリアで同期）
-    @FocusState.Binding var focused: Bool
+    @Binding var focused: Bool
     let canCreate: Bool
     let onQueryChange: (String) -> Void        // デバウンス後（タイトル候補の更新）
     let onSubmit: (String) -> Void             // Enter（本文検索の確定）
@@ -1019,7 +1019,6 @@ private struct SearchBar: View {
 
     @State private var live = ""               // 入力中の文字はここで完結
     @State private var debounce: Task<Void, Never>? = nil
-    @State private var syncingFromParent = false   // 親→live の同期時、検索トリガを誤発火させない
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1027,15 +1026,18 @@ private struct SearchBar: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
                     .font(.subheadline)
-                TextField("ノートを検索", text: $live)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .focused($focused)
-                    .submitLabel(.search)
-                    .onSubmit {
+                // SwiftUI TextField は Mac Catalyst で「変換中に再描画されると未確定文字を
+                // 再挿入する」不具合があるため、IME をネイティブに扱う UITextField を使う。
+                IMESafeTextField(
+                    text: $live,
+                    focused: $focused,
+                    placeholder: "ノートを検索",
+                    onCommittedChange: { q in scheduleSuggest(q) },   // 変換確定時のみサジェスト更新
+                    onSubmit: { q in
                         debounce?.cancel()
-                        onSubmit(live)
+                        onSubmit(q)
                     }
+                )
                 if !live.isEmpty {
                     Button {
                         debounce?.cancel()
@@ -1066,29 +1068,111 @@ private struct SearchBar: View {
         .padding(.top, 6)
         .padding(.bottom, 6)
         .animation(.easeInOut(duration: 0.15), value: canCreate)
-        .onChange(of: live) { _, q in
-            if syncingFromParent { syncingFromParent = false; return }
-            debounce?.cancel()
-            debounce = Task {
-                try? await Task.sleep(for: .milliseconds(150))
-                guard !Task.isCancelled else { return }
-                onQueryChange(q)
-            }
-        }
         .onChange(of: text) { _, newValue in
             // 親が外部から検索語を変えた（詳細画面からの確定遷移）→ フィールドへ反映（検索は起こさない）
-            if newValue != live {
-                syncingFromParent = true
-                live = newValue
-            }
+            if newValue != live { live = newValue }
         }
         .onAppear {
-            if text != live {           // 確定遷移などで既に語が入っている場合に表示
-                syncingFromParent = true
-                live = text
-            }
+            if text != live { live = text }   // 確定遷移などで既に語が入っている場合に表示
             // 検索枠が出た瞬間にフォーカス（マウント直後に確実に当てるため async）
             DispatchQueue.main.async { focused = true }
+        }
+    }
+
+    /// 変換確定した語で 150ms デバウンスしてタイトル候補を更新する。
+    private func scheduleSuggest(_ q: String) {
+        debounce?.cancel()
+        debounce = Task {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            onQueryChange(q)
+        }
+    }
+}
+
+/// IME（未確定文字）を安全に扱う検索用テキストフィールド。
+/// SwiftUI TextField は Mac Catalyst で変換中の再描画により未確定文字を二重挿入するため、
+/// UITextField を薄くラップし、①変換中は SwiftUI 側からテキストを書き換えない
+/// ②変換が確定（markedTextRange == nil）した時だけ値を親へ伝える、で回避する。
+private struct IMESafeTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var focused: Bool
+    let placeholder: String
+    let onCommittedChange: (String) -> Void
+    let onSubmit: (String) -> Void
+
+    func makeUIView(context: Context) -> UITextField {
+        let tf = UITextField()
+        tf.placeholder = placeholder
+        tf.borderStyle = .none
+        tf.font = .preferredFont(forTextStyle: .body)
+        tf.autocorrectionType = .no
+        tf.autocapitalizationType = .none
+        tf.smartDashesType = .no
+        tf.smartQuotesType = .no
+        tf.returnKeyType = .search
+        tf.clearButtonMode = .never          // × は SwiftUI 側の自前ボタンで出す
+        tf.delegate = context.coordinator
+        tf.addTarget(context.coordinator,
+                     action: #selector(Coordinator.editingChanged(_:)),
+                     for: .editingChanged)
+        // HStack 内で横に伸び、隣のボタンに押し負けないように。縦は本来の高さで固定。
+        tf.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        tf.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        tf.setContentHuggingPriority(.required, for: .vertical)
+        tf.setContentCompressionResistancePriority(.required, for: .vertical)
+        // 検索を開いた瞬間にフォーカス（表示直後の updateUIView だけだと Catalyst で
+        // タイミングが合わないため、生成時にも確実に当てる）。
+        DispatchQueue.main.async { [weak tf] in tf?.becomeFirstResponder() }
+        return tf
+    }
+
+    /// 縦は UITextField 本来の高さに固定（提案された高さいっぱいに伸びて巨大化するのを防ぐ）。
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextField, context: Context) -> CGSize? {
+        let intrinsic = uiView.intrinsicContentSize
+        return CGSize(width: proposal.width ?? intrinsic.width, height: intrinsic.height)
+    }
+
+    func updateUIView(_ uiView: UITextField, context: Context) {
+        // 変換中（未確定文字がある）は絶対に text を書き換えない＝IME 破壊を防ぐ肝。
+        if uiView.markedTextRange == nil, uiView.text != text {
+            uiView.text = text
+        }
+        // フォーカス制御（更新中の firstResponder 変更を避けるため次のループで）
+        DispatchQueue.main.async {
+            if focused, !uiView.isFirstResponder {
+                uiView.becomeFirstResponder()
+            } else if !focused, uiView.isFirstResponder {
+                uiView.resignFirstResponder()
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        let parent: IMESafeTextField
+        init(_ parent: IMESafeTextField) { self.parent = parent }
+
+        @objc func editingChanged(_ tf: UITextField) {
+            // 変換中（未確定文字あり）は SwiftUI 側を一切触らない＝再描画を起こさない。
+            guard tf.markedTextRange == nil else { return }
+            let value = tf.text ?? ""
+            parent.text = value
+            parent.onCommittedChange(value)
+        }
+
+        func textFieldShouldReturn(_ tf: UITextField) -> Bool {
+            parent.onSubmit(tf.text ?? "")
+            return true
+        }
+
+        func textFieldDidBeginEditing(_ tf: UITextField) {
+            if !parent.focused { parent.focused = true }
+        }
+
+        func textFieldDidEndEditing(_ tf: UITextField) {
+            if parent.focused { parent.focused = false }
         }
     }
 }

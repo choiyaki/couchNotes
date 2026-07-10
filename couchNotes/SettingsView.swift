@@ -143,13 +143,17 @@ struct ConnectionSettingsView: View {
 // MARK: - 同期フォルダ
 
 struct SyncFolderSettingsView: View {
-    @State private var syncFolders: [String] = []
+    /// CouchDB 由来のトップレベルフォルダ（大小保持）
+    @State private var serverFolders: [String] = []
+    /// 同期オン状態のフォルダ（正規化済み）。UI 即応のためミラー保持。
+    @State private var enabled: [String] = []
     @State private var newFolder = ""
+    @State private var isLoading = true
 
     var body: some View {
         Form {
             Section(
-                footer: Text("ルート直下のノートは常に同期されます。指定したフォルダ配下も同期対象になります。追加すると不足分を取得し、削除するとローカルから除外します。フォルダ名は大文字・小文字を区別します（Obsidian のフォルダ名に合わせてください）。")
+                footer: Text("ルート直下のノートは常に同期されます。トグルをオンにしたフォルダ配下も同期対象になります（不足分を取得し、オフでローカルから除外）。新しいフォルダは下の入力欄から作成できます。")
             ) {
                 HStack {
                     Image(systemName: "folder").foregroundStyle(.secondary)
@@ -157,46 +161,89 @@ struct SyncFolderSettingsView: View {
                     Spacer()
                     Text("常に同期").font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(syncFolders, id: \.self) { folder in
+
+                if isLoading {
                     HStack {
-                        Image(systemName: "folder").foregroundStyle(.secondary)
-                        Text(folder)
+                        ProgressView()
+                        Text("フォルダを読み込み中…").foregroundStyle(.secondary)
                     }
                 }
-                .onDelete(perform: deleteFolders)
+
+                ForEach(mergedFolders, id: \.self) { folder in
+                    Toggle(isOn: binding(for: folder)) {
+                        Label(folder, systemImage: "folder")
+                    }
+                }
+            }
+
+            Section(footer: Text("フォルダはノートを作成した時点で実際に作られます。ここで作成した名前はフォルダの選択肢に加わり、同期オンになります。")) {
                 HStack {
-                    TextField("フォルダ名を追加", text: $newFolder)
+                    TextField("新しいフォルダ名", text: $newFolder)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .onSubmit(addFolder)
-                    Button("追加", action: addFolder)
+                        .onSubmit(createFolder)
+                    Button("作成", action: createFolder)
                         .disabled(SyncScope.normalize(newFolder).isEmpty)
                 }
             }
         }
         .navigationTitle("同期フォルダ")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { syncFolders = SyncScope.normalizedFolders }
+        .task { await load() }
     }
 
-    private func addFolder() {
-        guard let added = SyncScope.add(newFolder) else { return }
-        syncFolders = SyncScope.normalizedFolders
-        newFolder = ""
+    /// サーバー由来 ∪ 同期オンのフォルダを小文字重複排除・ソートしたマージ一覧
+    private var mergedFolders: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for f in serverFolders + enabled {
+            guard seen.insert(f.lowercased()).inserted else { continue }
+            result.append(f)
+        }
+        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func isEnabled(_ folder: String) -> Bool {
+        enabled.contains { $0.lowercased() == folder.lowercased() }
+    }
+
+    private func binding(for folder: String) -> Binding<Bool> {
+        Binding(
+            get: { isEnabled(folder) },
+            set: { on in on ? enable(folder) : disable(folder) }
+        )
+    }
+
+    private func load() async {
+        enabled = SyncScope.normalizedFolders
+        defer { isLoading = false }
+        if let folders = try? await CouchDBClient.shared.fetchTopLevelFolders() {
+            serverFolders = folders
+        }
+    }
+
+    private func enable(_ folder: String) {
+        guard let added = SyncScope.add(folder) else { return }
+        enabled = SyncScope.normalizedFolders
         NotificationCenter.default.post(
             name: .syncScopeDidChange, object: nil,
             userInfo: ["added": [added], "removed": [String]()]
         )
     }
 
-    private func deleteFolders(at offsets: IndexSet) {
-        let removed = offsets.map { syncFolders[$0] }
-        for folder in removed { SyncScope.remove(folder) }
-        syncFolders = SyncScope.normalizedFolders
+    private func disable(_ folder: String) {
+        guard SyncScope.remove(folder) else { return }
+        enabled = SyncScope.normalizedFolders
         NotificationCenter.default.post(
             name: .syncScopeDidChange, object: nil,
-            userInfo: ["added": [String](), "removed": removed]
+            userInfo: ["added": [String](), "removed": [folder]]
         )
+    }
+
+    private func createFolder() {
+        let name = newFolder
+        newFolder = ""
+        enable(name)
     }
 }
 

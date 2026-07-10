@@ -58,6 +58,23 @@ class CouchDBClient {
             .sorted { ($0.mtime ?? 0) > ($1.mtime ?? 0) }
     }
 
+    /// サーバー上に実在するトップレベルフォルダ名（大小保持）を返す。
+    /// ノート文書のメタ行のみ（`type=plain`・`fields` 限定）を1回スキャンし、本文チャンクは転送しない。
+    /// フォルダ表現は暗黙（ノートの path 接頭辞のみ）なので、path からトップレベル区分を抽出・重複排除する。
+    func fetchTopLevelFolders() async throws -> [String] {
+        let notes = try await fetchAllNoteIDs()
+        var seen = Set<String>()          // 重複排除は小文字キー
+        var result: [String] = []
+        for n in notes {
+            let p = n.path ?? n.id        // path 優先＝Obsidian のケースを保持
+            guard let slash = p.firstIndex(of: "/") else { continue }  // ルート直下は対象外
+            let top = SyncScope.normalize(String(p[..<slash]))
+            guard !top.isEmpty, seen.insert(top.lowercased()).inserted else { continue }
+            result.append(top)
+        }
+        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
     /// ノート本文を取得
     func fetchNoteContent(id: String) async throws -> String {
         guard let note = try await fetchNote(id: id) else { return "" }

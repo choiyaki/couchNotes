@@ -59,16 +59,27 @@ final class NonAutoScrollTextView: UITextView {
     var onShortcutOutdent:    (() -> Void)?   // cmd+option+←
 
     override var keyCommands: [UIKeyCommand]? {
-        // 単発で押すもの（cmd+V / cmd+Enter）だけ UIKeyCommand で扱う。
-        // 押しっぱなしで連続発火しては困る移動・インデント・Tab は pressesBegan 側で扱う。
-        [
+        // 単発で押すもの（cmd+V / cmd+Enter）と、Tab / Shift+Tab によるインデントは
+        // UIKeyCommand で扱う。Mac Catalyst では Tab がシステムのフォーカス移動に先取り
+        // され pressesBegan に届かないため、wantsPriorityOverSystemBehavior で優先させる。
+        // UIKeyCommand は押しっぱなしでも単発なのでオートリピートの心配もない。
+        // 押しっぱなしで連続発火しては困る移動・cmd+option インデントは pressesBegan 側で扱う。
+        let tab = UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(scIndent))
+        let shiftTab = UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(scOutdent))
+        tab.wantsPriorityOverSystemBehavior = true
+        shiftTab.wantsPriorityOverSystemBehavior = true
+        return [
             UIKeyCommand(input: "v",  modifierFlags: .command, action: #selector(scPaste)),
             UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(scListToggle)),
+            tab,
+            shiftTab,
         ]
     }
 
     @objc private func scPaste()      { onShortcutPaste?() }
     @objc private func scListToggle() { onShortcutListToggle?() }
+    @objc private func scIndent()     { onShortcutIndent?() }
+    @objc private func scOutdent()    { onShortcutOutdent?() }
 
     // 編集メニューの「ペースト」。画像なら Gyazo アップロード、テキストなら通常挿入へ
     // ハンドラ側で振り分ける。未配線なら標準動作にフォールバック。
@@ -125,8 +136,7 @@ final class NonAutoScrollTextView: UITextView {
         else if kc == .keyboardDownArrow,  mods == cmdOpt { action = onShortcutMoveDown }
         else if kc == .keyboardRightArrow, mods == cmdOpt { action = onShortcutIndent }
         else if kc == .keyboardLeftArrow,  mods == cmdOpt { action = onShortcutOutdent }
-        else if kc == .keyboardTab,        mods.isEmpty   { action = onShortcutIndent }   // Tab
-        else if kc == .keyboardTab,        mods == .shift { action = onShortcutOutdent }  // Shift+Tab
+        // Tab / Shift+Tab は keyCommands 側（UIKeyCommand）で扱う。
 
         guard let action else { return false }
         if activeShortcutKeyCodes.contains(kc) { return true }   // リピートは消費するが実行しない
