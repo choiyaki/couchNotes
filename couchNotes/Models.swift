@@ -59,12 +59,14 @@ struct NoteItem: Identifiable {
     let mtime: Double?    // CouchDB の mtime（ミリ秒）
     let path: String?     // 元のファイルパス（大文字小文字を保持）
     let preview: String?  // 一覧用の本文プレビュー（SQLite から読み出し済み）
+    let pin: Int?         // ピン留め番号（フロントマターの pin: N。小さいほど上位）
 
-    init(id: String, mtime: Double? = nil, path: String? = nil, preview: String? = nil) {
+    init(id: String, mtime: Double? = nil, path: String? = nil, preview: String? = nil, pin: Int? = nil) {
         self.id      = id
         self.mtime   = mtime
         self.path    = path
         self.preview = preview
+        self.pin     = pin
     }
 
     /// 最終更新日時（Date型）

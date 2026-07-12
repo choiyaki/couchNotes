@@ -57,6 +57,8 @@ actor NoteStore {
         exec("ALTER TABLE notes ADD COLUMN frontmatter_extra TEXT;")
         exec("ALTER TABLE notes ADD COLUMN rev TEXT;")   // リコンシリエーションの世代比較用
         exec("ALTER TABLE notes ADD COLUMN sync_state TEXT;")   // clean / dirty / pendingDelete（NULL=clean扱い）
+        exec("ALTER TABLE notes ADD COLUMN pin INTEGER;")   // ピン留め番号（frontmatter_extra の pin: N をキャッシュ）
+        exec("CREATE INDEX IF NOT EXISTS idx_notes_pin ON notes(pin);")
         exec("""
         CREATE TABLE IF NOT EXISTS sync_state (
             key   TEXT PRIMARY KEY,
@@ -134,7 +136,7 @@ actor NoteStore {
     func listItems() -> [NoteItem] {
         // プレビューは先頭 400 文字だけ取り出し、表示側でトリム＆切り詰める。
         let sql = """
-        SELECT id, path, mtime, substr(content, 1, 400)
+        SELECT id, path, mtime, substr(content, 1, 400), pin
         FROM notes WHERE deleted = 0
         ORDER BY mtime DESC;
         """
@@ -149,9 +151,32 @@ actor NoteStore {
             let raw   = columnText(stmt, 3) ?? ""
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let preview = trimmed.isEmpty ? nil : String(trimmed.prefix(300))
-            items.append(NoteItem(id: id, mtime: mtime, path: path, preview: preview))
+            let pin   = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, 4))
+            items.append(NoteItem(id: id, mtime: mtime, path: path, preview: preview, pin: pin))
         }
         return items
+    }
+
+    /// 現在ピン留めされている最大の番号（無ければ nil）。次のピン番号採番に使う。
+    func maxPin() -> Int? {
+        guard let stmt = prepare("SELECT MAX(pin) FROM notes WHERE deleted = 0;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// ピン留め中のノートを番号昇順で列挙する（繰り上げ処理用）。
+    func pinnedIDs() -> [(id: String, pin: Int)] {
+        guard let stmt = prepare("SELECT id, pin FROM notes WHERE deleted = 0 AND pin IS NOT NULL ORDER BY pin ASC;") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out: [(id: String, pin: Int)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id  = columnText(stmt, 0) ?? ""
+            let pin = Int(sqlite3_column_int64(stmt, 1))
+            out.append((id: id, pin: pin))
+        }
+        return out
     }
 
     /// 本文（フロントマター除去済み）を取得（存在しなければ nil）。
@@ -590,11 +615,12 @@ actor NoteStore {
         let parsed = FrontmatterParser.split(r.content)
         let body   = parsed.body
         let extra  = parsed.extraLines.joined(separator: "\n")
+        let pin    = FrontmatterParser.extractPin(from: parsed.extraLines)
 
         // rev は新しい値があればそれを採用し、無ければ（ローカル書き込み等）既存値を保持する。
         let sql = """
-        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, rev, sync_state, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, rev, sync_state, pin, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(id) DO UPDATE SET
             path = excluded.path,
             mtime = excluded.mtime,
@@ -603,6 +629,7 @@ actor NoteStore {
             frontmatter_extra = excluded.frontmatter_extra,
             rev = COALESCE(excluded.rev, rev),
             sync_state = excluded.sync_state,
+            pin = excluded.pin,
             deleted = 0;
         """
         guard let stmt = prepare(sql) else { return }
@@ -616,6 +643,7 @@ actor NoteStore {
         sqlite3_bind_text(stmt, 7, extra, -1, SQLITE_TRANSIENT)
         bindOptionalText(stmt, 8, r.rev)
         sqlite3_bind_text(stmt, 9, state, -1, SQLITE_TRANSIENT)
+        if let pin { sqlite3_bind_int64(stmt, 10, Int64(pin)) } else { sqlite3_bind_null(stmt, 10) }
         sqlite3_step(stmt)
 
         // 全文検索・バックリンクは本文のみで索引

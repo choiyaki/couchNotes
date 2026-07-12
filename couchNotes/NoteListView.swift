@@ -25,6 +25,7 @@ struct NoteListView: View {
     }
 
     @State private var notes: [NoteItem] = []
+    @State private var randomPicks: [NoteItem] = []   // 一覧先頭「今日のノート」
     @State private var path: [String]    = []
     @State private var errorMessage: String? = nil
     @State private var showSettings      = false
@@ -60,21 +61,32 @@ struct NoteListView: View {
     }
 
     /// 一覧に表示するノート。Enter で本文検索を確定したら本文一致、それ以外は全件（フォルダ絞り込み適用）。
+    /// 本文検索でないときは、絞り込み後の集合内でピン留め（番号昇順）を先頭に並べ替える。
     private var displayedNotes: [NoteItem] {
-        let base = (searchCommitted && !trimmedSearch.isEmpty) ? bodyResults : notes
+        let isBodySearch = searchCommitted && !trimmedSearch.isEmpty
+        let base = isBodySearch ? bodyResults : notes
         let sel = selectedFolders
-        guard !sel.isEmpty else { return base }                               // すべて
-        return base.filter { note in
-            let lid = note.id.lowercased()
-            for key in sel {
-                if key == "/" {
-                    if !lid.contains("/") { return true }                     // ルート直下
-                } else if lid.hasPrefix(key.lowercased() + "/") {
-                    return true                                               // 配下（サブフォルダ含む）
+        let filtered: [NoteItem]
+        if sel.isEmpty {
+            filtered = base                                                   // すべて
+        } else {
+            filtered = base.filter { note in
+                let lid = note.id.lowercased()
+                for key in sel {
+                    if key == "/" {
+                        if !lid.contains("/") { return true }                 // ルート直下
+                    } else if lid.hasPrefix(key.lowercased() + "/") {
+                        return true                                           // 配下（サブフォルダ含む）
+                    }
                 }
+                return false
             }
-            return false
         }
+        guard !isBodySearch else { return filtered }
+        let pinned  = filtered.filter { $0.pin != nil }.sorted { $0.pin! < $1.pin! }
+        guard !pinned.isEmpty else { return filtered }
+        let rest = filtered.filter { $0.pin == nil }
+        return pinned + rest
     }
 
     /// 同じタイトルのノートが無ければ作成可能（「＋」を有効化）。空入力時は不可。
@@ -118,6 +130,7 @@ struct NoteListView: View {
                 } else {
                   VStack(spacing: 0) {
                     if showSearch { searchBar }
+                    randomSection
                     countLabel
                     noteContent
                       .overlay(alignment: .top) {
@@ -287,7 +300,10 @@ struct NoteListView: View {
                 layoutRaw = savedLayout(for: layoutKey).rawValue
             }
         }
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $showSettings, onDismiss: {
+            // 除外フォルダ設定が変わっている可能性があるので今日のピックを再解決
+            randomPicks = RandomNotes.todaysPicks(from: notes)
+        }) {
             SettingsView()
         }
         .sheet(isPresented: $showNewNote) {
@@ -566,6 +582,12 @@ struct NoteListView: View {
     /// 一覧を SQLite から読み込む（高速・通信なし）
     private func loadNotes() async {
         notes = await NoteStore.shared.listItems()
+        randomPicks = RandomNotes.todaysPicks(from: notes)
+    }
+
+    /// 「今日のノート」の1枠を引き直す。
+    private func rerollRandom(at index: Int) {
+        randomPicks = RandomNotes.reroll(randomPicks, at: index, from: notes)
     }
 
     /// 入力中：タイトル一致の候補（ドロップダウン）を更新する。
@@ -626,6 +648,60 @@ struct NoteListView: View {
     }
 
     // MARK: - 一覧本体（表示モード別）
+
+    /// 一覧先頭の「今日のノート」。通常一覧のとき（検索・絞り込みしていない）だけ表示。
+    @ViewBuilder
+    var randomSection: some View {
+        if !showSearch, selectedFolders.isEmpty, !randomPicks.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("今日のノート")
+                    .font(.caption).fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    ForEach(Array(randomPicks.enumerated()), id: \.element.id) { idx, note in
+                        randomCard(note, index: idx)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+        }
+    }
+
+    /// 「今日のノート」1枚。タップで開く、右上のシャッフルでその枠だけ引き直す。
+    private func randomCard(_ note: NoteItem, index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 4) {
+                Text(note.shortTitle)
+                    .font(.subheadline).fontWeight(.medium)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    rerollRandom(at: index)
+                } label: {
+                    Image(systemName: "shuffle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if let d = note.lastModified {
+                Text(d, style: .date)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .onTapGesture { navigate { path.append(note.id) } }
+    }
 
     /// 選択中の表示モードに応じた一覧本体。
     @ViewBuilder
@@ -737,6 +813,15 @@ struct NoteListView: View {
 
     @ViewBuilder
     private func contextMenuButtons(for note: NoteItem) -> some View {
+        Button {
+            Task { await togglePin(note) }
+        } label: {
+            if note.pin != nil {
+                Label("ピン留めを外す", systemImage: "pin.slash")
+            } else {
+                Label("ピン留め", systemImage: "pin")
+            }
+        }
         Button {
             renameText = note.shortTitle
             noteToRename = note
@@ -880,6 +965,16 @@ struct NoteListView: View {
             errorMessage = error.localizedDescription
         }
         noteToRename = nil
+    }
+
+    /// ピン留め／解除の切り替え（番号の採番・繰り上げは PinService に委ねる）。
+    private func togglePin(_ note: NoteItem) async {
+        if note.pin != nil {
+            await PinService.unpin(note.id)
+        } else {
+            await PinService.pin(note.id)
+        }
+        await loadNotes()
     }
 
     /// ノートを削除。まずローカルで削除予定（pendingDelete）にして一覧から隠し、
@@ -1212,6 +1307,11 @@ struct NoteRowView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
+                    if note.pin != nil {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(note.shortTitle)
                         .font(.headline)
                     if note.isToday {
@@ -1251,6 +1351,11 @@ struct NoteRowCompactView: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            if note.pin != nil {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             Text(note.shortTitle)
                 .font(.body)
                 .lineLimit(1)
@@ -1289,6 +1394,11 @@ struct NoteCardView: View {
                     // タイトル（最大3行）＋日付。fixedSize で圧縮されず常に確保する。
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .top, spacing: 5) {
+                            if note.pin != nil {
+                                Image(systemName: "pin.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                             Text(note.shortTitle)
                                 .font(.footnote.weight(.semibold))
                                 .lineSpacing(1)

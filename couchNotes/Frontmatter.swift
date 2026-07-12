@@ -61,6 +61,23 @@ enum FrontmatterParser {
         return Int(rest.dropFirst().trimmingCharacters(in: .whitespaces))
     }
 
+    // MARK: - ピン留め（pin: N）
+
+    /// extra 行群から "pin: N" を探して値を返す（無ければ nil）。
+    static func extractPin(from extra: [String]) -> Int? {
+        for line in extra {
+            if let v = intValue(of: "pin", in: line.trimmingCharacters(in: .whitespaces)) { return v }
+        }
+        return nil
+    }
+
+    /// extra 行群の "pin: N" 行を、指定値で置き換える／無ければ末尾に追加する／nil なら削除する。
+    static func withPin(_ pin: Int?, in extra: [String]) -> [String] {
+        var result = extra.filter { intValue(of: "pin", in: $0.trimmingCharacters(in: .whitespaces)) == nil }
+        if let pin { result.append("pin: \(pin)") }
+        return result
+    }
+
     /// created/updated（秒）＋ 保持行 ＋ body から content を組み立てる。
     static func compose(createdSec: Int?, updatedSec: Int?, extra: [String], body: String) -> String {
         var fm: [String] = []
