@@ -157,6 +157,23 @@ actor NoteStore {
         return items
     }
 
+    /// 本文（フロントマター除去後）が空白のみのノート一覧（mtime 降順）。
+    /// ピン留め中のノートは誤削除防止のため対象外。
+    func emptyBodyItems() -> [NoteItem] {
+        guard let stmt = prepare("SELECT id, path, mtime, content FROM notes WHERE deleted = 0 AND pin IS NULL;") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var items: [NoteItem] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let raw = columnText(stmt, 3) ?? ""
+            guard raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let id    = columnText(stmt, 0) ?? ""
+            let path  = columnText(stmt, 1)
+            let mtime = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 2)
+            items.append(NoteItem(id: id, mtime: mtime, path: path, preview: nil))
+        }
+        return items.sorted { ($0.mtime ?? 0) > ($1.mtime ?? 0) }
+    }
+
     /// 現在ピン留めされている最大の番号（無ければ nil）。次のピン番号採番に使う。
     func maxPin() -> Int? {
         guard let stmt = prepare("SELECT MAX(pin) FROM notes WHERE deleted = 0;") else { return nil }

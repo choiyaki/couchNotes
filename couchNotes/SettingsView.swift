@@ -21,6 +21,11 @@ struct SettingsView: View {
                         Label("同期フォルダ", systemImage: "folder")
                     }
                     NavigationLink {
+                        RandomNoteSettingsView()
+                    } label: {
+                        Label("ランダムノート", systemImage: "shuffle")
+                    }
+                    NavigationLink {
                         EditorSettingsView()
                     } label: {
                         Label("エディタ", systemImage: "textformat")
@@ -247,6 +252,62 @@ struct SyncFolderSettingsView: View {
     }
 }
 
+// MARK: - ランダムノート（今日のノートの除外フォルダ）
+
+struct RandomNoteSettingsView: View {
+    @State private var folders: [String] = []
+    @State private var excluded: [String] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        Form {
+            Section(
+                footer: Text("一覧の先頭に、毎日ランダムで2件のノートを表示します。チェックしたフォルダ配下のノートは抽選から除外されます。")
+            ) {
+                if isLoading {
+                    HStack {
+                        ProgressView()
+                        Text("フォルダを読み込み中…").foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(folders, id: \.self) { folder in
+                    Toggle(isOn: binding(for: folder)) {
+                        Label(folder, systemImage: "folder")
+                    }
+                }
+                if !isLoading && folders.isEmpty {
+                    Text("フォルダがありません").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("ランダムノート")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+    }
+
+    private func binding(for folder: String) -> Binding<Bool> {
+        Binding(
+            get: { excluded.contains { $0.lowercased() == folder.lowercased() } },
+            set: { on in
+                if on { RandomNotes.addExcluded(folder) } else { RandomNotes.removeExcluded(folder) }
+                excluded = RandomNotes.normalizedExcluded
+            }
+        )
+    }
+
+    private func load() async {
+        excluded = RandomNotes.normalizedExcluded
+        let items = await NoteStore.shared.listItems()
+        var list = RandomNotes.localTopLevelFolders(from: items)
+        // 除外中だが現在ローカルに無いフォルダも一覧に出す（外せるように）
+        for e in excluded where !list.contains(where: { $0.lowercased() == e.lowercased() }) {
+            list.append(e)
+        }
+        folders = list.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        isLoading = false
+    }
+}
+
 // MARK: - エディタ
 
 struct EditorSettingsView: View {
@@ -371,6 +432,17 @@ struct MaintenanceSettingsView: View {
             }
 
             Section(
+                header: Text("空ノートの整理"),
+                footer: Text("YAML はあるが本文が空のノートを一覧表示し、選んで削除します。ピン留め中のノートは対象外です。")
+            ) {
+                NavigationLink {
+                    EmptyNotesCleanupView()
+                } label: {
+                    Label("空ノートを確認", systemImage: "doc.badge.gearshape")
+                }
+            }
+
+            Section(
                 header: Text("削除済みの整理"),
                 footer: Text("削除済みノートと、不要になったチャンクを CouchDB から物理削除（_purge）します。全端末が削除を同期し終えたタイミングで実行してください（未同期の端末があると復活する場合があります）。元に戻せません。")
             ) {
@@ -439,6 +511,97 @@ struct MaintenanceSettingsView: View {
             }
             migrating = false
         }
+    }
+}
+
+// MARK: - 空ノートの整理
+
+struct EmptyNotesCleanupView: View {
+    @State private var items: [NoteItem] = []
+    @State private var checked: Set<String> = []
+    @State private var isLoading  = true
+    @State private var isDeleting = false
+    @State private var confirmDelete = false
+    @State private var resultMessage: String?
+
+    var body: some View {
+        Form {
+            if isLoading {
+                HStack {
+                    ProgressView()
+                    Text("空ノートを検索中…").foregroundStyle(.secondary)
+                }
+            } else if items.isEmpty {
+                Text("本文が空のノートはありません").foregroundStyle(.secondary)
+            } else {
+                Section(footer: Text("削除したくないものはチェックを外してください。")) {
+                    ForEach(items) { note in
+                        Toggle(isOn: bindingFor(note.id)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(note.shortTitle)
+                                Text(note.path ?? note.id)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("空ノートの整理")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                if isDeleting {
+                    ProgressView()
+                } else {
+                    Button("実行", role: .destructive) { confirmDelete = true }
+                        .disabled(checked.isEmpty)
+                }
+            }
+        }
+        .task { await load() }
+        .alert("空ノートを削除", isPresented: $confirmDelete) {
+            Button("削除", role: .destructive) { Task { await runDelete() } }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("チェックした \(checked.count) 件を削除します。元に戻せません。")
+        }
+        .alert("完了", isPresented: Binding(
+            get: { resultMessage != nil },
+            set: { if !$0 { resultMessage = nil } }
+        )) {
+            Button("OK") { resultMessage = nil }
+        } message: {
+            Text(resultMessage ?? "")
+        }
+    }
+
+    private func bindingFor(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { checked.contains(id) },
+            set: { on in if on { checked.insert(id) } else { checked.remove(id) } }
+        )
+    }
+
+    private func load() async {
+        items = await NoteStore.shared.emptyBodyItems()
+        checked = Set(items.map(\.id))
+        isLoading = false
+    }
+
+    private func runDelete() async {
+        isDeleting = true
+        let targets = checked
+        for id in targets {
+            await NoteStore.shared.markPendingDelete(id)
+        }
+        await SyncEngine.shared.flush()
+        items.removeAll { targets.contains($0.id) }
+        checked.subtract(targets)
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        resultMessage = "\(targets.count) 件を削除しました"
+        isDeleting = false
     }
 }
 
