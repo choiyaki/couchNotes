@@ -323,6 +323,8 @@ struct EditorSettingsView: View {
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
     @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
+    @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
+    @AppStorage("editor_webFontFamily") private var webFontFamily = ""
 
     var body: some View {
         Form {
@@ -343,6 +345,21 @@ struct EditorSettingsView: View {
                 footer: Text("新エディタ（CodeMirror）に切り替えます。Macの矢印キー・iPhoneの長押し選択の不具合が解消されます。問題があればオフで従来のエディタに戻せます（開き直しで反映）。")
             ) {
                 Toggle("新エディタを使う（ベータ）", isOn: $useCodeMirror)
+            }
+
+            if useCodeMirror {
+                Section(
+                    header: Text("Web フォント（新エディタ）"),
+                    footer: Text("Google Fonts 等の CSS URL とフォント名を指定すると本文に適用されます。例: URL に https://fonts.googleapis.com/css2?family=Noto+Serif+JP&display=swap、フォント名に Noto Serif JP。空欄でシステムフォント。オフライン時は自動でシステムフォントに戻ります。")
+                ) {
+                    TextField("CSS の URL", text: $webFontCSSURL)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    TextField("フォント名（font-family）", text: $webFontFamily)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
             }
         }
         .navigationTitle("エディタ")

@@ -59,6 +59,9 @@ struct NoteDetailView: View {
     @AppStorage("noteList_layout")    private var layoutRaw = NoteListLayout.detail.rawValue
     // 新エディタ（CodeMirror/WKWebView）。TextKit1 の Mac 矢印キー・iPhone 選択飛び不具合の回避。
     @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
+    // Web フォント（新エディタのみ）
+    @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
+    @AppStorage("editor_webFontFamily") private var webFontFamily = ""
 
     @ObservedObject private var network = NetworkMonitor.shared
 
@@ -348,6 +351,8 @@ struct NoteDetailView: View {
                             fontSize: CGFloat(fontSize),
                             lineSpacing: CGFloat(lineSpacing),
                             horizontalInset: landscapeSideInset,
+                            fontCSSURL: webFontCSSURL,
+                            fontFamily: webFontFamily,
                             backlinks: backlinks,
                             twoHop: twoHop,
                             footerLayout: backlinksLayout,

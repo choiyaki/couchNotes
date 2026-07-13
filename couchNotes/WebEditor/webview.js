@@ -19062,11 +19062,29 @@
   setFooterPoster(native);
   var configStyle = document.createElement("style");
   document.head.appendChild(configStyle);
-  function applyConfig(fontSize, lineSpacing, horizontalInset) {
+  var fontLink = document.createElement("link");
+  fontLink.rel = "stylesheet";
+  var fontLinkAttached = false;
+  function applyConfig(fontSize, lineSpacing, horizontalInset, fontCSSURL, fontFamily) {
     const fs = typeof fontSize === "number" ? fontSize : 16;
     const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
     const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
+    const url = typeof fontCSSURL === "string" ? fontCSSURL.trim() : "";
+    if (url) {
+      if (fontLink.getAttribute("href") !== url)
+        fontLink.setAttribute("href", url);
+      if (!fontLinkAttached) {
+        document.head.appendChild(fontLink);
+        fontLinkAttached = true;
+      }
+    } else if (fontLinkAttached) {
+      fontLink.remove();
+      fontLinkAttached = false;
+    }
+    const fam = (typeof fontFamily === "string" ? fontFamily : "").replace(/["\\]/g, "").trim();
+    const famList = fam ? `"${fam}", -apple-system, "Hiragino Sans", sans-serif` : `-apple-system, "Hiragino Sans", sans-serif`;
     configStyle.textContent = `
+    .cm-editor, .cm-tooltip-autocomplete > ul, .cn-footer { font-family: ${famList}; }
     .cm-editor { font-size: ${fs}px; }
     .cm-editor .cm-line { line-height: calc(1.45em + ${ls}px); }
     .cm-editor .cm-content { padding-left: ${16 + hi}px; padding-right: ${16 + hi}px; }
@@ -19128,7 +19146,7 @@
       case "init":
         if (typeof msg.version === "number")
           docVersion = msg.version;
-        applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset);
+        applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
         view.dispatch({ effects: setWikiTargets.of(msg.wikiTargets ?? []) });
         setDocText(msg.text ?? "");
         break;
@@ -19141,7 +19159,7 @@
         view.dispatch({ effects: setWikiTargets.of(msg.targets ?? []) });
         break;
       case "config":
-        applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset);
+        applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
         break;
       case "insertText": {
         const t2 = String(msg.text ?? "");
