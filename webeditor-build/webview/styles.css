@@ -1,0 +1,222 @@
+/* couchNotes 風ライブ装飾（couchNotes アプリ組み込み版）。
+   VSCode テーマ変数は使わず、light-dark() でライト/ダーク両対応にする。
+   背景は透過（WKWebView 側でアプリ背景を見せる）。 */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+}
+
+#editor,
+.cm-editor {
+  height: 100%;
+}
+
+.cm-editor {
+  /* ネイティブ版（UIFont.systemFont）に合わせてシステムフォント */
+  font-family: -apple-system, "Hiragino Sans", sans-serif;
+  font-size: 16px; /* 実際の値は main.ts が設定（editor_fontSize） */
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* CM6 デフォルトテーマの .cm-content（padding:4px 0）を上書きするため
+   .cm-editor を前置して詳細度を上げる。これが無いと左 padding が効かない。 */
+.cm-editor .cm-content {
+  /* タブ ≒ 半角スペース 2 つ分（couchNotes の tabWidth に対応） */
+  tab-size: 2;
+  -moz-tab-size: 2;
+  padding: 12px 16px 80px; /* 下は本文終端の余白（native defaultBottomInset 相当） */
+}
+
+.cm-editor .cm-line {
+  padding: 0;
+  /* line-height は main.ts が editor_lineSpacing から設定 */
+  line-height: 1.45;
+}
+
+/* 見出し（# / ## / ###）: 文字サイズ拡大 + 太字 */
+.cm-cn-h1 {
+  font-size: 1.625em;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.cm-cn-h2 {
+  font-size: 1.375em;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.cm-cn-h3 {
+  font-size: 1.1875em;
+  font-weight: 600;
+}
+
+/* 見出しマーカー・リストマーカー（tertiaryLabel 相当の淡色） */
+.cm-cn-marker {
+  opacity: 0.4;
+}
+
+/* チェックボックス */
+.cm-cn-task-open {
+  color: light-dark(#007aff, #0a84ff);
+  opacity: 0.85;
+}
+.cm-cn-task-done-marker {
+  color: light-dark(#34c759, #30d158);
+}
+.cm-cn-task-done-body {
+  text-decoration: line-through;
+  opacity: 0.4;
+}
+
+/* Wiki リンク [[...]] */
+.cm-cn-wiki {
+  color: light-dark(#007aff, #0a84ff);
+  cursor: pointer;
+}
+.cm-cn-wiki-missing {
+  color: light-dark(#007aff, #0a84ff);
+  opacity: 0.4;
+  cursor: pointer;
+}
+
+/* 外部リンク・裸 URL */
+.cm-cn-link {
+  color: light-dark(#007aff, #0a84ff);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ブロック ID ^abc */
+.cm-cn-blockid {
+  font-size: 0.69em;
+  opacity: 0.6;
+}
+
+/* 画像 Markdown ![](url): 文字は常に少し小さく。 */
+.cm-cn-imgmd {
+  font-size: 0.85em;
+}
+/* カーソルが無い行では淡いグレーにして目立たなくする。 */
+.cm-cn-imgmd-dim {
+  color: light-dark(#aaaaaa, #666666);
+}
+
+/* 本文末尾のリンクフッター（リンク元＋2ホップ） */
+.cn-footer {
+  border-top: 1px solid light-dark(#d1d1d6, #48484a);
+  padding: 10px 0 60px;
+  font-family: -apple-system, "Hiragino Sans", sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.cn-footer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.cn-footer-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: light-dark(#6e6e73, #98989d);
+}
+.cn-footer-toggles {
+  display: flex;
+  gap: 4px;
+}
+.cn-footer-toggle {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: light-dark(#6e6e73, #98989d);
+}
+.cn-footer-toggle.cn-on {
+  background: light-dark(rgb(0 0 0 / 0.08), rgb(255 255 255 / 0.14));
+  color: light-dark(#000, #fff);
+}
+.cn-footer-section {
+  font-size: 12px;
+  font-weight: 600;
+  color: light-dark(#6e6e73, #98989d);
+  margin: 12px 0 6px;
+}
+.cn-footer-section-link {
+  color: light-dark(#007aff, #0a84ff);
+  cursor: pointer;
+}
+.cn-footer-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cn-footer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.cn-footer-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: light-dark(rgb(0 0 0 / 0.045), rgb(255 255 255 / 0.08));
+  cursor: pointer;
+}
+.cn-footer-grid .cn-footer-item {
+  aspect-ratio: 1 / 1;   /* 幅そのままの正方形タイル */
+  overflow: hidden;
+}
+.cn-footer-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: light-dark(#007aff, #0a84ff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cn-footer-item-preview {
+  font-size: 11px;
+  color: light-dark(#6e6e73, #98989d);
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 正方形タイル内はプレビューを多めに見せる */
+.cn-footer-grid .cn-footer-item-preview {
+  -webkit-line-clamp: 7;
+}
+
+/* [[ サジェストのポップアップ */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background: light-dark(#ffffff, #2c2c2e);
+  border: 1px solid light-dark(#d1d1d6, #48484a);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+}
+.cm-tooltip-autocomplete > ul {
+  font-family: -apple-system, "Hiragino Sans", sans-serif;
+  font-size: 14px;
+  max-height: 16em;
+}
+.cm-tooltip-autocomplete > ul > li {
+  padding: 4px 10px;
+  color: light-dark(#000000, #ffffff);
+}
+.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: light-dark(#007aff, #0a84ff);
+  color: #ffffff;
+}

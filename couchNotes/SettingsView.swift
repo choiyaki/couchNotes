@@ -56,6 +56,15 @@ struct SettingsView: View {
                         Label("URL スキーム", systemImage: "link")
                     }
                 }
+
+                // TEMP: CodeMirror(WKWebView)プロトタイプの検証用入り口。検証が終わったら削除する。
+                Section(footer: Text("Mac矢印キー・日本語IME検証用の実験画面。本編集画面とは未接続。")) {
+                    NavigationLink {
+                        CodeMirrorPrototypeView()
+                    } label: {
+                        Label("CodeMirror プロトタイプ", systemImage: "curlybraces")
+                    }
+                }
             }
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.inline)
@@ -313,6 +322,7 @@ struct RandomNoteSettingsView: View {
 struct EditorSettingsView: View {
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
+    @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
 
     var body: some View {
         Form {
@@ -327,6 +337,12 @@ struct EditorSettingsView: View {
                     Slider(value: $lineSpacing, in: 0...12, step: 0.5)
                 }
                 .padding(.vertical, 4)
+            }
+
+            Section(
+                footer: Text("新エディタ（CodeMirror）に切り替えます。Macの矢印キー・iPhoneの長押し選択の不具合が解消されます。問題があればオフで従来のエディタに戻せます（開き直しで反映）。")
+            ) {
+                Toggle("新エディタを使う（ベータ）", isOn: $useCodeMirror)
             }
         }
         .navigationTitle("エディタ")

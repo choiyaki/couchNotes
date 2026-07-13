@@ -102,6 +102,17 @@ struct NoteItem: Identifiable {
     }
 }
 
+// MARK: - 2ホップリンク
+
+/// 「このノートの発リンク先」1つぶんのグループ。
+/// notes には同じリンク先へリンクしている他のノート（自分と直接バックリンクを除く）が入る。
+struct TwoHopGroup {
+    let targetKey: String     // 正規化キー（小文字・.md 除去）
+    let targetTitle: String   // 表示名（解決できたらそのノートのタイトル、なければキー原文）
+    let targetId: String?     // 解決できたノートの id（タップで開く用。nil = 未作成ページ）
+    let notes: [NoteItem]
+}
+
 // MARK: - 永続化用レコード（本文込み）
 
 /// SQLite に保存する 1 ノート分の完全な情報（content はフロントマター込みの全文）。

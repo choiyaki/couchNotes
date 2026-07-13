@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import Network
+import PhotosUI
 
 extension Notification.Name {
     /// ローカル編集の保存が成功した時に投げる通知。userInfo["noteId"] に対象 ID。
@@ -56,8 +57,14 @@ struct NoteDetailView: View {
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
     // 一覧へ戻るボタンのアイコンを一覧の表示モードに合わせる
     @AppStorage("noteList_layout")    private var layoutRaw = NoteListLayout.detail.rawValue
+    // 新エディタ（CodeMirror/WKWebView）。TextKit1 の Mac 矢印キー・iPhone 選択飛び不具合の回避。
+    @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
 
     @ObservedObject private var network = NetworkMonitor.shared
+
+    // 新エディタとのブリッジ（ツールバーコマンド・フォーカス状態・画像アップロード）
+    @StateObject private var webBridge = WebEditorBridge()
+    @State private var photoPickerItem: PhotosPickerItem? = nil
 
     @State private var content        = ""
     @State private var editingContent = ""
@@ -85,6 +92,10 @@ struct NoteDetailView: View {
 
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
+    // 2ホップリンク（新エディタのフッター用）
+    @State private var twoHop: [TwoHopGroup] = []
+    // フッターの表示形式（リスト / グリッド）
+    @AppStorage("backlinks_layout") private var backlinksLayout = "list"
 
     // 検索（詳細画面上：入力中はタイトル候補、Enter で一覧の本文検索へ）
     @State private var showSearch     = false
@@ -96,7 +107,10 @@ struct NoteDetailView: View {
     // 画面サイズ（向き判定用）。ランドスケープのみ左右に余白を入れる。
     @State private var editorSize: CGSize = .zero
     private var landscapeSideInset: CGFloat {
-        guard editorSize.width > editorSize.height else { return 0 }   // 縦置きは余白なし
+        // 幅が広い（Mac・iPad・iPhone横向き）時だけ余白を入れる。
+        // 高さだけで判定すると、キーボード表示で高さが縮んだ縦持ち iPhone を
+        // 横向きと誤検知してタイトル等に余白が入ってしまう。
+        guard editorSize.width > editorSize.height, editorSize.width >= 600 else { return 0 }
         return max(editorSize.width * 0.12, 48)
     }
 
@@ -326,15 +340,36 @@ struct NoteDetailView: View {
 
                 // テキストビューは全幅のまま（スクロールバーが画面端に出る）。
                 // 余白は textContainerInset（テキストの内側）で寄せる。
-                MarkdownTextView(
-                    text: $editingContent,
-                    notes: notes,
-                    backlinks: backlinks,
-                    fontSize: CGFloat(fontSize),
-                    lineSpacing: CGFloat(lineSpacing),
-                    horizontalInset: landscapeSideInset,
-                    onLinkTap: onLinkTap
-                )
+                Group {
+                    if useCodeMirror {
+                        CodeMirrorWebEditor(
+                            text: $editingContent,
+                            wikiTargets: wikiTargetNames,
+                            fontSize: CGFloat(fontSize),
+                            lineSpacing: CGFloat(lineSpacing),
+                            horizontalInset: landscapeSideInset,
+                            backlinks: backlinks,
+                            twoHop: twoHop,
+                            footerLayout: backlinksLayout,
+                            bridge: webBridge,
+                            onLinkTap: onLinkTap,
+                            onFooterLayoutChange: { backlinksLayout = $0 }
+                        )
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            if webBridge.isEditorFocused { webEditorToolbar }
+                        }
+                    } else {
+                        MarkdownTextView(
+                            text: $editingContent,
+                            notes: notes,
+                            backlinks: backlinks,
+                            fontSize: CGFloat(fontSize),
+                            lineSpacing: CGFloat(lineSpacing),
+                            horizontalInset: landscapeSideInset,
+                            onLinkTap: onLinkTap
+                        )
+                    }
+                }
                     .onChange(of: editingContent) { _, newVal in
                         hasUnsavedChanges = newVal != content
 
@@ -367,7 +402,8 @@ struct NoteDetailView: View {
                     }
             }
 
-            if !isLoading {
+            // 新エディタでキーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
+            if !isLoading, !(useCodeMirror && webBridge.isEditorFocused) {
                 EditorFooterBar(
                     folderLabel: currentFolderLabel,
                     createdText: DateDisplay.string(fromMs: createdMs),
@@ -387,7 +423,9 @@ struct NoteDetailView: View {
                     .onChange(of: geo.size) { _, newSize in editorSize = newSize }
             }
         )
-        .ignoresSafeArea(.keyboard, edges: .bottom)   // SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止
+        // 旧エディタ: SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止（インセットは自前管理）。
+        // 新エディタ: キーボード回避を活かし、safeAreaInset のツールバーをキーボード上に持ち上げる。
+        .ignoresSafeArea(.keyboard, edges: useCodeMirror ? [] : .bottom)
         .animation(.easeInOut(duration: 0.25), value: externalChangeAvailable)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -449,12 +487,17 @@ struct NoteDetailView: View {
                   !externalChangeAvailable else { return }
             Task { await save() }
         }
+        .onChange(of: photoPickerItem) { _, item in
+            guard let item else { return }
+            Task { await uploadPickedPhoto(item) }
+        }
         .task {
             // 最後に開いたノートとして記録
             UserDefaults.standard.set(noteId, forKey: "lastOpenedNoteId")
             // この画面の save() が押し上げを担うので、同期ワーカはこのノートを飛ばす
             SyncEngine.shared.activeNoteId = noteId
             titleDraft = navTitle
+            webBridge.onError = { message in errorMessage = message }
             await loadContent()
             await loadBacklinks()
             await pollForChanges()
@@ -468,6 +511,86 @@ struct NoteDetailView: View {
                 SyncEngine.shared.activeNoteId = nil
             }
         }
+    }
+
+    // MARK: - 新エディタ（CodeMirror）用
+
+    /// [[ ]] 補完・リンク存在判定に渡すノート名一覧（小文字重複は除去）。
+    private var wikiTargetNames: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for note in notes {
+            let title = note.shortTitle
+            if seen.insert(title.lowercased()).inserted { out.append(title) }
+        }
+        return out
+    }
+
+    /// キーボード上の自前ツールバー（旧エディタの inputAccessoryView 相当）。
+    /// WKWebView は inputAccessoryView を差し替えられないため、safeAreaInset で重ねる。
+    /// 見た目は旧 KeyboardToolbarView と同じ「薄い角丸背景の小型ボタンを等分配置」。
+    private var webEditorToolbar: some View {
+        HStack(spacing: 5) {
+            webToolbarButton(systemImage: "clipboard") { webBridge.pasteFromClipboard() }
+            PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                webToolbarLabel(systemImage: "photo.badge.plus")
+            }
+            .buttonStyle(.plain)
+            webToolbarButton("[[ ]]") { webBridge.run("wikiLink") }
+            webToolbarButton(systemImage: "checklist") { webBridge.run("listToggle") }
+            webToolbarButton(systemImage: "arrow.up") { webBridge.run("moveLineUp") }
+            webToolbarButton(systemImage: "arrow.down") { webBridge.run("moveLineDown") }
+            webToolbarButton(systemImage: "arrow.left.to.line") { webBridge.run("outdent") }
+            webToolbarButton(systemImage: "arrow.right.to.line") { webBridge.run("indent") }
+            webToolbarButton(systemImage: "keyboard.chevron.compact.down") { webBridge.dismissKeyboard() }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    @ViewBuilder
+    private func webToolbarButton(_ title: String? = nil,
+                                  systemImage: String? = nil,
+                                  action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            webToolbarLabel(title, systemImage: systemImage)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// ツールバーボタンの共通見た目（旧 KeyboardToolbarView の makeButton 相当）。
+    @ViewBuilder
+    private func webToolbarLabel(_ title: String? = nil, systemImage: String? = nil) -> some View {
+        Group {
+            if let title {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15))
+            }
+        }
+        .foregroundStyle(Color(.label))
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .background(Color(.quaternarySystemFill))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+    }
+
+    /// 写真ピッカーで選ばれた画像を Gyazo にアップロードして挿入する。
+    private func uploadPickedPhoto(_ item: PhotosPickerItem) async {
+        defer { photoPickerItem = nil }
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+        // PNG マジックバイトで判別（それ以外は JPEG として扱う）
+        let isPNG = data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+        webBridge.uploadImage(
+            data: data,
+            mime: isPNG ? "image/png" : "image/jpeg",
+            filename: isPNG ? "image.png" : "image.jpg"
+        )
     }
 
     // MARK: - 保存ステータス表示
@@ -646,6 +769,9 @@ struct NoteDetailView: View {
 
     private func loadBacklinks() async {
         backlinks = await NoteStore.shared.backlinks(for: noteId)
+        // 2ホップ（新エディタのフッター用）。自分と直接バックリンクは重複表示しない。
+        let excluding = Set(backlinks.map(\.id) + [noteId])
+        twoHop = await NoteStore.shared.twoHopGroups(for: noteId, excludingIDs: excluding)
     }
 
     // MARK: - フォルダ移動

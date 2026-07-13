@@ -1,0 +1,248 @@
+// couchnotes-vscode/webview/main.ts のネイティブ（WKWebView）版。
+// VSCode の acquireVsCodeApi()/window message の代わりに、
+// window.webkit.messageHandlers 経由でSwift側と直接やり取りする。
+import "./styles.css";
+import { Annotation, EditorState } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
+import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown } from "@codemirror/commands";
+import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
+import { wikiCompletionSource } from "./complete";
+import { liveStyling } from "./decorations";
+import { imageField, refreshImageLayout } from "./images";
+import { setWikiTargets, wikiTargetsField } from "./state";
+import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
+import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
+import {
+  listContinuation,
+  indentLines,
+  outdentLines,
+  toggleListMarker,
+  insertWikiLink,
+  toggleCheckboxAt,
+} from "./commands";
+
+// --- ネイティブブリッジ（Swift 側の WKScriptMessageHandler 名 "couchNotes"） ---
+interface NativeBridge {
+  postMessage(msg: unknown): void;
+}
+declare global {
+  interface Window {
+    webkit: { messageHandlers: { couchNotes: NativeBridge } };
+    couchNotesReceive: (msg: unknown) => void;
+    couchNotesRunCommand: (name: string) => void;
+    couchNotesInsertPlaceholder: () => string;
+  }
+}
+const native = window.webkit.messageHandlers.couchNotes;
+
+// 拡張ホスト（Swift）由来の transaction を識別し、編集メッセージのエコーを防ぐ。
+const remote = Annotation.define<boolean>();
+
+// --- リンク判定（クリック追従用） ---
+type LinkHit = { kind: "wiki" | "external"; value: string };
+function linkAt(text: string, col: number): LinkHit | null {
+  for (const m of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const s = m.index!;
+    if (col >= s && col < s + m[0].length) return { kind: "wiki", value: m[1] };
+  }
+  for (const m of text.matchAll(/(?<!!)\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g)) {
+    const s = m.index!;
+    if (col >= s && col < s + m[0].length) return { kind: "external", value: m[1] };
+  }
+  for (const m of text.matchAll(/https?:\/\/[^\s)\]]+/g)) {
+    const s = m.index!;
+    if (col >= s && col < s + m[0].length) return { kind: "external", value: m[0] };
+  }
+  return null;
+}
+
+const cnKeymap = keymap.of([
+  { key: "Enter", run: listContinuation },
+  { key: "Tab", run: indentLines },
+  { key: "Shift-Tab", run: outdentLines },
+  { key: "Alt-ArrowUp", run: moveLineUp },
+  { key: "Alt-ArrowDown", run: moveLineDown },
+  { key: "Mod-l", run: toggleListMarker },
+  { key: "Mod-Shift-l", run: insertWikiLink },
+]);
+
+// タップ／クリックの処理。ネイティブ版（handleTap）と同じく、
+// リンクは修飾キーなしのタップで直接開く。チェックボックスはトグル。
+const clickHandler = EditorView.domEventHandlers({
+  mousedown(e, view) {
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    const line = view.state.doc.lineAt(pos);
+    const col = pos - line.from;
+
+    const cb = /^([\t ]*)[-*] \[[ xX]\]/.exec(line.text);
+    if (cb) {
+      const bs = cb[1].length + 2;
+      const be = bs + 3;
+      if (col >= bs && col < be) {
+        toggleCheckboxAt(view, pos);
+        e.preventDefault();
+        return true;
+      }
+    }
+
+    const hit = linkAt(line.text, col);
+    if (hit) {
+      if (hit.kind === "wiki") native.postMessage({ type: "openWiki", target: hit.value });
+      else native.postMessage({ type: "openExternal", url: hit.value });
+      e.preventDefault();
+      return true;
+    }
+    return false;
+  },
+});
+
+// 文書の世代番号。Swift 側が外部更新（同期反映）で文書を差し替えるたびに上がる。
+// 編集は全文＋この世代番号で送り、Swift 側は古い世代の編集を破棄する。
+// 差分（オフセット）方式は、同期による全文差し替えと交差した時に
+// 「別の文書へ古い位置で適用」してしまい本文を壊すため使わない。
+let docVersion = 0;
+
+const updateListener = EditorView.updateListener.of((u) => {
+  if (!u.docChanged) return;
+  if (u.transactions.some((t) => t.annotation(remote))) return;
+  native.postMessage({ type: "edit", text: u.state.doc.toString(), version: docVersion });
+});
+
+const view = new EditorView({
+  parent: document.getElementById("editor")!,
+  state: EditorState.create({
+    doc: "",
+    extensions: [
+      wikiTargetsField,
+      history(),
+      // drawSelection / allowMultipleSelections は使わない:
+      // CodeMirror の自前選択描画は、iOS のスペース長押し（トラックパッドモード）が動かす
+      // ネイティブ選択と取り合いになり、カーソル移動が選択化・飛びに化ける。
+      // ネイティブの選択描画に任せる（マルチカーソルは旧エディタにも無い機能なので不要）。
+      EditorView.lineWrapping,
+      EditorState.tabSize.of(2),
+      // iOS の予測変換・候補バー（キーボード上部に出る帯）を抑制する。
+      // 日本語入力そのものは autocorrect/spellcheck の対象外のため影響しない。
+      EditorView.contentAttributes.of({
+        autocorrect: "off",
+        autocapitalize: "off",
+        spellcheck: "false",
+      }),
+      liveStyling,
+      imageField,
+      autocompletion({
+        override: [wikiCompletionSource],
+        activateOnTyping: true,
+      }),
+      pasteImages(native),
+      footerExtension,
+      clickHandler,
+      updateListener,
+      keymap.of(completionKeymap),
+      cnKeymap,
+      keymap.of([...historyKeymap, ...defaultKeymap]),
+    ],
+  }),
+});
+
+// フォーカス状態をネイティブへ通知（キーボードツールバーの表示制御用）
+view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
+view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
+
+// フッター（リンク元・2ホップ）のタップをネイティブへ流す
+setFooterPoster(native);
+
+// フォントサイズ・行間・左右余白（アプリ設定）を CSS に反映する。
+const configStyle = document.createElement("style");
+document.head.appendChild(configStyle);
+function applyConfig(fontSize: unknown, lineSpacing: unknown, horizontalInset: unknown) {
+  const fs = typeof fontSize === "number" ? fontSize : 16;
+  const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
+  const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
+  configStyle.textContent = `
+    .cm-editor { font-size: ${fs}px; }
+    .cm-editor .cm-line { line-height: calc(1.45em + ${ls}px); }
+    .cm-editor .cm-content { padding-left: ${16 + hi}px; padding-right: ${16 + hi}px; }
+  `;
+  // padding が変わると画像の X 起点・使える幅も変わるため作り直す
+  refreshImageLayout();
+}
+
+function setDocText(text: string) {
+  const cur = view.state.doc.toString();
+  if (cur === text) return;
+  const head = Math.min(view.state.selection.main.head, text.length);
+  // 外部更新でスクロール位置を失わない（native の contentOffset 保存・復元と同じ）。
+  const scrollTop = view.scrollDOM.scrollTop;
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+    selection: { anchor: head },
+    annotations: remote.of(true),
+  });
+  view.requestMeasure({
+    read: () => {},
+    write: () => { view.scrollDOM.scrollTop = scrollTop; },
+  });
+}
+
+// 自前のキーボード上ツールバー（Swiftのフローティングビュー）から呼ばれるコマンド実行口。
+// inputAccessoryView を使わない代わりに、ボタン押下→ここでCM6コマンドを直接叩く。
+window.couchNotesRunCommand = (name: string) => {
+  switch (name) {
+    case "wikiLink": insertWikiLink(view); break;
+    case "listToggle": toggleListMarker(view); break;
+    case "moveLineUp": moveLineUp(view); break;
+    case "moveLineDown": moveLineDown(view); break;
+    case "indent": indentLines(view); break;
+    case "outdent": outdentLines(view); break;
+  }
+  view.focus();
+};
+
+// ネイティブ発の画像アップロード（ツールバーのペースト・写真）用:
+// カーソル位置にプレースホルダを挿し、その id を返す（evaluateJavaScript の戻り値になる）。
+window.couchNotesInsertPlaceholder = () => insertUploadPlaceholder(view);
+
+// Swift 側 evaluateJavaScript("window.couchNotesReceive({...})") から呼ばれる。
+window.couchNotesReceive = (msg: any) => {
+  switch (msg?.type) {
+    case "init":
+      if (typeof msg.version === "number") docVersion = msg.version;
+      applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset);
+      view.dispatch({ effects: setWikiTargets.of((msg.wikiTargets ?? []) as string[]) });
+      setDocText(msg.text ?? "");
+      break;
+    case "externalUpdate":
+      if (typeof msg.version === "number") docVersion = msg.version;
+      setDocText(msg.text ?? "");
+      break;
+    case "wikiTargets":
+      view.dispatch({ effects: setWikiTargets.of((msg.targets ?? []) as string[]) });
+      break;
+    case "config":
+      applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset);
+      break;
+    case "insertText": {
+      // ツールバーのペースト（テキスト）等。ユーザー編集扱いで Swift 側へもエコーさせる。
+      const t = String(msg.text ?? "");
+      if (!t) break;
+      const sel = view.state.selection.main;
+      view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: t },
+        selection: { anchor: sel.from + t.length },
+        userEvent: "input.paste",
+      });
+      view.focus();
+      break;
+    }
+    case "pasteResult":
+      applyPasteResult(view, msg);
+      break;
+    case "footer":
+      setFooterData((msg.data ?? null) as FooterData | null);
+      break;
+  }
+};
+
+native.postMessage({ type: "ready" });

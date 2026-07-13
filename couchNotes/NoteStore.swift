@@ -499,6 +499,77 @@ actor NoteStore {
         return readItems(stmt, previewTrim: true)
     }
 
+    /// 2ホップリンク：このノートの発リンク先（出現順）ごとに、
+    /// 「同じリンク先へリンクしている他のノート」をまとめて返す。
+    /// - excludingIDs: 除外する id（自分自身＋直接バックリンクなど、既に表示済みのもの）
+    func twoHopGroups(for id: String, excludingIDs: Set<String>) -> [TwoHopGroup] {
+        guard let body = content(id) else { return [] }
+
+        // 発リンクキーを本文の出現順で（重複除去）
+        guard let regex = Self.wikiLinkRegex else { return [] }
+        let ns = body as NSString
+        var orderedKeys: [String] = []
+        var seen = Set<String>()
+        for m in regex.matches(in: body, range: NSRange(location: 0, length: ns.length)) {
+            guard m.numberOfRanges >= 2,
+                  let key = Self.normalizeKey(ns.substring(with: m.range(at: 1))),
+                  seen.insert(key).inserted else { continue }
+            orderedKeys.append(key)
+        }
+        guard !orderedKeys.isEmpty else { return [] }
+
+        var groups: [TwoHopGroup] = []
+        for key in orderedKeys {
+            // 同じキーへリンクしている他のノート（自分は除外）
+            let sql = """
+            SELECT DISTINCT n.id, n.path, n.mtime, substr(n.content, 1, 400)
+            FROM links l
+            JOIN notes n ON n.id = l.source_id
+            WHERE l.target_key = ? AND n.deleted = 0 AND n.id != ?
+            ORDER BY n.mtime DESC
+            LIMIT 50;
+            """
+            var notes: [NoteItem] = []
+            if let stmt = prepare(sql) {
+                sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, id,  -1, SQLITE_TRANSIENT)
+                notes = readItems(stmt, previewTrim: true)
+                sqlite3_finalize(stmt)
+            }
+            notes.removeAll { excludingIDs.contains($0.id) }
+
+            // リンク先キー → 実ノートの解決（フルパス一致 or ファイル名一致。バックリンクと同じ規則）
+            let target = resolveNote(forKey: key)
+            // 表示する意味のあるグループだけ（リンク先が実在する、または他にリンク元がある）
+            guard target != nil || !notes.isEmpty else { continue }
+            groups.append(TwoHopGroup(
+                targetKey: key,
+                targetTitle: target?.shortTitle ?? key,
+                targetId: target?.id,
+                notes: notes
+            ))
+        }
+        return groups
+    }
+
+    /// 正規化キー（小文字・.md 除去）から生存ノートを解決する。フルパス一致を優先し、次に basename 一致。
+    private func resolveNote(forKey key: String) -> NoteItem? {
+        let sql = """
+        SELECT id, path FROM notes
+        WHERE deleted = 0 AND (id = ? OR id LIKE ?)
+        ORDER BY (id = ?) DESC, mtime DESC
+        LIMIT 1;
+        """
+        guard let stmt = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        let exact = key + ".md"
+        sqlite3_bind_text(stmt, 1, exact, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, "%/" + exact, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, exact, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let idC = sqlite3_column_text(stmt, 0) else { return nil }
+        return NoteItem(id: String(cString: idC), path: columnText(stmt, 1))
+    }
+
     /// id, path, mtime, preview の4カラムを NoteItem 配列に変換する共通処理。
     private func readItems(_ stmt: OpaquePointer?, previewTrim: Bool) -> [NoteItem] {
         var items: [NoteItem] = []

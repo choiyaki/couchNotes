@@ -13,3 +13,9 @@ DerivedData/
 # Swift Package Manager
 .swiftpm/
 .build/
+
+# Web editor build tooling
+webeditor-build/node_modules/
+
+# Generated source maps (webeditor-build で再生成できるためリポジトリには入れない)
+couchNotes/WebEditor/*.map
