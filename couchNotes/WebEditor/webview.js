@@ -18975,6 +18975,39 @@
       redoDepth: redoDepth(u.state)
     });
   });
+  var lastSelAnchor = 0;
+  var lastSelHead = 0;
+  var pendingRevealPos = null;
+  var caretFollow = EditorView.updateListener.of((u) => {
+    const sel = u.state.selection.main;
+    if (u.transactions.some((t2) => t2.annotation(remote))) {
+      lastSelAnchor = sel.anchor;
+      lastSelHead = sel.head;
+      return;
+    }
+    if (!u.selectionSet && !u.docChanged)
+      return;
+    let pos = sel.head;
+    if (sel.head === lastSelHead && sel.anchor !== lastSelAnchor)
+      pos = sel.anchor;
+    lastSelAnchor = sel.anchor;
+    lastSelHead = sel.head;
+    if (!u.view.hasFocus)
+      return;
+    const alreadyScheduled = pendingRevealPos != null;
+    pendingRevealPos = pos;
+    if (alreadyScheduled)
+      return;
+    requestAnimationFrame(() => {
+      const target = pendingRevealPos;
+      pendingRevealPos = null;
+      if (target == null || target > view.state.doc.length)
+        return;
+      view.dispatch({
+        effects: EditorView.scrollIntoView(target, { y: "nearest", yMargin: 28 })
+      });
+    });
+  });
   var view = new EditorView({
     parent: document.getElementById("editor"),
     state: EditorState.create({
@@ -19005,6 +19038,7 @@
         footerExtension,
         clickHandler,
         updateListener2,
+        caretFollow,
         keymap.of(completionKeymap),
         cnKeymap,
         keymap.of([...historyKeymap, ...defaultKeymap])

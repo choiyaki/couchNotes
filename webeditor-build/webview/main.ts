@@ -116,6 +116,42 @@ const updateListener = EditorView.updateListener.of((u) => {
   });
 });
 
+// カーソル・選択の「動いた側の端」を最小限だけ追従スクロールする。
+// iOS のスペース長押し（トラックパッドモード）や選択ハンドルのドラッグは、
+// 入れ子のスクローラ（.cm-scroller）を自動スクロールしてくれないため、
+// 端で詰まって下へ進めない。y:"nearest" は見えていれば何もしないので、
+// これが実質のオートスクロールとして働く（過剰な制御はしない）。
+let lastSelAnchor = 0;
+let lastSelHead = 0;
+let pendingRevealPos: number | null = null;
+const caretFollow = EditorView.updateListener.of((u) => {
+  const sel = u.state.selection.main;
+  if (u.transactions.some((t) => t.annotation(remote)))  {
+    lastSelAnchor = sel.anchor;
+    lastSelHead = sel.head;
+    return;
+  }
+  if (!u.selectionSet && !u.docChanged) return;
+  // 動いた側の端を追従（head が動けば head、anchor 側だけ動けば anchor）
+  let pos = sel.head;
+  if (sel.head === lastSelHead && sel.anchor !== lastSelAnchor) pos = sel.anchor;
+  lastSelAnchor = sel.anchor;
+  lastSelHead = sel.head;
+  if (!u.view.hasFocus) return;
+
+  const alreadyScheduled = pendingRevealPos != null;
+  pendingRevealPos = pos;   // 連続イベントでは常に最新位置を使う
+  if (alreadyScheduled) return;
+  requestAnimationFrame(() => {
+    const target = pendingRevealPos;
+    pendingRevealPos = null;
+    if (target == null || target > view.state.doc.length) return;
+    view.dispatch({
+      effects: EditorView.scrollIntoView(target, { y: "nearest", yMargin: 28 }),
+    });
+  });
+});
+
 const view = new EditorView({
   parent: document.getElementById("editor")!,
   state: EditorState.create({
@@ -146,6 +182,7 @@ const view = new EditorView({
       footerExtension,
       clickHandler,
       updateListener,
+      caretFollow,
       keymap.of(completionKeymap),
       cnKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
