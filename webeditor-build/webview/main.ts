@@ -2,9 +2,9 @@
 // VSCode の acquireVsCodeApi()/window message の代わりに、
 // window.webkit.messageHandlers 経由でSwift側と直接やり取りする。
 import "./styles.css";
-import { Annotation, EditorState } from "@codemirror/state";
+import { Annotation, EditorState, Transaction } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
-import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown } from "@codemirror/commands";
+import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown, undo, redo, undoDepth, redoDepth } from "@codemirror/commands";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
@@ -106,7 +106,14 @@ let docVersion = 0;
 const updateListener = EditorView.updateListener.of((u) => {
   if (!u.docChanged) return;
   if (u.transactions.some((t) => t.annotation(remote))) return;
-  native.postMessage({ type: "edit", text: u.state.doc.toString(), version: docVersion });
+  native.postMessage({
+    type: "edit",
+    text: u.state.doc.toString(),
+    version: docVersion,
+    // シェイク Undo（ネイティブの NSUndoManager プロキシ）の有効/無効表示用
+    undoDepth: undoDepth(u.state),
+    redoDepth: redoDepth(u.state),
+  });
 });
 
 const view = new EditorView({
@@ -150,6 +157,21 @@ const view = new EditorView({
 view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
 view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
 
+// キーボード表示（＋ツールバー）でエディタの高さが縮んだ時、カーソルが表示域の外に
+// 取り残されていれば最小限だけスクロールして見せる。
+// y:"nearest" は「見えていれば何もしない」ので、通常のスクロール位置には干渉しない。
+window.addEventListener("resize", () => {
+  if (!view.hasFocus) return;
+  requestAnimationFrame(() => {
+    view.dispatch({
+      effects: EditorView.scrollIntoView(view.state.selection.main.head, {
+        y: "nearest",
+        yMargin: 24,
+      }),
+    });
+  });
+});
+
 // フッター（リンク元・2ホップ）のタップをネイティブへ流す
 setFooterPoster(native);
 
@@ -178,7 +200,8 @@ function setDocText(text: string) {
   view.dispatch({
     changes: { from: 0, to: view.state.doc.length, insert: text },
     selection: { anchor: head },
-    annotations: remote.of(true),
+    // 外部更新は Undo 履歴に乗せない（シェイク Undo で同期内容まで巻き戻さない）
+    annotations: [remote.of(true), Transaction.addToHistory.of(false)],
   });
   view.requestMeasure({
     read: () => {},
@@ -196,6 +219,10 @@ window.couchNotesRunCommand = (name: string) => {
     case "moveLineDown": moveLineDown(view); break;
     case "indent": indentLines(view); break;
     case "outdent": outdentLines(view); break;
+    // iOS の標準 Undo ジェスチャは WebKit 側のスタックを見るため CM の履歴に届かない。
+    // ツールバーから明示的に CM の履歴を叩く。
+    case "undo": undo(view); break;
+    case "redo": redo(view); break;
   }
   view.focus();
 };

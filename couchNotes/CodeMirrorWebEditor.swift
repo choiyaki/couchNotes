@@ -104,28 +104,67 @@ final class WebEditorBridge: ObservableObject {
     }
 }
 
-/// WKWebView が編集領域に自動で付けるフォームアシスタントバー（^ v ✓ のピル）を消す。
-/// 公開 API が無いため、内部コンテンツビュー（WKContent*）のランタイム生成サブクラスで
-/// inputAccessoryView が nil を返すよう上書きする。非公開 API の呼び出しはしない、
-/// 広く使われている確立済みの手法。バーの代わりは自前ツールバー（WebEditorBridge 経由）で出す。
+/// シェイク Undo／3本指ジェスチャ用のプロキシ NSUndoManager。
+/// 実際の履歴は CodeMirror が持つため、深さ（可否）だけを映し、
+/// 実行はブリッジ経由で CM の undo/redo コマンドへ委譲する。
+final class WebEditorUndoManager: UndoManager {
+    var onUndo: (() -> Void)?
+    var onRedo: (() -> Void)?
+    var cmCanUndo = false
+    var cmCanRedo = false
+
+    override var canUndo: Bool { cmCanUndo }
+    override var canRedo: Bool { cmCanRedo }
+    override func undo() { onUndo?() }
+    override func redo() { onRedo?() }
+}
+
+private var webEditorUndoManagerKey: UInt8 = 0
+
+/// WKWebView 内部のコンテンツビュー（WKContent*）に対するランタイム調整。
+/// 公開 API が無い2点を、ランタイム生成サブクラスのメソッド上書きで実現する
+/// （非公開 API の呼び出しはしない、広く使われている確立済みの手法）:
+/// 1. inputAccessoryView → nil（フォームアシスタントバーを消し、自前ツールバーで代替）
+/// 2. undoManager → プロキシ（シェイク Undo／3本指ジェスチャを CodeMirror の履歴に接続）
 private enum SystemAccessoryRemover {
-    static func remove(from webView: WKWebView) {
-        guard let target = webView.scrollView.subviews.first(where: {
+    private static func contentView(of webView: WKWebView) -> UIView? {
+        webView.scrollView.subviews.first {
             String(describing: type(of: $0)).hasPrefix("WKContent")
-        }) else { return }
+        }
+    }
+
+    static func remove(from webView: WKWebView) {
+        guard let target = contentView(of: webView) else { return }
 
         let className = "WKContentView_CouchNotesNoAccessory"
         var cls: AnyClass? = NSClassFromString(className)
         if cls == nil, let targetClass = object_getClass(target) {
             cls = objc_allocateClassPair(targetClass, className, 0)
             if let cls {
-                let sel = #selector(getter: UIResponder.inputAccessoryView)
-                let block: @convention(block) (AnyObject) -> UIView? = { _ in nil }
-                class_addMethod(cls, sel, imp_implementationWithBlock(block), "@@:")
+                let accessorySel = #selector(getter: UIResponder.inputAccessoryView)
+                let accessoryBlock: @convention(block) (AnyObject) -> UIView? = { _ in nil }
+                class_addMethod(cls, accessorySel,
+                                imp_implementationWithBlock(accessoryBlock), "@@:")
+
+                // undoManager: 関連オブジェクトに積んだプロキシを返す（未設定なら nil = 既定の探索へ）
+                let undoSel = #selector(getter: UIResponder.undoManager)
+                let undoBlock: @convention(block) (AnyObject) -> Any? = { obj in
+                    objc_getAssociatedObject(obj, &webEditorUndoManagerKey)
+                }
+                class_addMethod(cls, undoSel,
+                                imp_implementationWithBlock(undoBlock), "@@:")
+
                 objc_registerClassPair(cls)
             }
         }
         if let cls { object_setClass(target, cls) }
+    }
+
+    /// プロキシ UndoManager をコンテンツビューに関連付ける（remove の後に呼ぶ）。
+    static func attachUndoManager(_ manager: WebEditorUndoManager, to webView: WKWebView) {
+        guard let target = contentView(of: webView) else { return }
+        objc_setAssociatedObject(target, &webEditorUndoManagerKey, manager,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 }
 
@@ -161,6 +200,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         bridge?.webView = webView
 
         SystemAccessoryRemover.remove(from: webView)
+        SystemAccessoryRemover.attachUndoManager(context.coordinator.undoProxy, to: webView)
 
         if let dir = Self.resourceDirectory() {
             let index = dir.appendingPathComponent("index.html")
@@ -206,8 +246,18 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         /// それより古い世代に基づく編集メッセージは破棄する（同期との交差による本文破壊防止）。
         private var docVersion = 1
 
+        /// シェイク Undo／3本指ジェスチャを CM の履歴へ橋渡しするプロキシ。
+        let undoProxy = WebEditorUndoManager()
+
         init(_ parent: CodeMirrorWebEditor) {
             self.parent = parent
+            super.init()
+            undoProxy.onUndo = { [weak self] in
+                self?.webView?.evaluateJavaScript("window.couchNotesRunCommand('undo');")
+            }
+            undoProxy.onRedo = { [weak self] in
+                self?.webView?.evaluateJavaScript("window.couchNotesRunCommand('redo');")
+            }
         }
 
         /// JS 側 loading 完了後の "ready" 受信で初回テキストを送る。以降 text が外部から
@@ -312,6 +362,9 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 lastSentText = full
                 parent.text = full
                 isApplyingRemoteEdit = false
+                // シェイク Undo の有効/無効を CM の履歴深さに同期
+                undoProxy.cmCanUndo = (body["undoDepth"] as? Int ?? 0) > 0
+                undoProxy.cmCanRedo = (body["redoDepth"] as? Int ?? 0) > 0
 
             case "openWiki":
                 guard let target = body["target"] as? String else { return }
@@ -362,6 +415,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // WebKit プロセス再生成でコンテンツビューが作り直された場合に備えて再適用
             SystemAccessoryRemover.remove(from: webView)
+            SystemAccessoryRemover.attachUndoManager(undoProxy, to: webView)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

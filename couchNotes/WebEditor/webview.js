@@ -13604,7 +13604,7 @@
     get node() {
       if (!this.buffer)
         return this._tree;
-      let cache = this.bufferNode, result = null, depth = 0;
+      let cache = this.bufferNode, result = null, depth2 = 0;
       if (cache && cache.context == this.buffer) {
         scan:
           for (let index = this.index, d = this.stack.length; d >= 0; ) {
@@ -13613,13 +13613,13 @@
                 if (index == this.index)
                   return c;
                 result = c;
-                depth = d + 1;
+                depth2 = d + 1;
                 break scan;
               }
             index = this.stack[--d];
           }
       }
-      for (let i = depth; i < this.stack.length; i++)
+      for (let i = depth2; i < this.stack.length; i++)
         result = new BufferNode(this.buffer, result, this.stack[i]);
       return this.bufferNode = new BufferNode(this.buffer, result, this.index);
     }
@@ -13638,11 +13638,11 @@
     skipped, and `leave` isn't called for it.
     */
     iterate(enter, leave) {
-      for (let depth = 0; ; ) {
+      for (let depth2 = 0; ; ) {
         let mustLeave = false;
         if (this.type.isAnonymous || enter(this) !== false) {
           if (this.firstChild()) {
-            depth++;
+            depth2++;
             continue;
           }
           if (!this.type.isAnonymous)
@@ -13652,12 +13652,12 @@
           if (mustLeave && leave)
             leave(this);
           mustLeave = this.type.isAnonymous;
-          if (!depth)
+          if (!depth2)
             return;
           if (this.nextSibling())
             break;
           this.parent();
-          depth--;
+          depth2--;
           mustLeave = true;
         }
       }
@@ -13693,7 +13693,7 @@
     let cursor = Array.isArray(buffer) ? new FlatBufferCursor(buffer, buffer.length) : buffer;
     let types2 = nodeSet.types;
     let contextHash = 0, lookAhead = 0;
-    function takeNode(parentStart, minPos, children2, positions2, inRepeat, depth) {
+    function takeNode(parentStart, minPos, children2, positions2, inRepeat, depth2) {
       let { id, start, end, size } = cursor;
       let lookAheadAtStart = lookAhead, contextAtStart = contextHash;
       if (size < 0) {
@@ -13736,10 +13736,10 @@
               lastEnd = cursor.end;
             }
             cursor.next();
-          } else if (depth > 2500) {
+          } else if (depth2 > 2500) {
             takeFlatNode(start, endPos, localChildren, localPositions);
           } else {
-            takeNode(start, endPos, localChildren, localPositions, localInRepeat, depth + 1);
+            takeNode(start, endPos, localChildren, localPositions, localInRepeat, depth2 + 1);
           }
         }
         if (localInRepeat >= 0 && lastGroup > 0 && lastGroup < localChildren.length)
@@ -15592,17 +15592,17 @@
   }
   function matchMarkedBrackets(_state, _pos, dir, token, handle, matching, brackets) {
     let parent = token.parent, firstToken = { from: handle.from, to: handle.to };
-    let depth = 0, cursor = parent === null || parent === void 0 ? void 0 : parent.cursor();
+    let depth2 = 0, cursor = parent === null || parent === void 0 ? void 0 : parent.cursor();
     if (cursor && (dir < 0 ? cursor.childBefore(token.from) : cursor.childAfter(token.to)))
       do {
         if (dir < 0 ? cursor.to <= token.from : cursor.from >= token.to) {
-          if (depth == 0 && matching.indexOf(cursor.type.name) > -1 && cursor.from < cursor.to) {
+          if (depth2 == 0 && matching.indexOf(cursor.type.name) > -1 && cursor.from < cursor.to) {
             let endHandle = findHandle(cursor);
             return { start: firstToken, end: endHandle ? { from: endHandle.from, to: endHandle.to } : void 0, matched: true };
           } else if (matchingNodes(cursor.type, dir, brackets)) {
-            depth++;
+            depth2++;
           } else if (matchingNodes(cursor.type, -dir, brackets)) {
-            if (depth == 0) {
+            if (depth2 == 0) {
               let endHandle = findHandle(cursor);
               return {
                 start: firstToken,
@@ -15610,7 +15610,7 @@
                 matched: false
               };
             }
-            depth--;
+            depth2--;
           }
         }
       } while (dir < 0 ? cursor.prevSibling() : cursor.nextSibling());
@@ -15624,7 +15624,7 @@
     if (bracket2 < 0 || bracket2 % 2 == 0 != dir > 0)
       return null;
     let startToken = { from: dir < 0 ? pos - 1 : pos, to: dir > 0 ? pos + 1 : pos };
-    let iter = state.doc.iterRange(pos, dir > 0 ? state.doc.length : 0), depth = 0;
+    let iter = state.doc.iterRange(pos, dir > 0 ? state.doc.length : 0), depth2 = 0;
     for (let distance = 0; !iter.next().done && distance <= maxScanDistance; ) {
       let text = iter.value;
       if (dir < 0)
@@ -15635,11 +15635,11 @@
         if (found < 0 || tree.resolveInner(basePos + pos2, 1).type != tokenType)
           continue;
         if (found % 2 == 0 == dir > 0) {
-          depth++;
-        } else if (depth == 1) {
+          depth2++;
+        } else if (depth2 == 1) {
           return { start: startToken, end: { from: basePos + pos2, to: basePos + pos2 + 1 }, matched: found >> 1 == bracket2 >> 1 };
         } else {
-          depth--;
+          depth2--;
         }
       }
       if (dir > 0)
@@ -15962,6 +15962,23 @@
   var redo = /* @__PURE__ */ cmd(1, false);
   var undoSelection = /* @__PURE__ */ cmd(0, true);
   var redoSelection = /* @__PURE__ */ cmd(1, true);
+  function depth(side) {
+    return function(state) {
+      let histState = state.field(historyField_, false);
+      if (!histState)
+        return 0;
+      let branch = side == 0 ? histState.done : histState.undone;
+      return branch.length - (branch.length && !branch[0].changes ? 1 : 0);
+    };
+  }
+  var undoDepth = /* @__PURE__ */ depth(
+    0
+    /* BranchName.Done */
+  );
+  var redoDepth = /* @__PURE__ */ depth(
+    1
+    /* BranchName.Undone */
+  );
   var HistEvent = class _HistEvent {
     constructor(changes, effects, mapped, startSelection, selectionsAfter) {
       this.changes = changes;
@@ -18949,7 +18966,14 @@
       return;
     if (u.transactions.some((t2) => t2.annotation(remote)))
       return;
-    native.postMessage({ type: "edit", text: u.state.doc.toString(), version: docVersion });
+    native.postMessage({
+      type: "edit",
+      text: u.state.doc.toString(),
+      version: docVersion,
+      // シェイク Undo（ネイティブの NSUndoManager プロキシ）の有効/無効表示用
+      undoDepth: undoDepth(u.state),
+      redoDepth: redoDepth(u.state)
+    });
   });
   var view = new EditorView({
     parent: document.getElementById("editor"),
@@ -18989,6 +19013,18 @@
   });
   view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
   view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
+  window.addEventListener("resize", () => {
+    if (!view.hasFocus)
+      return;
+    requestAnimationFrame(() => {
+      view.dispatch({
+        effects: EditorView.scrollIntoView(view.state.selection.main.head, {
+          y: "nearest",
+          yMargin: 24
+        })
+      });
+    });
+  });
   setFooterPoster(native);
   var configStyle = document.createElement("style");
   document.head.appendChild(configStyle);
@@ -19012,7 +19048,8 @@
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: text },
       selection: { anchor: head },
-      annotations: remote.of(true)
+      // 外部更新は Undo 履歴に乗せない（シェイク Undo で同期内容まで巻き戻さない）
+      annotations: [remote.of(true), Transaction.addToHistory.of(false)]
     });
     view.requestMeasure({
       read: () => {
@@ -19041,6 +19078,12 @@
         break;
       case "outdent":
         outdentLines(view);
+        break;
+      case "undo":
+        undo(view);
+        break;
+      case "redo":
+        redo(view);
         break;
     }
     view.focus();

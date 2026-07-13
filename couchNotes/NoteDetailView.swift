@@ -544,7 +544,7 @@ struct NoteDetailView: View {
             webToolbarButton(systemImage: "arrow.right.to.line") { webBridge.run("indent") }
             webToolbarButton(systemImage: "keyboard.chevron.compact.down") { webBridge.dismissKeyboard() }
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 5)
         .padding(.vertical, 8)
         .background(Color(.secondarySystemBackground))
     }
