@@ -1,17 +1,19 @@
-// 画像 ![](http...) のインライン表示。
-// ネイティブ版（UITextView）と同じ「画像行の下に padding で余白を予約し、
-// そこへ絶対配置の <img> を重ねる」オーバーレイ方式。
+// 画像 ![](http...) の表示。
 //
-// 以前のブロックウィジェット方式（contenteditable=false の DOM 島を行間に挿入）は、
-// iOS のスペース長押しカーソル移動・選択ハンドル操作が島を跨ぐ時に
-// ネイティブ選択が乱れる（勝手に選択化・範囲が飛ぶ）ため廃止した。
-// 本文の DOM は純粋なテキスト行のままなので、ネイティブ選択は画像の存在を感知しない。
+// 表示方式は2系統:
+//   1. 生表示の行（ライブプレビュー無効時・カーソル行）:
+//      ネイティブ版と同じ「行下に padding で余白を予約し、絶対配置の <img> を重ねる」
+//      オーバーレイ方式。本文 DOM は純粋なテキストのままで、iOS のネイティブ選択と干渉しない。
+//   2. ライブプレビュー時の非アクティブ行:
+//      記法を隠して、その位置に画像そのものをインラインウィジェットで表示（Cosense 風）。
+//      カーソルが行に入るとウィジェットは消えて 1 の生表示に戻る。
 //
 // 拡張仕様（従来どおり）:
 //   - ![|30](url) のように alt に |数値 を書くと、エディタ幅のその % を「幅」に指定。
 //   - 同一行に複数の画像 URL を書くと横並び表示。幅指定の無い画像は残り幅を均等割り。
 import { EditorState, Range, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
+import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
+import { livePreviewField, setLivePreview } from "./state";
 
 const PLACEHOLDER_HEIGHT = 200; // 実寸が分かるまでの予約高さ（native placeholderHeight と同値）
 const GAP = 6;                  // 行と画像・画像同士の間隔
@@ -40,7 +42,7 @@ let editorWidth = 0;
 let viewRef: EditorView | null = null;
 
 /** 画像レイアウトの再計算が必要になった（実寸判明・エディタ幅変化） */
-const imagesChanged = StateEffect.define<void>();
+export const imagesChanged = StateEffect.define<void>();
 
 /** .cm-content の左右 padding（テキストの実開始位置）。config の横インセットもここに乗る。 */
 function contentPadding(view: EditorView): { left: number; right: number } {
@@ -86,8 +88,59 @@ function groupSizes(specs: ImgSpec[], width: number): { w: number; h: number }[]
   });
 }
 
-/** 画像行に padding-bottom で余白を予約する行デコレーション */
+/** 行テキスト中の各画像（IMG_RE の出現順）の表示サイズ。decorations のインラインウィジェット用。 */
+export function lineImageSizes(text: string): { url: string; w: number; h: number }[] {
+  const specs = parseLine(text);
+  if (specs.length === 0) return [];
+  const width = editorWidth || 360;
+  return groupSizes(specs, width).map((s, i) => ({ url: specs[i].url, w: s.w, h: s.h }));
+}
+
+/** ライブプレビューの非アクティブ行に画像を直接描くインラインウィジェット。
+    href 付き（[![](img)](url)）はタップで外部リンクを開く（main.ts の clickHandler が拾う）。 */
+export class InlineImageWidget extends WidgetType {
+  constructor(
+    readonly url: string,
+    readonly w: number,
+    readonly h: number,
+    readonly href: string | null
+  ) {
+    super();
+  }
+  eq(other: InlineImageWidget) {
+    return (
+      other.url === this.url &&
+      Math.abs(other.w - this.w) < 1 &&
+      Math.abs(other.h - this.h) < 1 &&
+      other.href === this.href
+    );
+  }
+  ignoreEvent() {
+    return false; // クリックは contentDOM のハンドラへバブルさせる（リンク画像用）
+  }
+  toDOM(view: EditorView) {
+    const wrap = document.createElement("span");
+    wrap.className = "cm-cn-inline-img" + (this.href ? " cm-cn-linked-img" : "");
+    if (this.href) wrap.setAttribute("data-href", this.href);
+    const img = document.createElement("img");
+    img.src = this.url;
+    img.style.width = `${Math.round(this.w)}px`;
+    img.style.height = `${Math.round(this.h)}px`;
+    img.addEventListener("load", () => {
+      if (naturalSizes.has(this.url)) return;
+      naturalSizes.set(this.url, { w: img.naturalWidth, h: img.naturalHeight });
+      view.dispatch({ effects: imagesChanged.of() }); // 実寸でサイズを作り直す
+    });
+    wrap.appendChild(img);
+    return wrap;
+  }
+}
+
+/** 画像行に padding-bottom で余白を予約する行デコレーション。
+    ライブプレビュー時は画像をインラインウィジェットで行内に描く（アクティブ行も併置）ため、
+    オーバーレイ＋余白予約は「ライブプレビュー無効時」だけ使う。 */
 function buildPaddings(state: EditorState): DecorationSet {
+  if (state.field(livePreviewField)) return Decoration.set([]);
   const width = editorWidth || 360;
   const out: Range<Decoration>[] = [];
   for (let i = 1; i <= state.doc.lines; i++) {
@@ -106,7 +159,10 @@ function buildPaddings(state: EditorState): DecorationSet {
 const imagePaddingField = StateField.define<DecorationSet>({
   create: buildPaddings,
   update(deco, tr) {
-    if (tr.docChanged || tr.effects.some((e) => e.is(imagesChanged))) {
+    if (
+      tr.docChanged ||
+      tr.effects.some((e) => e.is(imagesChanged) || e.is(setLivePreview))
+    ) {
       return buildPaddings(tr.state);
     }
     return deco;
@@ -162,7 +218,9 @@ const imageOverlay = ViewPlugin.fromClass(
         u.docChanged ||
         u.viewportChanged ||
         u.geometryChanged ||
-        u.transactions.some((t) => t.effects.some((e) => e.is(imagesChanged)))
+        u.transactions.some((t) =>
+          t.effects.some((e) => e.is(imagesChanged) || e.is(setLivePreview))
+        )
       ) {
         this.schedule();
       }
@@ -177,6 +235,8 @@ const imageOverlay = ViewPlugin.fromClass(
 
     read(): Placed[] {
       const view = this.view;
+      // ライブプレビュー時は画像をインラインウィジェットで描くため、オーバーレイは出さない
+      if (view.state.field(livePreviewField)) return [];
       const width = editorWidth || availableWidth(view) || 360;
       const scrollerRect = view.scrollDOM.getBoundingClientRect();
       const contentRect = view.contentDOM.getBoundingClientRect();

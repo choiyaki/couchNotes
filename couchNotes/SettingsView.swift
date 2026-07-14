@@ -325,6 +325,7 @@ struct EditorSettingsView: View {
     @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
     @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
     @AppStorage("editor_webFontFamily") private var webFontFamily = ""
+    @AppStorage("editor_livePreview") private var livePreview = true
 
     var body: some View {
         Form {
@@ -348,6 +349,12 @@ struct EditorSettingsView: View {
             }
 
             if useCodeMirror {
+                Section(
+                    footer: Text("カーソルのある行だけ記法（## や [[ ]] など）を表示し、他の行はプレビュー表示にします（Cosense 風）。")
+                ) {
+                    Toggle("記法を隠す（ライブプレビュー）", isOn: $livePreview)
+                }
+
                 Section(
                     header: Text("Web フォント（新エディタ）"),
                     footer: Text("Google Fonts 等の CSS URL とフォント名を指定すると本文に適用されます。例: URL に https://fonts.googleapis.com/css2?family=Noto+Serif+JP&display=swap、フォント名に Noto Serif JP。空欄でシステムフォント。オフライン時は自動でシステムフォントに戻ります。")

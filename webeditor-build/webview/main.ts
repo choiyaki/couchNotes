@@ -9,9 +9,17 @@ import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
 import { imageField, refreshImageLayout } from "./images";
-import { setWikiTargets, wikiTargetsField, setMentionedTargets, mentionedTargetsField } from "./state";
+import {
+  setWikiTargets,
+  wikiTargetsField,
+  setMentionedTargets,
+  mentionedTargetsField,
+  setLivePreview,
+  livePreviewField,
+} from "./state";
 import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
+import { mathPreview } from "./math";
 import {
   listContinuation,
   indentLines,
@@ -70,6 +78,17 @@ const cnKeymap = keymap.of([
 // リンクは修飾キーなしのタップで直接開く。チェックボックスはトグル。
 const clickHandler = EditorView.domEventHandlers({
   mousedown(e, view) {
+    // ライブプレビューのリンク付き画像 [![](img)](url) のタップ → 外部リンクを開く
+    const linkedImg = (e.target as HTMLElement | null)?.closest?.(".cm-cn-linked-img");
+    if (linkedImg) {
+      const href = linkedImg.getAttribute("data-href");
+      if (href) {
+        native.postMessage({ type: "openExternal", url: href });
+        e.preventDefault();
+        return true;
+      }
+    }
+
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return false;
     const line = view.state.doc.lineAt(pos);
@@ -159,6 +178,7 @@ const view = new EditorView({
     extensions: [
       wikiTargetsField,
       mentionedTargetsField,
+      livePreviewField,
       history(),
       // drawSelection / allowMultipleSelections は使わない:
       // CodeMirror の自前選択描画は、iOS のスペース長押し（トラックパッドモード）が動かす
@@ -175,6 +195,7 @@ const view = new EditorView({
       }),
       liveStyling,
       imageField,
+      mathPreview,
       autocompletion({
         override: [wikiCompletionSource],
         activateOnTyping: true,
@@ -310,6 +331,7 @@ window.couchNotesReceive = (msg: any) => {
         effects: [
           setWikiTargets.of((msg.wikiTargets ?? []) as string[]),
           setMentionedTargets.of((msg.mentionedTargets ?? []) as string[]),
+          setLivePreview.of(!!msg.livePreview),
         ],
       });
       setDocText(msg.text ?? "");
@@ -328,6 +350,7 @@ window.couchNotesReceive = (msg: any) => {
       break;
     case "config":
       applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
+      view.dispatch({ effects: setLivePreview.of(!!msg.livePreview) });
       break;
     case "insertText": {
       // ツールバーのペースト（テキスト）等。ユーザー編集扱いで Swift 側へもエコーさせる。

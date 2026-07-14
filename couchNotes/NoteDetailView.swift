@@ -62,6 +62,8 @@ struct NoteDetailView: View {
     // Web フォント（新エディタのみ）
     @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
     @AppStorage("editor_webFontFamily") private var webFontFamily = ""
+    // ライブプレビュー（記法隠し。新エディタのみ）
+    @AppStorage("editor_livePreview") private var livePreview = true
 
     @ObservedObject private var network = NetworkMonitor.shared
 
@@ -356,6 +358,7 @@ struct NoteDetailView: View {
                             horizontalInset: landscapeSideInset,
                             fontCSSURL: webFontCSSURL,
                             fontFamily: webFontFamily,
+                            livePreview: livePreview,
                             backlinks: backlinks,
                             twoHop: twoHop,
                             footerLayout: backlinksLayout,

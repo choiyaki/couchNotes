@@ -60,6 +60,14 @@ body {
   font-size: 1.1875em;
   font-weight: 600;
 }
+.cm-cn-h4 {
+  font-size: 1.0625em;
+  font-weight: 600;
+}
+.cm-cn-h5 {
+  font-size: 1em;
+  font-weight: 600;
+}
 
 /* 見出しマーカー・リストマーカー（tertiaryLabel 相当の淡色） */
 .cm-cn-marker {
@@ -101,6 +109,108 @@ body {
 .cm-cn-blockid {
   font-size: 0.69em;
   opacity: 0.6;
+}
+
+/* 強調（太字・斜体・取り消し線） */
+.cm-cn-bold {
+  font-weight: 700;
+}
+.cm-cn-italic {
+  font-style: italic;
+}
+.cm-cn-strike {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* ライブプレビューでリストマーカー「- 」の代わりに出す「•」。
+   チェックボックスと同じ幅・マージン（1em + 0.25em = GLYPH_EM）にして中心を揃える。 */
+/* checkbox と同一のボックスモデル（width/height/margin/vertical-align）にして、
+   SVG の円を中央に描く。中心位置が checkbox と構造的に一致する。 */
+.cm-cn-bullet {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.25em;
+  vertical-align: -0.12em;
+  background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4" fill="%238e8e93"/></svg>')
+    center / 100% no-repeat;
+}
+
+/* ライブプレビューのチェックボックス（タップでトグル）。
+   グリフ文字は小さすぎるため CSS で箱を描く。占有幅 1.25em（GLYPH_EM と一致）。
+   ✓ は絶対配置で描く: 空の inline-block（未チェック）と文字入り（チェック済み）で
+   ベースラインの決まり方が変わり、上下位置がずれるのを防ぐ。 */
+.cm-cn-checkbox {
+  display: inline-block;
+  box-sizing: border-box;
+  position: relative;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.25em;
+  vertical-align: -0.12em;
+  border: 1.5px solid light-dark(#007aff, #0a84ff);
+  border-radius: 4px;
+  cursor: pointer;
+}
+/* ✓ は擬似要素だと WebKit で位置が乱れるため、SVG 背景で確実に箱の中へ描く */
+.cm-cn-checkbox-done {
+  background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 8.5 L6.5 12 L13 4.5" fill="none" stroke="%23007aff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    center / 74% no-repeat;
+}
+@media (prefers-color-scheme: dark) {
+  .cm-cn-checkbox-done {
+    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 8.5 L6.5 12 L13 4.5" fill="none" stroke="%230a84ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+  }
+}
+
+/* 数式（$...$ / $$...$$） */
+.cm-cn-math {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  color: light-dark(#8e44ad, #bf7fe8);
+}
+.cm-cn-math-widget {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;   /* 幅を超える数式はウィジェット内で横スクロール */
+  vertical-align: middle;
+  padding: 1px 0;
+}
+.cm-cn-math-block {
+  display: block;
+  text-align: center;
+}
+.cm-cn-math-tooltip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 6px;
+  padding: 8px 12px;
+  max-width: 90vw;
+  overflow-x: auto;
+}
+.cm-cn-math-tooltip-item {
+  flex: none;
+}
+.cm-tooltip:has(> .cm-cn-math-tooltip) {
+  background: light-dark(#ffffff, #2c2c2e);
+  border: 1px solid light-dark(#d1d1d6, #48484a);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+}
+
+/* ライブプレビューのインライン画像（記法位置に直接表示） */
+.cm-cn-inline-img img {
+  border-radius: 6px;
+  object-fit: cover;
+  vertical-align: text-bottom;
+  margin: 2px 0;
+}
+.cm-cn-linked-img {
+  cursor: pointer;
 }
 
 /* 画像 Markdown ![](url): 文字は常に少し小さく。 */

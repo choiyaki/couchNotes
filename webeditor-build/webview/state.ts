@@ -13,6 +13,19 @@ export const wikiTargetsField = StateField.define<string[]>({
   },
 });
 
+// ライブプレビュー（記法隠し）のオン/オフ。カーソル行は生表示、他の行は記法を隠す。
+export const setLivePreview = StateEffect.define<boolean>();
+
+export const livePreviewField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setLivePreview)) return e.value;
+    }
+    return value;
+  },
+});
+
 // どこかのノートの [[...]] に登場するが、まだページが存在しない名前（正規化済み・小文字）。
 // サジェスト専用。リンクの存在色分けには使わない（wikiTargetsField と分離）。
 export const setMentionedTargets = StateEffect.define<string[]>();

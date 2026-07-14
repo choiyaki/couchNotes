@@ -177,6 +177,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
     var horizontalInset: CGFloat = 0   // テキストの左右内側余白（Mac・ランドスケープ用）
     var fontCSSURL: String = ""        // Web フォントの CSS URL（Google Fonts 等。空=無効）
     var fontFamily: String = ""        // 適用する font-family 名（空=システムフォント）
+    var livePreview: Bool = false      // 記法隠し（カーソル行以外はプレビュー表示）
     var backlinks: [NoteItem] = []
     var twoHop: [TwoHopGroup] = []
     var footerLayout: String = "list"  // "list" | "grid"
@@ -218,7 +219,8 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         context.coordinator.pushExternalUpdateIfNeeded(text)
         context.coordinator.pushConfigIfNeeded(fontSize: fontSize, lineSpacing: lineSpacing,
                                                horizontalInset: horizontalInset,
-                                               fontCSSURL: fontCSSURL, fontFamily: fontFamily)
+                                               fontCSSURL: fontCSSURL, fontFamily: fontFamily,
+                                               livePreview: livePreview)
         context.coordinator.pushWikiTargetsIfNeeded(wikiTargets, mentioned: mentionedTargets)
         context.coordinator.pushFooterIfNeeded(backlinks: backlinks, twoHop: twoHop, layout: footerLayout)
     }
@@ -275,20 +277,24 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
 
         private var lastFontCSSURL: String?
         private var lastFontFamily: String?
+        private var lastLivePreview: Bool?
 
         func pushConfigIfNeeded(fontSize: CGFloat, lineSpacing: CGFloat, horizontalInset: CGFloat,
-                                fontCSSURL: String, fontFamily: String) {
+                                fontCSSURL: String, fontFamily: String, livePreview: Bool) {
             guard lastFontSize != fontSize || lastLineSpacing != lineSpacing
                     || lastHorizontalInset != horizontalInset
-                    || lastFontCSSURL != fontCSSURL || lastFontFamily != fontFamily else { return }
+                    || lastFontCSSURL != fontCSSURL || lastFontFamily != fontFamily
+                    || lastLivePreview != livePreview else { return }
             lastFontSize = fontSize
             lastLineSpacing = lineSpacing
             lastHorizontalInset = horizontalInset
             lastFontCSSURL = fontCSSURL
             lastFontFamily = fontFamily
+            lastLivePreview = livePreview
             send(type: "config", extra: [
                 "fontSize": fontSize, "lineSpacing": lineSpacing, "horizontalInset": horizontalInset,
                 "fontCSSURL": fontCSSURL, "fontFamily": fontFamily,
+                "livePreview": livePreview,
             ])
         }
 
@@ -358,6 +364,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 lastHorizontalInset = parent.horizontalInset
                 lastFontCSSURL = parent.fontCSSURL
                 lastFontFamily = parent.fontFamily
+                lastLivePreview = parent.livePreview
                 lastWikiTargets = parent.wikiTargets
                 lastMentionedTargets = parent.mentionedTargets
                 send(type: "init", extra: [
@@ -369,6 +376,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                     "horizontalInset": parent.horizontalInset,
                     "fontCSSURL": parent.fontCSSURL,
                     "fontFamily": parent.fontFamily,
+                    "livePreview": parent.livePreview,
                     "version": docVersion,
                 ])
                 pushFooterIfNeeded(backlinks: parent.backlinks, twoHop: parent.twoHop,
