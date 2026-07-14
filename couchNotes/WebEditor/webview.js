@@ -18204,6 +18204,17 @@
       return value;
     }
   });
+  var setMentionedTargets = StateEffect.define();
+  var mentionedTargetsField = StateField.define({
+    create: () => [],
+    update(value, tr) {
+      for (const e of tr.effects) {
+        if (e.is(setMentionedTargets))
+          return e.value;
+      }
+      return value;
+    }
+  });
 
   // webview/complete.ts
   function wikiCompletionSource(context) {
@@ -18213,20 +18224,29 @@
     const query = before.text.slice(2);
     const from = before.from + 2;
     const lower = query.toLowerCase();
+    const applyName = (name2) => (view2, _c, aFrom, aTo) => {
+      const hasClose = view2.state.sliceDoc(aTo, aTo + 2) === "]]";
+      const insert2 = name2 + "]]";
+      view2.dispatch({
+        changes: { from: aFrom, to: hasClose ? aTo + 2 : aTo, insert: insert2 },
+        selection: { anchor: aFrom + insert2.length },
+        userEvent: "input.complete"
+      });
+    };
     const names = context.state.field(wikiTargetsField);
-    const options = names.filter((n) => n.toLowerCase().includes(lower)).slice(0, 50).map((name2) => ({
+    const existing = names.filter((n) => n.toLowerCase().includes(lower)).slice(0, 50).map((name2) => ({
       label: name2,
       type: "text",
-      apply: (view2, _c, aFrom, aTo) => {
-        const hasClose = view2.state.sliceDoc(aTo, aTo + 2) === "]]";
-        const insert2 = name2 + "]]";
-        view2.dispatch({
-          changes: { from: aFrom, to: hasClose ? aTo + 2 : aTo, insert: insert2 },
-          selection: { anchor: aFrom + insert2.length },
-          userEvent: "input.complete"
-        });
-      }
+      apply: applyName(name2)
     }));
+    const existingLower = new Set(names.map((n) => n.toLowerCase()));
+    const mentioned = context.state.field(mentionedTargetsField).filter((n) => n.includes(lower) && !existingLower.has(n)).slice(0, 30).map((name2) => ({
+      label: name2,
+      type: "text",
+      detail: "\u672A\u4F5C\u6210",
+      apply: applyName(name2)
+    }));
+    const options = [...existing, ...mentioned];
     if (options.length === 0)
       return null;
     return { from, options, filter: false };
@@ -19014,6 +19034,7 @@
       doc: "",
       extensions: [
         wikiTargetsField,
+        mentionedTargetsField,
         history(),
         // drawSelection / allowMultipleSelections は使わない:
         // CodeMirror の自前選択描画は、iOS のスペース長押し（トラックパッドモード）が動かす
@@ -19147,7 +19168,12 @@
         if (typeof msg.version === "number")
           docVersion = msg.version;
         applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
-        view.dispatch({ effects: setWikiTargets.of(msg.wikiTargets ?? []) });
+        view.dispatch({
+          effects: [
+            setWikiTargets.of(msg.wikiTargets ?? []),
+            setMentionedTargets.of(msg.mentionedTargets ?? [])
+          ]
+        });
         setDocText(msg.text ?? "");
         break;
       case "externalUpdate":
@@ -19156,7 +19182,12 @@
         setDocText(msg.text ?? "");
         break;
       case "wikiTargets":
-        view.dispatch({ effects: setWikiTargets.of(msg.targets ?? []) });
+        view.dispatch({
+          effects: [
+            setWikiTargets.of(msg.targets ?? []),
+            setMentionedTargets.of(msg.mentioned ?? [])
+          ]
+        });
         break;
       case "config":
         applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);

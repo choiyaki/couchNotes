@@ -97,6 +97,8 @@ struct NoteDetailView: View {
     @State private var backlinks: [NoteItem] = []
     // 2ホップリンク（新エディタのフッター用）
     @State private var twoHop: [TwoHopGroup] = []
+    // 言及のみの未作成ページ名（[[ ]] サジェスト用）
+    @State private var mentionedTargets: [String] = []
     // フッターの表示形式（リスト / グリッド）
     @AppStorage("backlinks_layout") private var backlinksLayout = "list"
 
@@ -348,6 +350,7 @@ struct NoteDetailView: View {
                         CodeMirrorWebEditor(
                             text: $editingContent,
                             wikiTargets: wikiTargetNames,
+                            mentionedTargets: mentionedTargets,
                             fontSize: CGFloat(fontSize),
                             lineSpacing: CGFloat(lineSpacing),
                             horizontalInset: landscapeSideInset,
@@ -777,6 +780,18 @@ struct NoteDetailView: View {
         // 2ホップ（新エディタのフッター用）。自分と直接バックリンクは重複表示しない。
         let excluding = Set(backlinks.map(\.id) + [noteId])
         twoHop = await NoteStore.shared.twoHopGroups(for: noteId, excludingIDs: excluding)
+
+        // 言及のみの未作成ページ名（サジェスト用）: 全リンク先キーから実在ノートを除く。
+        // キーは正規化済み（小文字・.md 除去）なので、実在側も同じ形に揃えて比較する。
+        var existingKeys = Set<String>()
+        for note in notes {
+            var idKey = note.id.lowercased()
+            if idKey.hasSuffix(".md") { idKey = String(idKey.dropLast(3)) }
+            existingKeys.insert(idKey)
+            existingKeys.insert(note.shortTitle.lowercased())
+        }
+        let allKeys = await NoteStore.shared.allLinkTargetKeys()
+        mentionedTargets = allKeys.filter { !existingKeys.contains($0) }
     }
 
     // MARK: - フォルダ移動

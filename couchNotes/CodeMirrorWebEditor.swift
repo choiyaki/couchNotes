@@ -171,6 +171,7 @@ private enum SystemAccessoryRemover {
 struct CodeMirrorWebEditor: UIViewRepresentable {
     @Binding var text: String
     var wikiTargets: [String] = []
+    var mentionedTargets: [String] = []   // 言及のみの未作成ページ名（サジェスト専用）
     var fontSize: CGFloat = 16
     var lineSpacing: CGFloat = 0
     var horizontalInset: CGFloat = 0   // テキストの左右内側余白（Mac・ランドスケープ用）
@@ -218,7 +219,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         context.coordinator.pushConfigIfNeeded(fontSize: fontSize, lineSpacing: lineSpacing,
                                                horizontalInset: horizontalInset,
                                                fontCSSURL: fontCSSURL, fontFamily: fontFamily)
-        context.coordinator.pushWikiTargetsIfNeeded(wikiTargets)
+        context.coordinator.pushWikiTargetsIfNeeded(wikiTargets, mentioned: mentionedTargets)
         context.coordinator.pushFooterIfNeeded(backlinks: backlinks, twoHop: twoHop, layout: footerLayout)
     }
 
@@ -291,10 +292,13 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
             ])
         }
 
-        func pushWikiTargetsIfNeeded(_ targets: [String]) {
-            guard targets != lastWikiTargets else { return }
+        private var lastMentionedTargets: [String] = []
+
+        func pushWikiTargetsIfNeeded(_ targets: [String], mentioned: [String]) {
+            guard targets != lastWikiTargets || mentioned != lastMentionedTargets else { return }
             lastWikiTargets = targets
-            send(type: "wikiTargets", extra: ["targets": targets])
+            lastMentionedTargets = mentioned
+            send(type: "wikiTargets", extra: ["targets": targets, "mentioned": mentioned])
         }
 
         private var lastFooterJSON: String?
@@ -355,9 +359,11 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 lastFontCSSURL = parent.fontCSSURL
                 lastFontFamily = parent.fontFamily
                 lastWikiTargets = parent.wikiTargets
+                lastMentionedTargets = parent.mentionedTargets
                 send(type: "init", extra: [
                     "text": parent.text,
                     "wikiTargets": parent.wikiTargets,
+                    "mentionedTargets": parent.mentionedTargets,
                     "fontSize": parent.fontSize,
                     "lineSpacing": parent.lineSpacing,
                     "horizontalInset": parent.horizontalInset,

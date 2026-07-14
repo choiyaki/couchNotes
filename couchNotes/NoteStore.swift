@@ -552,6 +552,18 @@ actor NoteStore {
         return groups
     }
 
+    /// 全ノートの [[...]] に登場するリンク先キー（正規化済み・重複なし）。
+    /// 未作成ページのサジェスト（Cosense/Obsidian 風）用。
+    func allLinkTargetKeys() -> [String] {
+        guard let stmt = prepare("SELECT DISTINCT target_key FROM links ORDER BY target_key;") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { out.append(String(cString: c)) }
+        }
+        return out
+    }
+
     /// 正規化キー（小文字・.md 除去）から生存ノートを解決する。フルパス一致を優先し、次に basename 一致。
     private func resolveNote(forKey key: String) -> NoteItem? {
         let sql = """

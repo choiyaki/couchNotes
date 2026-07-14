@@ -9,7 +9,7 @@ import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
 import { imageField, refreshImageLayout } from "./images";
-import { setWikiTargets, wikiTargetsField } from "./state";
+import { setWikiTargets, wikiTargetsField, setMentionedTargets, mentionedTargetsField } from "./state";
 import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
 import {
@@ -158,6 +158,7 @@ const view = new EditorView({
     doc: "",
     extensions: [
       wikiTargetsField,
+      mentionedTargetsField,
       history(),
       // drawSelection / allowMultipleSelections は使わない:
       // CodeMirror の自前選択描画は、iOS のスペース長押し（トラックパッドモード）が動かす
@@ -305,7 +306,12 @@ window.couchNotesReceive = (msg: any) => {
     case "init":
       if (typeof msg.version === "number") docVersion = msg.version;
       applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
-      view.dispatch({ effects: setWikiTargets.of((msg.wikiTargets ?? []) as string[]) });
+      view.dispatch({
+        effects: [
+          setWikiTargets.of((msg.wikiTargets ?? []) as string[]),
+          setMentionedTargets.of((msg.mentionedTargets ?? []) as string[]),
+        ],
+      });
       setDocText(msg.text ?? "");
       break;
     case "externalUpdate":
@@ -313,7 +319,12 @@ window.couchNotesReceive = (msg: any) => {
       setDocText(msg.text ?? "");
       break;
     case "wikiTargets":
-      view.dispatch({ effects: setWikiTargets.of((msg.targets ?? []) as string[]) });
+      view.dispatch({
+        effects: [
+          setWikiTargets.of((msg.targets ?? []) as string[]),
+          setMentionedTargets.of((msg.mentioned ?? []) as string[]),
+        ],
+      });
       break;
     case "config":
       applyConfig(msg.fontSize, msg.lineSpacing, msg.horizontalInset, msg.fontCSSURL, msg.fontFamily);
