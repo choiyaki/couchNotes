@@ -18,16 +18,6 @@ import { livePreviewField, setLivePreview } from "./state";
 const PLACEHOLDER_HEIGHT = 200; // 実寸が分かるまでの予約高さ（native placeholderHeight と同値）
 const GAP = 6;                  // 行と画像・画像同士の間隔
 
-// TEMP DEBUG: main.ts の diag() と同じ経路（native 経由）でログを転送する。
-declare const window: any;
-function diagLog(label: string, extra?: Record<string, unknown>) {
-  try {
-    window.webkit.messageHandlers.couchNotes.postMessage({
-      type: "diagLog", label, t: performance.now(), info: extra ?? {},
-    });
-  } catch {}
-}
-
 interface ImgSpec {
   url: string;
   widthPct: number | null;
@@ -115,14 +105,31 @@ export function editorContentWidth(view?: EditorView): number {
   if (view) {
     const fresh = availableWidth(view);
     if (fresh > 0 && Math.abs(fresh - editorWidth) > 1) {
-      // TEMP DEBUG: 画像・テーブル幅が後から変わる問題の切り分け用
-      diagLog("editorWidth-self-heal", { old: editorWidth, new: fresh });
       editorWidth = fresh;
       // 既に古い幅で描かれているものを次のフレームで作り直す
       requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
     }
   }
   return editorWidth || 360;
+}
+
+/** 画像の読み込み失敗時に1回だけ再読み込みを試す（一時的なネットワーク不調向け）。
+    それでも失敗したら諦める（プレースホルダサイズのまま・console.warn のみ）。
+    src を差し替えて使い回す要素（オーバーレイのプール）にも対応できるよう、
+    再試行済みかどうかは URL 単位で判定し、再試行時点でも同じ URL のままなら実行する。 */
+export function attachImageErrorRetry(img: HTMLImageElement) {
+  img.addEventListener("error", () => {
+    const failedSrc = img.getAttribute("src");
+    if (!failedSrc) return;
+    if (img.dataset.cnRetriedFor === failedSrc) {
+      console.warn("[couchNotes] image failed to load:", failedSrc);
+      return;
+    }
+    img.dataset.cnRetriedFor = failedSrc;
+    setTimeout(() => {
+      if (img.getAttribute("src") === failedSrc) img.src = failedSrc;
+    }, 1500);
+  });
 }
 
 /** 画像の実寸が判明した時に呼ぶ（キャッシュ＋再レイアウト）。テーブルウィジェット等の外部から使う。 */
@@ -167,6 +174,7 @@ export class InlineImageWidget extends WidgetType {
       naturalSizes.set(this.url, { w: img.naturalWidth, h: img.naturalHeight });
       view.dispatch({ effects: imagesChanged.of() }); // 実寸でサイズを作り直す
     });
+    attachImageErrorRetry(img);
     wrap.appendChild(img);
     return wrap;
   }
@@ -243,8 +251,6 @@ const imageOverlay = ViewPlugin.fromClass(
     syncWidth() {
       const w = availableWidth(this.view);
       if (w > 0 && Math.abs(w - editorWidth) > 1) {
-        // TEMP DEBUG
-        diagLog("imageOverlay-syncWidth", { old: editorWidth, new: w });
         editorWidth = w;
         requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
       }
@@ -314,6 +320,7 @@ const imageOverlay = ViewPlugin.fromClass(
           naturalSizes.set(key, { w: img.naturalWidth, h: img.naturalHeight });
           viewRef?.dispatch({ effects: imagesChanged.of() }); // 実寸で余白を作り直す
         });
+        attachImageErrorRetry(img);
         this.container.appendChild(img);
       }
       for (let i = 0; i < placed.length; i++) {

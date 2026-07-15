@@ -63,24 +63,6 @@ declare global {
 const native = window.webkit.messageHandlers.couchNotes;
 const initPayload: InitPayload = window.__couchNotesInit ?? {};
 
-// TEMP DEBUG: 開いた瞬間の左寄り表示・画像サイズのタイミング切り分け用。
-// console.log に加えて native へも転送し、Xcode/コンソール.app の Swift ログと
-// 同じ場所で時系列を突き合わせられるようにする（Safari Web Inspector 不要）。
-const diagT0 = performance.now();
-function diag(label: string, extra?: Record<string, unknown>) {
-  const editor = document.getElementById("editor");
-  const info = {
-    windowInnerWidth: window.innerWidth,
-    editorClientWidth: editor?.clientWidth,
-    hasInitPayload: !!window.__couchNotesInit,
-    horizontalInset: initPayload.horizontalInset,
-    ...extra,
-  };
-  console.log(`[cn-diag] ${label} t=${(performance.now() - diagT0).toFixed(1)}ms`, info);
-  native.postMessage({ type: "diagLog", label, t: performance.now() - diagT0, info });
-}
-diag("script-start");
-
 // 拡張ホスト（Swift）由来の transaction を識別し、編集メッセージのエコーを防ぐ。
 const remote = Annotation.define<boolean>();
 
@@ -220,13 +202,6 @@ const root = document.documentElement;
 const fontLink = document.createElement("link");
 fontLink.rel = "stylesheet";
 let fontLinkAttached = false;
-// TEMP DEBUG: Web フォントの <link> 読み込み完了/失敗のタイミングを見る。
-// 旧方式（<style> 書き換え）での反映遅延が、この <link> 挿入（新しい外部スタイル
-// シートの追加）にブラウザ側のスタイル解決が引きずられていたせいかどうかを
-// 切り分けるためのログ。もしこれの load/error と反映タイミングが一致するなら
-// それが根本原因ということになる。
-fontLink.addEventListener("load", () => diag("fontLink-load", { href: fontLink.getAttribute("href") }));
-fontLink.addEventListener("error", () => diag("fontLink-error", { href: fontLink.getAttribute("href") }));
 
 function applyConfig(
   fontSize: unknown,
@@ -235,11 +210,6 @@ function applyConfig(
   fontCSSURL: unknown,
   fontFamily: unknown
 ) {
-  // TEMP DEBUG: 生の引数の型と値をそのまま見る
-  diag("applyConfig-enter", {
-    fontSizeType: typeof fontSize, fontSizeVal: String(fontSize),
-    hiType: typeof horizontalInset, hiVal: String(horizontalInset),
-  });
   const fs = typeof fontSize === "number" ? fontSize : 16;
   const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
   const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
@@ -269,22 +239,6 @@ function applyConfig(
   root.style.setProperty("--cn-padding-h", `${16 + hi}px`);
   // padding が変わると画像の X 起点・使える幅も変わるため作り直す
   refreshImageLayout();
-
-  // TEMP DEBUG: カスタムプロパティが実際に computed style へ反映されるまでの
-  // タイムラグを追う（本当に即時反映されるのか、何か別要因でまだ遅延するのか）。
-  const checkApplied = (label: string) => {
-    diag(label, {
-      cssVarFontSize: getComputedStyle(root).getPropertyValue("--cn-font-size"),
-      cssVarPaddingH: getComputedStyle(root).getPropertyValue("--cn-padding-h"),
-      computedFontSize: getComputedStyle(view.contentDOM).fontSize,
-      computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft,
-    });
-  };
-  checkApplied("applyConfig-check-sync");
-  requestAnimationFrame(() => checkApplied("applyConfig-check-raf"));
-  for (const ms of [50, 150, 300, 600, 1200]) {
-    setTimeout(() => checkApplied(`applyConfig-check-t${ms}`), ms);
-  }
 }
 
 const view = new EditorView({
@@ -331,24 +285,9 @@ const view = new EditorView({
   }),
 });
 
-diag("view-created", {
-  contentClientWidth: view.contentDOM.clientWidth,
-  scrollClientWidth: view.scrollDOM.clientWidth,
-});
-
 // フォーカス状態をネイティブへ通知（キーボードツールバーの表示制御用）
-view.contentDOM.addEventListener("focus", () => {
-  diag("focus", { contentClientWidth: view.contentDOM.clientWidth });
-  native.postMessage({ type: "focus" });
-});
+view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
 view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
-
-// TEMP DEBUG: WKWebView 自体のサイズ確定タイミングを見る
-new ResizeObserver((entries) => {
-  for (const e of entries) {
-    diag("editor-resize", { boxWidth: e.contentRect.width });
-  }
-}).observe(document.getElementById("editor")!);
 
 // キーボード表示（＋ツールバー）でエディタの高さが縮んだ時、カーソルが表示域の外に
 // 取り残されていれば最小限だけスクロールして見せる。
@@ -385,10 +324,6 @@ applyConfig(
   initPayload.fontCSSURL,
   initPayload.fontFamily
 );
-diag("applyConfig-done", {
-  computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft,
-  computedFontSize: getComputedStyle(view.contentDOM).fontSize,
-});
 
 // Web フォントの読み込み完了で文字幅が変わる → テーブルの測定キャッシュを捨てて再レイアウト
 document.fonts?.addEventListener?.("loadingdone", () => {

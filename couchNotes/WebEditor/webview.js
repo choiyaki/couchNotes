@@ -18277,17 +18277,6 @@
   // webview/images.ts
   var PLACEHOLDER_HEIGHT = 200;
   var GAP = 6;
-  function diagLog(label, extra) {
-    try {
-      window.webkit.messageHandlers.couchNotes.postMessage({
-        type: "diagLog",
-        label,
-        t: performance.now(),
-        info: extra ?? {}
-      });
-    } catch {
-    }
-  }
   var IMG_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
   function parseLine(text2) {
     const specs = [];
@@ -18352,12 +18341,27 @@
     if (view2) {
       const fresh = availableWidth(view2);
       if (fresh > 0 && Math.abs(fresh - editorWidth) > 1) {
-        diagLog("editorWidth-self-heal", { old: editorWidth, new: fresh });
         editorWidth = fresh;
         requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
       }
     }
     return editorWidth || 360;
+  }
+  function attachImageErrorRetry(img) {
+    img.addEventListener("error", () => {
+      const failedSrc = img.getAttribute("src");
+      if (!failedSrc)
+        return;
+      if (img.dataset.cnRetriedFor === failedSrc) {
+        console.warn("[couchNotes] image failed to load:", failedSrc);
+        return;
+      }
+      img.dataset.cnRetriedFor = failedSrc;
+      setTimeout(() => {
+        if (img.getAttribute("src") === failedSrc)
+          img.src = failedSrc;
+      }, 1500);
+    });
   }
   function noteNaturalSize(url, w, h, view2) {
     if (naturalSizes.has(url) || w <= 0 || h <= 0)
@@ -18394,6 +18398,7 @@
         naturalSizes.set(this.url, { w: img.naturalWidth, h: img.naturalHeight });
         view2.dispatch({ effects: imagesChanged.of() });
       });
+      attachImageErrorRetry(img);
       wrap.appendChild(img);
       return wrap;
     }
@@ -18453,7 +18458,6 @@
       syncWidth() {
         const w = availableWidth(this.view);
         if (w > 0 && Math.abs(w - editorWidth) > 1) {
-          diagLog("imageOverlay-syncWidth", { old: editorWidth, new: w });
           editorWidth = w;
           requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
         }
@@ -18514,6 +18518,7 @@
             naturalSizes.set(key, { w: img.naturalWidth, h: img.naturalHeight });
             viewRef?.dispatch({ effects: imagesChanged.of() });
           });
+          attachImageErrorRetry(img);
           this.container.appendChild(img);
         }
         for (let i = 0; i < placed.length; i++) {
@@ -33170,6 +33175,7 @@
           img.addEventListener("load", () => {
             noteNaturalSize(cell.url, img.naturalWidth, img.naturalHeight, view2);
           });
+          attachImageErrorRetry(img);
           holder.appendChild(img);
           wrap.appendChild(holder);
         } else {
@@ -33919,20 +33925,6 @@
   // webview/main.ts
   var native = window.webkit.messageHandlers.couchNotes;
   var initPayload = window.__couchNotesInit ?? {};
-  var diagT0 = performance.now();
-  function diag(label, extra) {
-    const editor = document.getElementById("editor");
-    const info = {
-      windowInnerWidth: window.innerWidth,
-      editorClientWidth: editor?.clientWidth,
-      hasInitPayload: !!window.__couchNotesInit,
-      horizontalInset: initPayload.horizontalInset,
-      ...extra
-    };
-    console.log(`[cn-diag] ${label} t=${(performance.now() - diagT0).toFixed(1)}ms`, info);
-    native.postMessage({ type: "diagLog", label, t: performance.now() - diagT0, info });
-  }
-  diag("script-start");
   var remote = Annotation.define();
   function linkAt(text2, col) {
     for (const m of text2.matchAll(/\[\[([^\]]+)\]\]/g)) {
@@ -34051,15 +34043,7 @@
   var fontLink = document.createElement("link");
   fontLink.rel = "stylesheet";
   var fontLinkAttached = false;
-  fontLink.addEventListener("load", () => diag("fontLink-load", { href: fontLink.getAttribute("href") }));
-  fontLink.addEventListener("error", () => diag("fontLink-error", { href: fontLink.getAttribute("href") }));
   function applyConfig(fontSize, lineSpacing, horizontalInset, fontCSSURL, fontFamily) {
-    diag("applyConfig-enter", {
-      fontSizeType: typeof fontSize,
-      fontSizeVal: String(fontSize),
-      hiType: typeof horizontalInset,
-      hiVal: String(horizontalInset)
-    });
     const fs = typeof fontSize === "number" ? fontSize : 16;
     const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
     const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
@@ -34082,19 +34066,6 @@
     root.style.setProperty("--cn-line-height", `calc(1.45em + ${ls}px)`);
     root.style.setProperty("--cn-padding-h", `${16 + hi}px`);
     refreshImageLayout();
-    const checkApplied = (label) => {
-      diag(label, {
-        cssVarFontSize: getComputedStyle(root).getPropertyValue("--cn-font-size"),
-        cssVarPaddingH: getComputedStyle(root).getPropertyValue("--cn-padding-h"),
-        computedFontSize: getComputedStyle(view.contentDOM).fontSize,
-        computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft
-      });
-    };
-    checkApplied("applyConfig-check-sync");
-    requestAnimationFrame(() => checkApplied("applyConfig-check-raf"));
-    for (const ms of [50, 150, 300, 600, 1200]) {
-      setTimeout(() => checkApplied(`applyConfig-check-t${ms}`), ms);
-    }
   }
   var view = new EditorView({
     parent: document.getElementById("editor"),
@@ -34139,20 +34110,8 @@
       ]
     })
   });
-  diag("view-created", {
-    contentClientWidth: view.contentDOM.clientWidth,
-    scrollClientWidth: view.scrollDOM.clientWidth
-  });
-  view.contentDOM.addEventListener("focus", () => {
-    diag("focus", { contentClientWidth: view.contentDOM.clientWidth });
-    native.postMessage({ type: "focus" });
-  });
+  view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
   view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
-  new ResizeObserver((entries) => {
-    for (const e of entries) {
-      diag("editor-resize", { boxWidth: e.contentRect.width });
-    }
-  }).observe(document.getElementById("editor"));
   window.addEventListener("resize", () => {
     if (!view.hasFocus)
       return;
@@ -34180,10 +34139,6 @@
     initPayload.fontCSSURL,
     initPayload.fontFamily
   );
-  diag("applyConfig-done", {
-    computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft,
-    computedFontSize: getComputedStyle(view.contentDOM).fontSize
-  });
   document.fonts?.addEventListener?.("loadingdone", () => {
     clearTableMeasureCache();
     refreshImageLayout();

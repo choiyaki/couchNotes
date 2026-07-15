@@ -117,15 +117,8 @@ struct NoteDetailView: View {
         // 幅が広い（Mac・iPad・iPhone横向き）時だけ余白を入れる。
         // 高さだけで判定すると、キーボード表示で高さが縮んだ縦持ち iPhone を
         // 横向きと誤検知してタイトル等に余白が入ってしまう。
-        guard editorSize.width > editorSize.height, editorSize.width >= 600 else {
-            // TEMP DEBUG: 初回 body 評価で editorSize が .zero のまま読まれていないか確認する
-            print("[cn-diag][swift][NoteDetailView] landscapeSideInset=0 editorSize=\(editorSize) t=\(Date().timeIntervalSince1970)")
-            return 0
-        }
-        let inset = max(editorSize.width * 0.12, 48)
-        // TEMP DEBUG: 上と同じ目的（何回目の body 評価で正しい値になるか）
-        print("[cn-diag][swift][NoteDetailView] landscapeSideInset=\(inset) editorSize=\(editorSize) t=\(Date().timeIntervalSince1970)")
-        return inset
+        guard editorSize.width > editorSize.height, editorSize.width >= 600 else { return 0 }
+        return max(editorSize.width * 0.12, 48)
     }
 
     private var trimmedSearch: String {
@@ -437,16 +430,8 @@ struct NoteDetailView: View {
         .background(
             GeometryReader { geo in
                 Color.clear
-                    .onAppear {
-                        // TEMP DEBUG: GeometryReader が実測値を返す（=editorSize が初めて正しくなる）タイミングを見る
-                        print("[cn-diag][swift][NoteDetailView] editorSize.onAppear=\(geo.size) t=\(Date().timeIntervalSince1970)")
-                        editorSize = geo.size
-                    }
-                    .onChange(of: geo.size) { _, newSize in
-                        // TEMP DEBUG: Mac でのウィンドウリサイズ等、以後の変化を見る
-                        print("[cn-diag][swift][NoteDetailView] editorSize.onChange=\(newSize) t=\(Date().timeIntervalSince1970)")
-                        editorSize = newSize
-                    }
+                    .onAppear { editorSize = geo.size }
+                    .onChange(of: geo.size) { _, newSize in editorSize = newSize }
             }
         )
         // 旧エディタ: SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止（インセットは自前管理）。

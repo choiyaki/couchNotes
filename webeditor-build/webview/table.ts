@@ -13,7 +13,7 @@
 //   - セル内はプレーンテキスト＋数式（KaTeX）のみ。文字装飾はしない。
 //   - タップはカーソルを行末に置く（リンク付き画像のタップはリンクを開く）。
 import { EditorView, WidgetType } from "@codemirror/view";
-import { editorContentWidth, lineImageSizes, noteNaturalSize } from "./images";
+import { attachImageErrorRetry, editorContentWidth, lineImageSizes, noteNaturalSize } from "./images";
 import { INLINE_MATH_RE, renderTeX } from "./math";
 
 const CELL_GAP = 8;        // セル間の横ギャップ(px)
@@ -285,6 +285,7 @@ export class TableRowWidget extends WidgetType {
         img.addEventListener("load", () => {
           noteNaturalSize(cell.url, img.naturalWidth, img.naturalHeight, view);
         });
+        attachImageErrorRetry(img);
         holder.appendChild(img);
         wrap.appendChild(holder);
       } else {
