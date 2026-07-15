@@ -4,6 +4,16 @@
 
 :root {
   color-scheme: light dark;
+  /* アプリ設定（フォント・行間・横インセット）は main.ts が
+     document.documentElement.style.setProperty(...) で直接書き換える。
+     以前は <style> 要素の textContent を書き換える方式だったが、WKWebView では
+     それが computed style に反映されるまで数百ms〜遅延することがあり、ページ表示
+     直後だけ左寄せ・小さいフォントのままになる不具合の原因だった。カスタム
+     プロパティの値はインラインスタイルと同じ扱いで即時反映されるためこちらに統一する。 */
+  --cn-font-family: -apple-system, "Hiragino Sans", sans-serif;
+  --cn-font-size: 16px;
+  --cn-line-height: 1.45em;
+  --cn-padding-h: 16px;
 }
 
 html,
@@ -20,10 +30,16 @@ body {
   height: 100%;
 }
 
+/* .cm-tooltip-autocomplete / .cn-footer は .cm-editor の DOM 階層外にあるが、
+   CSS カスタムプロパティは :root からドキュメント全体へ継承されるので届く。 */
+.cm-editor,
+.cm-tooltip-autocomplete > ul,
+.cn-footer {
+  font-family: var(--cn-font-family);
+}
+
 .cm-editor {
-  /* ネイティブ版（UIFont.systemFont）に合わせてシステムフォント */
-  font-family: -apple-system, "Hiragino Sans", sans-serif;
-  font-size: 16px; /* 実際の値は main.ts が設定（editor_fontSize） */
+  font-size: var(--cn-font-size);
 }
 
 .cm-editor.cm-focused {
@@ -31,18 +47,20 @@ body {
 }
 
 /* CM6 デフォルトテーマの .cm-content（padding:4px 0）を上書きするため
-   .cm-editor を前置して詳細度を上げる。これが無いと左 padding が効かない。 */
+   .cm-editor を前置して詳細度を上げる。 */
 .cm-editor .cm-content {
   /* タブ ≒ 半角スペース 2 つ分（couchNotes の tabWidth に対応） */
   tab-size: 2;
   -moz-tab-size: 2;
-  padding: 12px 16px 80px; /* 下は本文終端の余白（native defaultBottomInset 相当） */
+  padding-top: 12px;
+  padding-bottom: 80px; /* 本文終端の余白（native defaultBottomInset 相当） */
+  padding-left: var(--cn-padding-h);
+  padding-right: var(--cn-padding-h);
 }
 
 .cm-editor .cm-line {
   padding: 0;
-  /* line-height は main.ts が editor_lineSpacing から設定 */
-  line-height: 1.45;
+  line-height: var(--cn-line-height);
 }
 
 /* 見出し（# / ## / ###）: 文字サイズ拡大 + 太字 */
@@ -202,12 +220,39 @@ body {
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
 }
 
+/* 暗黙テーブル（画像＋テキスト混在行）。列幅・高さは table.ts が計算した px 値を強制。 */
+.cm-cn-table {
+  display: flex;
+  align-items: flex-start;   /* 上詰め（仕様どおり） */
+  column-gap: 8px;           /* table.ts の CELL_GAP と一致させる */
+  overflow: hidden;          /* 実測誤差のはみ出しを行内に収める */
+  max-width: 100%;           /* 幅の計算がずれても行からはみ出させない保険 */
+  margin: 2px 0;
+}
+.cm-cn-table-cell-text {
+  overflow-wrap: anywhere;   /* 隠し測定と同じ折り返し規則にする */
+  flex: none;
+}
+.cm-cn-table-img { flex: none; }
+.cm-cn-table-img img {
+  display: block;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+/* ライブプレビューのアクティブ画像行: 画像ぶんに予約した縦幅を薄い灰色で示す */
+.cm-cn-imgline-active {
+  background: light-dark(rgb(0 0 0 / 0.05), rgb(255 255 255 / 0.07));
+  border-radius: 8px;
+}
+
 /* ライブプレビューのインライン画像（記法位置に直接表示） */
 .cm-cn-inline-img img {
   border-radius: 6px;
   object-fit: cover;
   vertical-align: text-bottom;
   margin: 2px 0;
+  max-width: 100%;   /* 幅の計算がずれても行からはみ出させない保険 */
 }
 .cm-cn-linked-img {
   cursor: pointer;

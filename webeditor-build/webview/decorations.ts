@@ -14,8 +14,9 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { wikiTargetsField, livePreviewField } from "./state";
-import { lineImageSizes, InlineImageWidget, imagesChanged } from "./images";
+import { lineImageSizes, InlineImageWidget, imagesChanged, editorContentWidth } from "./images";
 import { MathWidget, BLOCK_MATH_RE, INLINE_MATH_RE } from "./math";
+import { tableForLine, TableRowWidget } from "./table";
 import { toggleCheckboxAt } from "./commands";
 
 const TAB_SIZE = 2;
@@ -129,6 +130,30 @@ function styleLine(
     return;
   }
 
+  // --- 暗黙テーブル（画像＋テキスト混在行、ライブプレビューのみ）---
+  // 非アクティブ: 行全体をテーブルウィジェット（固定高さ rowH）に置換。
+  // アクティブ: 生記法＋同じ rowH を min-height で予約（高さが一致し、出入りで動かない）。
+  if (ctx.livePreview) {
+    const table = tableForLine(view, text);
+    if (table) {
+      if (hide) {
+        out.push(
+          Decoration.replace({ widget: new TableRowWidget(table) })
+            .range(lineFrom, lineFrom + text.length)
+        );
+      } else {
+        styleInline(text, lineFrom, active, hide, out, ctx, true);
+        out.push(
+          Decoration.line({
+            class: "cm-cn-imgline-active",
+            attributes: { style: `min-height:${table.rowH + 4}px` },
+          }).range(lineFrom)
+        );
+      }
+      return;
+    }
+  }
+
   // --- 見出し（# 〜 #####）---
   const head = /^(#{1,5}) /.exec(text);
   if (head) {
@@ -218,7 +243,8 @@ function styleInline(
   active: boolean,
   hide: boolean,
   out: Range<Decoration>[],
-  ctx: Ctx
+  ctx: Ctx,
+  skipImageReserve = false   // テーブル行は予約高さを styleLine 側（テーブル高さ）で入れる
 ) {
   // covered: 後続の裸 URL・強調判定でスキップする範囲（Markdown リンク・画像）
   const covered: Array<[number, number]> = [];
@@ -263,11 +289,13 @@ function styleInline(
     imgIndex++;
   }
 
-  // ライブプレビューのアクティブ行: 画像ぶんの高さを予約（+4 はインライン画像の上下 margin 2px×2）
-  if (ctx.livePreview && !hide && imgSizes && imgSizes.length > 0) {
+  // ライブプレビューのアクティブ行: 画像ぶんの高さを予約（+4 はインライン画像の上下 margin 2px×2）。
+  // 予約領域は薄い灰色にして「この縦幅が画像」だと分かるようにする。
+  if (ctx.livePreview && !hide && !skipImageReserve && imgSizes && imgSizes.length > 0) {
     const rowH = Math.max(...imgSizes.map((sz) => sz.h));
     out.push(
       Decoration.line({
+        class: "cm-cn-imgline-active",
         attributes: { style: `min-height:${Math.round(rowH) + 4}px` },
       }).range(lineFrom)
     );
@@ -388,13 +416,18 @@ function styleInline(
 }
 
 function build(view: EditorView): DecorationSet {
+  // エディタ幅をその場で実測して自己修復（古い幅のままだと画像・テーブルが横パディングを無視する）
+  editorContentWidth(view);
   const names = view.state.field(wikiTargetsField);
-  // カーソル／選択が掛かっている行番号を集める（記法の生表示・画像 Markdown のアクティブ判定用）
+  // カーソル／選択が掛かっている行番号を集める（記法の生表示・画像 Markdown のアクティブ判定用）。
+  // フォーカスが無い時（キーボード非表示・ページ開いた直後）はアクティブ行を作らず全行プレビュー。
   const activeLines = new Set<number>();
-  for (const r of view.state.selection.ranges) {
-    const a = view.state.doc.lineAt(r.from).number;
-    const b = view.state.doc.lineAt(r.to).number;
-    for (let n = a; n <= b; n++) activeLines.add(n);
+  if (view.hasFocus) {
+    for (const r of view.state.selection.ranges) {
+      const a = view.state.doc.lineAt(r.from).number;
+      const b = view.state.doc.lineAt(r.to).number;
+      for (let n = a; n <= b; n++) activeLines.add(n);
+    }
   }
   const ctx: Ctx = {
     wiki: new Set(names.map((n) => n.toLowerCase())),
@@ -424,6 +457,7 @@ export const liveStyling = ViewPlugin.fromClass(
         u.docChanged ||
         u.viewportChanged ||
         u.selectionSet || // カーソル移動で記法の生表示/プレビューを切り替える
+        u.focusChanged || // フォーカス喪失で全行プレビュー／取得でカーソル行を生表示に
         u.startState.field(wikiTargetsField) !== u.state.field(wikiTargetsField) ||
         u.startState.field(livePreviewField) !== u.state.field(livePreviewField) ||
         // 画像の実寸判明・エディタ幅変化でインライン画像のサイズを作り直す

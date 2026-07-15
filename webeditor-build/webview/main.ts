@@ -9,6 +9,7 @@ import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
 import { imageField, refreshImageLayout } from "./images";
+import { clearTableMeasureCache } from "./table";
 import {
   setWikiTargets,
   wikiTargetsField,
@@ -16,6 +17,8 @@ import {
   mentionedTargetsField,
   setLivePreview,
   livePreviewField,
+  setEditorFocused,
+  editorFocusedField,
 } from "./state";
 import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
@@ -33,15 +36,50 @@ import {
 interface NativeBridge {
   postMessage(msg: unknown): void;
 }
+interface InitPayload {
+  text?: string;
+  wikiTargets?: string[];
+  mentionedTargets?: string[];
+  fontSize?: number;
+  lineSpacing?: number;
+  horizontalInset?: number;
+  fontCSSURL?: string;
+  fontFamily?: string;
+  livePreview?: boolean;
+  version?: number;
+}
 declare global {
   interface Window {
     webkit: { messageHandlers: { couchNotes: NativeBridge } };
     couchNotesReceive: (msg: unknown) => void;
     couchNotesRunCommand: (name: string) => void;
     couchNotesInsertPlaceholder: () => string;
+    // Swift 側が loadHTMLString で埋め込む初期値。通信の往復（postMessage → native →
+    // evaluateJavaScript）を待たずに、最初の描画から正しい余白・文字サイズ・本文にするため、
+    // ページ読み込みと同期のタイミングでこれを読んで初期化する。
+    __couchNotesInit?: InitPayload;
   }
 }
 const native = window.webkit.messageHandlers.couchNotes;
+const initPayload: InitPayload = window.__couchNotesInit ?? {};
+
+// TEMP DEBUG: 開いた瞬間の左寄り表示・画像サイズのタイミング切り分け用。
+// console.log に加えて native へも転送し、Xcode/コンソール.app の Swift ログと
+// 同じ場所で時系列を突き合わせられるようにする（Safari Web Inspector 不要）。
+const diagT0 = performance.now();
+function diag(label: string, extra?: Record<string, unknown>) {
+  const editor = document.getElementById("editor");
+  const info = {
+    windowInnerWidth: window.innerWidth,
+    editorClientWidth: editor?.clientWidth,
+    hasInitPayload: !!window.__couchNotesInit,
+    horizontalInset: initPayload.horizontalInset,
+    ...extra,
+  };
+  console.log(`[cn-diag] ${label} t=${(performance.now() - diagT0).toFixed(1)}ms`, info);
+  native.postMessage({ type: "diagLog", label, t: performance.now() - diagT0, info });
+}
+diag("script-start");
 
 // 拡張ホスト（Swift）由来の transaction を識別し、編集メッセージのエコーを防ぐ。
 const remote = Annotation.define<boolean>();
@@ -120,7 +158,7 @@ const clickHandler = EditorView.domEventHandlers({
 // 編集は全文＋この世代番号で送り、Swift 側は古い世代の編集を破棄する。
 // 差分（オフセット）方式は、同期による全文差し替えと交差した時に
 // 「別の文書へ古い位置で適用」してしまい本文を壊すため使わない。
-let docVersion = 0;
+let docVersion = initPayload.version ?? 0;
 
 const updateListener = EditorView.updateListener.of((u) => {
   if (!u.docChanged) return;
@@ -171,14 +209,95 @@ const caretFollow = EditorView.updateListener.of((u) => {
   });
 });
 
+// フォントサイズ・行間・左右余白・Web フォント（アプリ設定）を CSS に反映する。
+// styles.css 側の :root で定義したカスタムプロパティ（--cn-*）の値をここで
+// インラインスタイルとして直接書き換える。以前は <style> 要素の textContent を
+// 書き換える方式だったが、WKWebView ではそれが computed style に反映されるまで
+// 数百ms〜遅延することがあり（ページ表示直後だけ左寄せ・小さいフォントのまま
+// しばらく変わらない不具合の原因だった）、インラインスタイル（プロパティの値）は
+// stylesheet の再パースを伴わないため常に即時反映される。
+const root = document.documentElement;
+const fontLink = document.createElement("link");
+fontLink.rel = "stylesheet";
+let fontLinkAttached = false;
+// TEMP DEBUG: Web フォントの <link> 読み込み完了/失敗のタイミングを見る。
+// 旧方式（<style> 書き換え）での反映遅延が、この <link> 挿入（新しい外部スタイル
+// シートの追加）にブラウザ側のスタイル解決が引きずられていたせいかどうかを
+// 切り分けるためのログ。もしこれの load/error と反映タイミングが一致するなら
+// それが根本原因ということになる。
+fontLink.addEventListener("load", () => diag("fontLink-load", { href: fontLink.getAttribute("href") }));
+fontLink.addEventListener("error", () => diag("fontLink-error", { href: fontLink.getAttribute("href") }));
+
+function applyConfig(
+  fontSize: unknown,
+  lineSpacing: unknown,
+  horizontalInset: unknown,
+  fontCSSURL: unknown,
+  fontFamily: unknown
+) {
+  // TEMP DEBUG: 生の引数の型と値をそのまま見る
+  diag("applyConfig-enter", {
+    fontSizeType: typeof fontSize, fontSizeVal: String(fontSize),
+    hiType: typeof horizontalInset, hiVal: String(horizontalInset),
+  });
+  const fs = typeof fontSize === "number" ? fontSize : 16;
+  const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
+  const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
+
+  // Web フォントの CSS（Google Fonts 等）を <link> で読み込む。
+  // オフライン・読み込み失敗時はフォールバック（システムフォント）で表示される。
+  const url = typeof fontCSSURL === "string" ? fontCSSURL.trim() : "";
+  if (url) {
+    if (fontLink.getAttribute("href") !== url) fontLink.setAttribute("href", url);
+    if (!fontLinkAttached) {
+      document.head.appendChild(fontLink);
+      fontLinkAttached = true;
+    }
+  } else if (fontLinkAttached) {
+    fontLink.remove();
+    fontLinkAttached = false;
+  }
+
+  const fam = (typeof fontFamily === "string" ? fontFamily : "").replace(/["\\]/g, "").trim();
+  const famList = fam
+    ? `"${fam}", -apple-system, "Hiragino Sans", sans-serif`
+    : `-apple-system, "Hiragino Sans", sans-serif`;
+
+  root.style.setProperty("--cn-font-family", famList);
+  root.style.setProperty("--cn-font-size", `${fs}px`);
+  root.style.setProperty("--cn-line-height", `calc(1.45em + ${ls}px)`);
+  root.style.setProperty("--cn-padding-h", `${16 + hi}px`);
+  // padding が変わると画像の X 起点・使える幅も変わるため作り直す
+  refreshImageLayout();
+
+  // TEMP DEBUG: カスタムプロパティが実際に computed style へ反映されるまでの
+  // タイムラグを追う（本当に即時反映されるのか、何か別要因でまだ遅延するのか）。
+  const checkApplied = (label: string) => {
+    diag(label, {
+      cssVarFontSize: getComputedStyle(root).getPropertyValue("--cn-font-size"),
+      cssVarPaddingH: getComputedStyle(root).getPropertyValue("--cn-padding-h"),
+      computedFontSize: getComputedStyle(view.contentDOM).fontSize,
+      computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft,
+    });
+  };
+  checkApplied("applyConfig-check-sync");
+  requestAnimationFrame(() => checkApplied("applyConfig-check-raf"));
+  for (const ms of [50, 150, 300, 600, 1200]) {
+    setTimeout(() => checkApplied(`applyConfig-check-t${ms}`), ms);
+  }
+}
+
 const view = new EditorView({
   parent: document.getElementById("editor")!,
   state: EditorState.create({
-    doc: "",
+    doc: initPayload.text ?? "",
     extensions: [
       wikiTargetsField,
       mentionedTargetsField,
       livePreviewField,
+      editorFocusedField,
+      // フォーカス変化を State に流し込む（数式プレビューの表示判定などが参照する）
+      EditorView.focusChangeEffect.of((_state, focusing) => setEditorFocused.of(focusing)),
       history(),
       // drawSelection / allowMultipleSelections は使わない:
       // CodeMirror の自前選択描画は、iOS のスペース長押し（トラックパッドモード）が動かす
@@ -212,9 +331,24 @@ const view = new EditorView({
   }),
 });
 
+diag("view-created", {
+  contentClientWidth: view.contentDOM.clientWidth,
+  scrollClientWidth: view.scrollDOM.clientWidth,
+});
+
 // フォーカス状態をネイティブへ通知（キーボードツールバーの表示制御用）
-view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
+view.contentDOM.addEventListener("focus", () => {
+  diag("focus", { contentClientWidth: view.contentDOM.clientWidth });
+  native.postMessage({ type: "focus" });
+});
 view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
+
+// TEMP DEBUG: WKWebView 自体のサイズ確定タイミングを見る
+new ResizeObserver((entries) => {
+  for (const e of entries) {
+    diag("editor-resize", { boxWidth: e.contentRect.width });
+  }
+}).observe(document.getElementById("editor")!);
 
 // キーボード表示（＋ツールバー）でエディタの高さが縮んだ時、カーソルが表示域の外に
 // 取り残されていれば最小限だけスクロールして見せる。
@@ -234,52 +368,33 @@ window.addEventListener("resize", () => {
 // フッター（リンク元・2ホップ）のタップをネイティブへ流す
 setFooterPoster(native);
 
-// フォントサイズ・行間・左右余白・Web フォント（アプリ設定）を CSS に反映する。
-const configStyle = document.createElement("style");
-document.head.appendChild(configStyle);
-const fontLink = document.createElement("link");
-fontLink.rel = "stylesheet";
-let fontLinkAttached = false;
+// ビュー作成の直後・同じ同期実行の中で初期値を適用する（ブラウザが最初の paint をする前）。
+// これにより「見出し・リストは即描画、余白・文字サイズだけ通信の往復後に反映される」という
+// タイミング差（＝開いた瞬間は左寄せ→少し待つと揃う）が構造的に無くなる。
+view.dispatch({
+  effects: [
+    setWikiTargets.of(initPayload.wikiTargets ?? []),
+    setMentionedTargets.of(initPayload.mentionedTargets ?? []),
+    setLivePreview.of(!!initPayload.livePreview),
+  ],
+});
+applyConfig(
+  initPayload.fontSize,
+  initPayload.lineSpacing,
+  initPayload.horizontalInset,
+  initPayload.fontCSSURL,
+  initPayload.fontFamily
+);
+diag("applyConfig-done", {
+  computedPaddingLeft: getComputedStyle(view.contentDOM).paddingLeft,
+  computedFontSize: getComputedStyle(view.contentDOM).fontSize,
+});
 
-function applyConfig(
-  fontSize: unknown,
-  lineSpacing: unknown,
-  horizontalInset: unknown,
-  fontCSSURL: unknown,
-  fontFamily: unknown
-) {
-  const fs = typeof fontSize === "number" ? fontSize : 16;
-  const ls = typeof lineSpacing === "number" ? lineSpacing : 0;
-  const hi = typeof horizontalInset === "number" ? horizontalInset : 0;
-
-  // Web フォントの CSS（Google Fonts 等）を <link> で読み込む。
-  // オフライン・読み込み失敗時はフォールバック（システムフォント）で表示される。
-  const url = typeof fontCSSURL === "string" ? fontCSSURL.trim() : "";
-  if (url) {
-    if (fontLink.getAttribute("href") !== url) fontLink.setAttribute("href", url);
-    if (!fontLinkAttached) {
-      document.head.appendChild(fontLink);
-      fontLinkAttached = true;
-    }
-  } else if (fontLinkAttached) {
-    fontLink.remove();
-    fontLinkAttached = false;
-  }
-
-  const fam = (typeof fontFamily === "string" ? fontFamily : "").replace(/["\\]/g, "").trim();
-  const famList = fam
-    ? `"${fam}", -apple-system, "Hiragino Sans", sans-serif`
-    : `-apple-system, "Hiragino Sans", sans-serif`;
-
-  configStyle.textContent = `
-    .cm-editor, .cm-tooltip-autocomplete > ul, .cn-footer { font-family: ${famList}; }
-    .cm-editor { font-size: ${fs}px; }
-    .cm-editor .cm-line { line-height: calc(1.45em + ${ls}px); }
-    .cm-editor .cm-content { padding-left: ${16 + hi}px; padding-right: ${16 + hi}px; }
-  `;
-  // padding が変わると画像の X 起点・使える幅も変わるため作り直す
+// Web フォントの読み込み完了で文字幅が変わる → テーブルの測定キャッシュを捨てて再レイアウト
+document.fonts?.addEventListener?.("loadingdone", () => {
+  clearTableMeasureCache();
   refreshImageLayout();
-}
+});
 
 function setDocText(text: string) {
   const cur = view.state.doc.toString();

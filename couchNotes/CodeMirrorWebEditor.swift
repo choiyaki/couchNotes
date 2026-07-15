@@ -190,6 +190,14 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.userContentController.add(context.coordinator, name: "couchNotes")
+        // ページ自身のどのスクリプト（webview.js）よりも先に、本文・余白・文字サイズ等の
+        // 初期値を window.__couchNotesInit として注入する。WKWebView 標準の仕組みなので
+        // ファイル書き込み・loadHTMLString は不要で、通常の loadFileURL のまま使える。
+        // これにより Swift→JS の通信往復（ready→init）を待たずに最初の描画から正しい状態になる
+        // （見出し・リストと同じタイミングで余白・文字サイズも反映される）。
+        if let initScript = Self.initUserScript(payload: initialConfigPayload()) {
+            config.userContentController.addUserScript(initScript)
+        }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -210,11 +218,55 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
             let index = dir.appendingPathComponent("index.html")
             webView.loadFileURL(index, allowingReadAccessTo: dir)
         }
+        // TEMP DEBUG: SwiftUI が実サイズを与えるタイミングとの相関を見る
+        print("[cn-diag][swift] makeUIView frame=\(webView.frame) t=\(Date().timeIntervalSince1970)")
+        context.coordinator.boundsObservation = webView.observe(\.bounds, options: [.new]) { wv, _ in
+            print("[cn-diag][swift] webView.bounds=\(wv.bounds) t=\(Date().timeIntervalSince1970)")
+        }
         return webView
+    }
+
+    /// 初期化メッセージと同じ内容（本文・余白・文字サイズ等）を、ページ読み込み前の
+    /// JS 変数として渡すためのペイロード。Coordinator の docVersion 初期値（1）と揃える。
+    private func initialConfigPayload() -> [String: Any] {
+        [
+            "text": text,
+            "wikiTargets": wikiTargets,
+            "mentionedTargets": mentionedTargets,
+            "fontSize": fontSize,
+            "lineSpacing": lineSpacing,
+            "horizontalInset": horizontalInset,
+            "fontCSSURL": fontCSSURL,
+            "fontFamily": fontFamily,
+            "livePreview": livePreview,
+            "version": 1,
+        ]
+    }
+
+    /// `window.__couchNotesInit = {...}` を文書解析開始時に注入する UserScript を作る。
+    private static func initUserScript(payload: [String: Any]) -> WKUserScript? {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              var json = String(data: data, encoding: .utf8) else { return nil }
+        // 本文中に "</script>" が含まれていても、注入先で誤解釈されないようにする
+        json = json.replacingOccurrences(of: "</", with: "<\\/")
+        let source = "window.__couchNotesInit = \(json);"
+        // TEMP DEBUG: 本文・全ページ名は出さず、数値項目だけ見る（ログが埋もれるのを防ぐ）。
+        // INITIAL とタグを付けて、後続の CONFIG ログ（補正値）と見分けられるようにする。
+        print("[cn-diag][swift] INITIAL payload fontSize=\(payload["fontSize"] ?? "nil") " +
+              "horizontalInset=\(payload["horizontalInset"] ?? "nil") " +
+              "lineSpacing=\(payload["lineSpacing"] ?? "nil") " +
+              "types: fontSize=\(type(of: payload["fontSize"] ?? "nil")) " +
+              "horizontalInset=\(type(of: payload["horizontalInset"] ?? "nil")) " +
+              "t=\(Date().timeIntervalSince1970)")
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        // TEMP DEBUG
+        print("[cn-diag][swift] updateUIView frame=\(uiView.frame) isReady=\(context.coordinator.isReady) t=\(Date().timeIntervalSince1970)")
+        // TEMP DEBUG: この呼び出し時点で SwiftUI から渡ってきている horizontalInset を見る
+        print("[cn-diag][swift] updateUIView horizontalInset=\(horizontalInset) t=\(Date().timeIntervalSince1970)")
         guard context.coordinator.isReady, !context.coordinator.isApplyingRemoteEdit else { return }
         context.coordinator.pushExternalUpdateIfNeeded(text)
         context.coordinator.pushConfigIfNeeded(fontSize: fontSize, lineSpacing: lineSpacing,
@@ -254,6 +306,7 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
 
         /// シェイク Undo／3本指ジェスチャを CM の履歴へ橋渡しするプロキシ。
         let undoProxy = WebEditorUndoManager()
+        var boundsObservation: NSKeyValueObservation?   // TEMP DEBUG
 
         init(_ parent: CodeMirrorWebEditor) {
             self.parent = parent
@@ -285,6 +338,11 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                     || lastHorizontalInset != horizontalInset
                     || lastFontCSSURL != fontCSSURL || lastFontFamily != fontFamily
                     || lastLivePreview != livePreview else { return }
+            // TEMP DEBUG: horizontalInset が INITIAL の値からどれだけ遅れて・どんな値へ
+            // 補正されて JS へ送られるかを見る（左寄せ→調整のジャンプの正体を追う）。
+            if lastHorizontalInset != horizontalInset {
+                print("[cn-diag][swift] CONFIG horizontalInset \(String(describing: lastHorizontalInset)) -> \(horizontalInset) t=\(Date().timeIntervalSince1970)")
+            }
             lastFontSize = fontSize
             lastLineSpacing = lineSpacing
             lastHorizontalInset = horizontalInset
@@ -358,6 +416,9 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
             switch type {
             case "ready":
                 isReady = true
+                // TEMP DEBUG: "ready" 到達時点で parent.horizontalInset が既に正しいか
+                // （＝2回目の init 送信ですら間に合っていないのか）を見る
+                print("[cn-diag][swift] ready horizontalInset=\(parent.horizontalInset) t=\(Date().timeIntervalSince1970)")
                 lastSentText = parent.text
                 lastFontSize = parent.fontSize
                 lastLineSpacing = parent.lineSpacing
@@ -433,6 +494,12 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 parent.bridge?.isEditorFocused = true
             case "blur":
                 parent.bridge?.isEditorFocused = false
+
+            case "diagLog":   // TEMP DEBUG
+                let label = body["label"] as? String ?? "?"
+                let t = body["t"] as? Double ?? 0
+                let info = body["info"] ?? [:]
+                print("[cn-diag][js] \(label) t=\(String(format: "%.1f", t))ms \(info) wallclock=\(Date().timeIntervalSince1970)")
 
             default:
                 break

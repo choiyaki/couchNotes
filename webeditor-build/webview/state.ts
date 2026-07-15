@@ -13,6 +13,21 @@ export const wikiTargetsField = StateField.define<string[]>({
   },
 });
 
+// エディタがフォーカスを持っているか（EditorView.focusChangeEffect 経由で更新）。
+// フォーカスが無い時（iPhone でキーボードが出ていない時）は「アクティブ行」を作らず、
+// 全行をプレビュー表示にする。
+export const setEditorFocused = StateEffect.define<boolean>();
+
+export const editorFocusedField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setEditorFocused)) return e.value;
+    }
+    return value;
+  },
+});
+
 // ライブプレビュー（記法隠し）のオン/オフ。カーソル行は生表示、他の行は記法を隠す。
 export const setLivePreview = StateEffect.define<boolean>();
 

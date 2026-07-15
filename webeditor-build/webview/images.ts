@@ -18,6 +18,16 @@ import { livePreviewField, setLivePreview } from "./state";
 const PLACEHOLDER_HEIGHT = 200; // 実寸が分かるまでの予約高さ（native placeholderHeight と同値）
 const GAP = 6;                  // 行と画像・画像同士の間隔
 
+// TEMP DEBUG: main.ts の diag() と同じ経路（native 経由）でログを転送する。
+declare const window: any;
+function diagLog(label: string, extra?: Record<string, unknown>) {
+  try {
+    window.webkit.messageHandlers.couchNotes.postMessage({
+      type: "diagLog", label, t: performance.now(), info: extra ?? {},
+    });
+  } catch {}
+}
+
 interface ImgSpec {
   url: string;
   widthPct: number | null;
@@ -79,12 +89,14 @@ function groupSizes(specs: ImgSpec[], width: number): { w: number; h: number }[]
       const w = ((width - GAP * (specs.length - 1)) * (s.widthPct ?? evenPct)) / 100;
       return { w, h: nat ? (w * nat.h) / nat.w : PLACEHOLDER_HEIGHT };
     }
-    // 単一・指定なし: 横長は幅を、縦長は高さをエディタ幅の 50% に
+    // 単一・指定なし: アスペクト比を保ったまま「横幅＋縦幅」が本文幅と等しくなるサイズ
+    // （native EditorImageStore.naturalSize と同じ規則。縦長は小さめ、横長は大きめに収まる）
     if (!nat) return { w: width * 0.5, h: PLACEHOLDER_HEIGHT };
-    const half = width * 0.5;
-    return nat.w >= nat.h
-      ? { w: half, h: (half * nat.h) / nat.w }
-      : { w: (half * nat.w) / nat.h, h: half };
+    const aspect = nat.w / nat.h;
+    const h = width / (aspect + 1);
+    const w = aspect * h;
+    if (w > width) return { w: width, h: width / aspect };  // 念のため幅は本文幅で頭打ち
+    return { w, h };
   });
 }
 
@@ -94,6 +106,30 @@ export function lineImageSizes(text: string): { url: string; w: number; h: numbe
   if (specs.length === 0) return [];
   const width = editorWidth || 360;
   return groupSizes(specs, width).map((s, i) => ({ url: specs[i].url, w: s.w, h: s.h }));
+}
+
+/** テキストが使える現在のエディタ幅。view を渡すとその場で実測して自己修復する。
+    （キャッシュ幅は、スタイルシート適用前に padding=0 で測れてしまう競合があり、
+    そのまま使うと画像・テーブルが横パディングを無視した幅になる） */
+export function editorContentWidth(view?: EditorView): number {
+  if (view) {
+    const fresh = availableWidth(view);
+    if (fresh > 0 && Math.abs(fresh - editorWidth) > 1) {
+      // TEMP DEBUG: 画像・テーブル幅が後から変わる問題の切り分け用
+      diagLog("editorWidth-self-heal", { old: editorWidth, new: fresh });
+      editorWidth = fresh;
+      // 既に古い幅で描かれているものを次のフレームで作り直す
+      requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
+    }
+  }
+  return editorWidth || 360;
+}
+
+/** 画像の実寸が判明した時に呼ぶ（キャッシュ＋再レイアウト）。テーブルウィジェット等の外部から使う。 */
+export function noteNaturalSize(url: string, w: number, h: number, view: EditorView) {
+  if (naturalSizes.has(url) || w <= 0 || h <= 0) return;
+  naturalSizes.set(url, { w, h });
+  view.dispatch({ effects: imagesChanged.of() });
 }
 
 /** ライブプレビューの非アクティブ行に画像を直接描くインラインウィジェット。
@@ -207,6 +243,8 @@ const imageOverlay = ViewPlugin.fromClass(
     syncWidth() {
       const w = availableWidth(this.view);
       if (w > 0 && Math.abs(w - editorWidth) > 1) {
+        // TEMP DEBUG
+        diagLog("imageOverlay-syncWidth", { old: editorWidth, new: w });
         editorWidth = w;
         requestAnimationFrame(() => viewRef?.dispatch({ effects: imagesChanged.of() }));
       }

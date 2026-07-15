@@ -10,7 +10,7 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import { EditorState, StateField } from "@codemirror/state";
 import { EditorView, showTooltip, Tooltip, WidgetType } from "@codemirror/view";
-import { livePreviewField, setLivePreview } from "./state";
+import { livePreviewField, setLivePreview, editorFocusedField, setEditorFocused } from "./state";
 
 // 行全体が $$...$$ のブロック数式
 export const BLOCK_MATH_RE = /^\s*\$\$([^$]+?)\$\$\s*$/;
@@ -18,7 +18,7 @@ export const BLOCK_MATH_RE = /^\s*\$\$([^$]+?)\$\$\s*$/;
 export const INLINE_MATH_RE = /(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)/g;
 
 /** KaTeX でレンダリングして el に流し込む。失敗時は生テキストを出す。 */
-function renderTeX(tex: string, block: boolean, el: HTMLElement) {
+export function renderTeX(tex: string, block: boolean, el: HTMLElement) {
   try {
     katex.render(block ? tex : `\\displaystyle{${tex}}`, el, {
       displayMode: block,
@@ -51,6 +51,8 @@ export class MathWidget extends WidgetType {
 /** カーソル行の全数式を集めて、行下のプレビューを作る（Cosense と同じ挙動）。 */
 function mathAtCursor(state: EditorState): Tooltip | null {
   if (!state.field(livePreviewField)) return null;
+  // フォーカスが無い時は行自体がレンダリング表示になるのでプレビューは出さない
+  if (!state.field(editorFocusedField)) return null;
   const head = state.selection.main.head;
   const line = state.doc.lineAt(head);
   const text = line.text;
@@ -101,7 +103,11 @@ function mathAtCursor(state: EditorState): Tooltip | null {
 export const mathPreview = StateField.define<Tooltip | null>({
   create: mathAtCursor,
   update(value, tr) {
-    if (tr.docChanged || tr.selection || tr.effects.some((e) => e.is(setLivePreview))) {
+    if (
+      tr.docChanged ||
+      tr.selection ||
+      tr.effects.some((e) => e.is(setLivePreview) || e.is(setEditorFocused))
+    ) {
       return mathAtCursor(tr.state);
     }
     return value;

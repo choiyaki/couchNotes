@@ -1,6 +1,13 @@
 /* webview/styles.css */
 :root {
   color-scheme: light dark;
+  --cn-font-family:
+    -apple-system,
+    "Hiragino Sans",
+    sans-serif;
+  --cn-font-size: 16px;
+  --cn-line-height: 1.45em;
+  --cn-padding-h: 16px;
 }
 html,
 body {
@@ -14,12 +21,13 @@ body {
 .cm-editor {
   height: 100%;
 }
+.cm-editor,
+.cm-tooltip-autocomplete > ul,
+.cn-footer {
+  font-family: var(--cn-font-family);
+}
 .cm-editor {
-  font-family:
-    -apple-system,
-    "Hiragino Sans",
-    sans-serif;
-  font-size: 16px;
+  font-size: var(--cn-font-size);
 }
 .cm-editor.cm-focused {
   outline: none;
@@ -27,11 +35,14 @@ body {
 .cm-editor .cm-content {
   tab-size: 2;
   -moz-tab-size: 2;
-  padding: 12px 16px 80px;
+  padding-top: 12px;
+  padding-bottom: 80px;
+  padding-left: var(--cn-padding-h);
+  padding-right: var(--cn-padding-h);
 }
 .cm-editor .cm-line {
   padding: 0;
-  line-height: 1.45;
+  line-height: var(--cn-line-height);
 }
 .cm-cn-h1 {
   font-size: 1.625em;
@@ -165,11 +176,36 @@ body {
   border-radius: 10px;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
 }
+.cm-cn-table {
+  display: flex;
+  align-items: flex-start;
+  column-gap: 8px;
+  overflow: hidden;
+  max-width: 100%;
+  margin: 2px 0;
+}
+.cm-cn-table-cell-text {
+  overflow-wrap: anywhere;
+  flex: none;
+}
+.cm-cn-table-img {
+  flex: none;
+}
+.cm-cn-table-img img {
+  display: block;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.cm-cn-imgline-active {
+  background: light-dark(rgb(0 0 0 / 0.05), rgb(255 255 255 / 0.07));
+  border-radius: 8px;
+}
 .cm-cn-inline-img img {
   border-radius: 6px;
   object-fit: cover;
   vertical-align: text-bottom;
   margin: 2px 0;
+  max-width: 100%;
 }
 .cm-cn-linked-img {
   cursor: pointer;
