@@ -464,6 +464,13 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 let filename = body["filename"] as? String ?? "image.png"
                 parent.bridge?.handleWebPaste(id: id, mime: mime, base64: data, filename: filename)
 
+            case "copy":
+                // WKWebView（Mac Catalyst）は clipboardData 経由のコピーがシステムの
+                // ペーストボードへ正しく反映されないことがある（型は宣言されるが中身が
+                // 空になる）ため、JS 側でテキストをこちらへ送らせて直接書き込む。
+                guard let text = body["text"] as? String else { return }
+                UIPasteboard.general.string = text
+
             case "focus":
                 parent.bridge?.isEditorFocused = true
             case "blur":

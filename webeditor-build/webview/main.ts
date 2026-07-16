@@ -2,7 +2,7 @@
 // VSCode の acquireVsCodeApi()/window message の代わりに、
 // window.webkit.messageHandlers 経由でSwift側と直接やり取りする。
 import "./styles.css";
-import { Annotation, EditorState, Transaction } from "@codemirror/state";
+import { Annotation, EditorState, Prec, Transaction } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown, undo, redo, undoDepth, redoDepth } from "@codemirror/commands";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
@@ -135,6 +135,44 @@ const clickHandler = EditorView.domEventHandlers({
     return false;
   },
 });
+
+// WKWebView（特に Mac Catalyst）は、copy/cut イベントの clipboardData.setData 自体は
+// 正しく効く（CM6 標準のコピー処理で確認済み）のに、それをシステムのペーストボードへ
+// 実際に反映する内部のブリッジ処理が壊れていて、型（text/plain）だけ宣言されて中身が
+// 空のペーストボード項目になってしまうことがある。
+// さらに cut は、copy/cut の DOM イベント（event.preventDefault()）とは別に、
+// ネイティブ側の「独立した削除アクション」が並行して走ってしまうらしく、
+// こちら側で選択範囲を削除した「後」に、ズレた（古い）範囲でもう一度削除が走り、
+// 行全体が消える・クリップボードの中身が別の範囲になる、という二重処理が起きていた。
+// copy/cut の DOM イベントではなく、キー入力（keydown）の段階で横取りして
+// event.preventDefault() することで、ブラウザの既定動作（＝この二重処理の発生源）
+// 自体を起こさせない。Prec.highest で他のキーマップより確実に先に処理する。
+const nativeClipboard = Prec.highest(keymap.of([
+  { key: "Mod-c", run: (view) => sendToNativeClipboard(view, false), preventDefault: true },
+  { key: "Mod-x", run: (view) => sendToNativeClipboard(view, true), preventDefault: true },
+]));
+
+function sendToNativeClipboard(view: EditorView, isCut: boolean): boolean {
+  const sel = view.state.selection.main;
+  let text: string, from: number, to: number;
+  if (!sel.empty) {
+    text = view.state.sliceDoc(sel.from, sel.to);
+    from = sel.from;
+    to = sel.to;
+  } else {
+    // 選択なし: カーソル行を行単位でコピー（CM6標準のフォールバックと同じ挙動）
+    const line = view.state.doc.lineAt(sel.from);
+    text = line.text;
+    from = line.from;
+    to = Math.min(line.to + 1, view.state.doc.length);
+  }
+  if (!text) return false;
+  native.postMessage({ type: "copy", text });
+  if (isCut) {
+    view.dispatch({ changes: { from, to, insert: "" }, userEvent: "delete.cut" });
+  }
+  return true;
+}
 
 // 文書の世代番号。Swift 側が外部更新（同期反映）で文書を差し替えるたびに上がる。
 // 編集は全文＋この世代番号で送り、Swift 側は古い世代の編集を破棄する。
@@ -274,6 +312,7 @@ const view = new EditorView({
         activateOnTyping: true,
       }),
       pasteImages(native),
+      nativeClipboard,
       footerExtension,
       clickHandler,
       updateListener,

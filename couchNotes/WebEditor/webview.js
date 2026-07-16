@@ -33991,6 +33991,31 @@
       return false;
     }
   });
+  var nativeClipboard = Prec.highest(keymap.of([
+    { key: "Mod-c", run: (view2) => sendToNativeClipboard(view2, false), preventDefault: true },
+    { key: "Mod-x", run: (view2) => sendToNativeClipboard(view2, true), preventDefault: true }
+  ]));
+  function sendToNativeClipboard(view2, isCut) {
+    const sel = view2.state.selection.main;
+    let text2, from, to;
+    if (!sel.empty) {
+      text2 = view2.state.sliceDoc(sel.from, sel.to);
+      from = sel.from;
+      to = sel.to;
+    } else {
+      const line = view2.state.doc.lineAt(sel.from);
+      text2 = line.text;
+      from = line.from;
+      to = Math.min(line.to + 1, view2.state.doc.length);
+    }
+    if (!text2)
+      return false;
+    native.postMessage({ type: "copy", text: text2 });
+    if (isCut) {
+      view2.dispatch({ changes: { from, to, insert: "" }, userEvent: "delete.cut" });
+    }
+    return true;
+  }
   var docVersion = initPayload.version ?? 0;
   var updateListener2 = EditorView.updateListener.of((u) => {
     if (!u.docChanged)
@@ -34100,6 +34125,7 @@
           activateOnTyping: true
         }),
         pasteImages(native),
+        nativeClipboard,
         footerExtension,
         clickHandler,
         updateListener2,
