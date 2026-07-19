@@ -681,6 +681,7 @@ actor NoteStore {
         return out
     }
 
+
     /// 削除（ソフト削除フラグを立てて一覧／検索から除外）。
     func delete(_ id: String) {
         guard let stmt = prepare("UPDATE notes SET deleted = 1 WHERE id = ?;") else { return }

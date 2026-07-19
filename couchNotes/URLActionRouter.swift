@@ -97,41 +97,41 @@ final class URLActionRouter: ObservableObject {
     }
 
     /// 無ければ作成、あれば追記。完了後に開く。
+    /// アプリ内作成と同じ「ローカルに dirty で保存 → SyncEngine が押し上げ」の書き込み経路を使う。
+    /// サーバ直書き＋clean upsert だと、reconcile のサーバスナップショット（作成前に取得）との
+    /// 競合で「サーバに無い clean 行」と誤判定され、ローカル行が削除される事故があった。
+    /// dirty で書けば reconcile から保護され、オフラインでも作成・追記が成立する。
     private func upsertAndOpen(_ target: (id: String, path: String), text: String, addNewlineOnAppend: Bool) async {
         let nowMs = Date().timeIntervalSince1970 * 1000
-        do {
-            if let existing = await NoteStore.shared.editingNote(target.id) {
-                // 追記
-                let body = existing.body
-                let newBody = body
-                    + ((addNewlineOnAppend && !body.isEmpty) ? "\n" : "")
-                    + text
-                let ctime = existing.ctime ?? nowMs
-                let extra = (existing.extra ?? "").isEmpty ? [] : existing.extra!.components(separatedBy: "\n")
-                let content = FrontmatterParser.compose(
-                    createdSec: Int(ctime / 1000), updatedSec: Int(nowMs / 1000),
-                    extra: extra, body: newBody
-                )
-                let path = existing.path ?? target.path
-                try await CouchDBClient.shared.saveNoteContent(id: target.id, text: content)
-                await NoteStore.shared.upsert(NoteRecord(
-                    id: target.id, path: path, mtime: nowMs, ctime: ctime,
-                    size: content.utf8.count, content: content
-                ))
-            } else {
-                // 新規作成
-                let sec = Int(nowMs / 1000)
-                let content = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: text)
-                try await CouchDBClient.shared.createNote(id: target.id, path: target.path, text: content)
-                await NoteStore.shared.upsert(NoteRecord(
-                    id: target.id, path: target.path, mtime: nowMs, ctime: nowMs,
-                    size: content.utf8.count, content: content
-                ))
-            }
-            NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
-            noteToOpen = target.id
-        } catch {
-            errorMessage = "URL アクションに失敗しました\n\(error.localizedDescription)"
+        let record: NoteRecord
+        if let existing = await NoteStore.shared.editingNote(target.id) {
+            // 追記
+            let body = existing.body
+            let newBody = body
+                + ((addNewlineOnAppend && !body.isEmpty) ? "\n" : "")
+                + text
+            let ctime = existing.ctime ?? nowMs
+            let extra = (existing.extra ?? "").isEmpty ? [] : existing.extra!.components(separatedBy: "\n")
+            let content = FrontmatterParser.compose(
+                createdSec: Int(ctime / 1000), updatedSec: Int(nowMs / 1000),
+                extra: extra, body: newBody
+            )
+            record = NoteRecord(
+                id: target.id, path: existing.path ?? target.path, mtime: nowMs, ctime: ctime,
+                size: content.utf8.count, content: content
+            )
+        } else {
+            // 新規作成
+            let sec = Int(nowMs / 1000)
+            let content = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: text)
+            record = NoteRecord(
+                id: target.id, path: target.path, mtime: nowMs, ctime: nowMs,
+                size: content.utf8.count, content: content
+            )
         }
+        await NoteStore.shared.saveDirty(record)
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        noteToOpen = target.id
+        await SyncEngine.shared.flush()
     }
 }

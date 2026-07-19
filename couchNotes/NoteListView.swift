@@ -26,6 +26,8 @@ struct NoteListView: View {
 
     @State private var notes: [NoteItem] = []
     @State private var randomPicks: [NoteItem] = []   // 一覧先頭「今日のノート」
+    @State private var unsyncedCount = 0        // サーバへ未反映のノート数（statusIndicator 表示用）
+    @State private var unsyncedIDs: Set<String> = []   // dirty なノートの id（行ごとの雲マーク表示用。pendingDelete は一覧に出ないので含めない）
     @State private var path: [String]    = []
     @State private var errorMessage: String? = nil
     @State private var showSettings      = false
@@ -412,6 +414,15 @@ struct NoteListView: View {
             Circle()
                 .fill(listener.isConnected ? Color.green : Color.gray.opacity(0.5))
                 .frame(width: 7, height: 7)
+            // サーバへ未反映のノートがある間だけ表示（詳細画面を離れても未同期状態がわかるように）。
+            if unsyncedCount > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "icloud.slash")
+                    Text("\(unsyncedCount)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -583,6 +594,10 @@ struct NoteListView: View {
     private func loadNotes() async {
         notes = await NoteStore.shared.listItems()
         randomPicks = RandomNotes.todaysPicks(from: notes)
+        let dirty = await NoteStore.shared.dirtyIDs()
+        let pendingDelete = await NoteStore.shared.pendingDeleteIDs()
+        unsyncedIDs = dirty
+        unsyncedCount = dirty.count + pendingDelete.count
     }
 
     /// 「今日のノート」の1枠を引き直す。
@@ -707,8 +722,8 @@ struct NoteListView: View {
     @ViewBuilder
     var noteContent: some View {
         switch layout {
-        case .detail: notesList { NoteRowView(note: $0) }
-        case .list:   notesList { NoteRowCompactView(note: $0) }
+        case .detail: notesList { NoteRowView(note: $0, isUnsynced: unsyncedIDs.contains($0.id)) }
+        case .list:   notesList { NoteRowCompactView(note: $0, isUnsynced: unsyncedIDs.contains($0.id)) }
         case .card:   notesGrid
         }
     }
@@ -747,7 +762,7 @@ struct NoteListView: View {
                     ForEach(displayedNotes) { note in
                         if isSelecting {
                             Button { toggleSelection(note) } label: {
-                                NoteCardView(note: note)
+                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id))
                                     .overlay(alignment: .topTrailing) {
                                         selectionMark(isSelected: selectedIDs.contains(note.id))
                                             .padding(6)
@@ -758,7 +773,7 @@ struct NoteListView: View {
                             Button {
                                 navigate { path.append(note.id) }
                             } label: {
-                                NoteCardView(note: note)
+                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id))
                             }
                             .buttonStyle(.plain)
                             .contextMenu { contextMenuButtons(for: note) }
@@ -858,6 +873,8 @@ struct NoteListView: View {
 
     private func refresh() async {
         ChangesListener.shared.start()
+        // 未同期（dirty・pendingDelete）ノートを明示的に押し上げる。雲マークを手動で解消する手段。
+        await SyncEngine.shared.flush()
         await loadNotes()
     }
 
@@ -1302,6 +1319,7 @@ enum NoteListLayout: String, CaseIterable {
 
 struct NoteRowView: View {
     let note: NoteItem
+    var isUnsynced: Bool = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1323,6 +1341,11 @@ struct NoteRowView: View {
                             .padding(.vertical, 2)
                             .background(Color.accentColor)
                             .clipShape(Capsule())
+                    }
+                    if isUnsynced {
+                        Image(systemName: "icloud.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
                     }
                 }
                 Text(note.lastModifiedString)
@@ -1348,6 +1371,7 @@ struct NoteRowView: View {
 
 struct NoteRowCompactView: View {
     let note: NoteItem
+    var isUnsynced: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1369,6 +1393,11 @@ struct NoteRowCompactView: View {
                     .background(Color.accentColor)
                     .clipShape(Capsule())
             }
+            if isUnsynced {
+                Image(systemName: "icloud.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
             Spacer(minLength: 8)
             Text(note.lastModifiedString)
                 .font(.caption)
@@ -1382,6 +1411,7 @@ struct NoteRowCompactView: View {
 
 struct NoteCardView: View {
     let note: NoteItem
+    var isUnsynced: Bool = false
     @State private var imageURL: URL? = nil       // このノートが画像を持つか（レイアウト判断用）
     @State private var uiImage: UIImage? = nil     // 読み込み済みのサムネイル本体
 
@@ -1412,6 +1442,11 @@ struct NoteCardView: View {
                                     .padding(.vertical, 1)
                                     .background(Color.accentColor)
                                     .clipShape(Capsule())
+                            }
+                            if isUnsynced {
+                                Image(systemName: "icloud.slash")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
                             }
                         }
                         Text(note.lastModifiedString)

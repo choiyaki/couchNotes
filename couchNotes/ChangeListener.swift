@@ -194,9 +194,12 @@ class ChangesListener: ObservableObject {
 
         // 1) ローカルにあってサーバに無い → 削除（取りこぼした削除の収束）。スコープ内のみ。
         //    サーバ応答が空に見える場合は異常の可能性があるため、誤った全削除を避けて削除はスキップ。
+        //    rev が空の行も削除しない：サーバに在ったことを一度も確認できていない行（ローカル先行
+        //    作成の同期前など）は「サーバから消えた」とは判定できない（スナップショット取得と
+        //    作成が交差した時に、作りたてのノートを誤削除しないための保険）。
         if !serverRevs.isEmpty {
-            for (id, _) in local
-            where serverRevs[id] == nil && !protected.contains(id) && SyncScope.shouldSync(id: id, folders: folders) {
+            for (id, rev) in local
+            where serverRevs[id] == nil && !rev.isEmpty && !protected.contains(id) && SyncScope.shouldSync(id: id, folders: folders) {
                 await NoteStore.shared.delete(id)
                 didChange = true
             }

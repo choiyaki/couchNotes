@@ -2,19 +2,19 @@ import SwiftUI
 import Combine
 import Network
 import PhotosUI
+import UIKit
 
 extension Notification.Name {
     /// ローカル編集の保存が成功した時に投げる通知。userInfo["noteId"] に対象 ID。
     static let noteSaved = Notification.Name("couchNotes.noteSaved")
 }
 
+// 平常時（入力中・保存中・保存直後）は画面上に何も出さない。
+// 表示するのは「サーバへまだ反映できていない」ことが続いている場合（.unsaved）だけにする。
+// ローカルへの永続化は入力停止からごく短時間で完了するため、ユーザーが保存を意識する必要はない。
 enum SaveStatus: Equatable {
     case idle
-    case editing
-    case saving
-    case saved
-    case unsaved    // ネットワーク断などで保存できていない状態（次回オンライン時に再試行）
-    case error
+    case unsaved    // ネットワーク断・競合などでサーバへ未反映（次回オンライン時/再送で解消）
 }
 
 // MARK: - NetworkMonitor
@@ -92,8 +92,15 @@ struct NoteDetailView: View {
     @State private var externalChangeAvailable = false
     @State private var pendingExternalContent  = ""
 
+    // メニュー（削除確認・削除後の保存抑止）
+    @State private var showDeleteConfirm = false
+    @State private var isDeletedNote     = false   // 削除後にデバウンス保存が走って復活するのを防ぐ
+
     // デバウンス保存用
     @State private var saveDebounceTask: Task<Void, Never>?
+    // ローカル永続化（dirty書き込みのみ、ネットワーク送信はしない）用の短いデバウンス。
+    // サーバへの push より先に成立させ、kill/バックグラウンド遷移で入力を失わないようにする。
+    @State private var localSaveDebounceTask: Task<Void, Never>?
 
     // バックリンク（本文末尾に表示）
     @State private var backlinks: [NoteItem] = []
@@ -154,6 +161,93 @@ struct NoteDetailView: View {
         let source = displayPath ?? noteId
         return source.components(separatedBy: "/").last?
             .replacingOccurrences(of: ".md", with: "") ?? source
+    }
+
+    // MARK: - ノートメニュー（右上 ⋯）
+
+    /// このノートがピン留め中か（フロントマターの pin: N を見る）。
+    private var isPinned: Bool {
+        let lines = extraFrontmatter.isEmpty ? [] : extraFrontmatter.components(separatedBy: "\n")
+        return FrontmatterParser.extractPin(from: lines) != nil
+    }
+
+    /// 外部アプリからこのノートを開く URL スキームリンク。
+    /// path はフルパス（.md 抜き）。クエリ値に使えない文字はエンコードする。
+    private var urlSchemeLink: String {
+        let p = displayPath ?? noteId
+        let trimmed = p.hasSuffix(".md") ? String(p.dropLast(3)) : p
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?+")
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: allowed) ?? trimmed
+        return "couchnotes://open?path=\(encoded)"
+    }
+
+    private var noteMenu: some View {
+        Menu {
+            Button {
+                Task { await togglePin() }
+            } label: {
+                if isPinned {
+                    Label("ピン留めを外す", systemImage: "pin.slash")
+                } else {
+                    Label("ピン留め", systemImage: "pin")
+                }
+            }
+            Divider()
+            Button {
+                UIPasteboard.general.string = "[[\(navTitle)]]"
+            } label: {
+                Label("ノートリンクをコピー", systemImage: "link")
+            }
+            Button {
+                UIPasteboard.general.string = urlSchemeLink
+            } label: {
+                Label("URLスキームをコピー", systemImage: "arrow.up.forward.app")
+            }
+            Button {
+                UIPasteboard.general.string = editingContent
+            } label: {
+                Label("本文をコピー", systemImage: "doc.on.doc")
+            }
+            Divider()
+            Button(role: .destructive) {
+                showDeleteConfirm = true
+            } label: {
+                Label("削除", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+    }
+
+    /// ピン留めをトグルする。未保存の編集があれば先にローカルへ永続化してから
+    /// PinService（ストアの本文を読んで extra だけ差し替える）を呼ぶ。
+    /// 完了後、ストアの extra をビューへ読み戻す（次回保存でピンが消えないように）。
+    private func togglePin() async {
+        if hasUnsavedChanges { await persistLocalDirty() }
+        if isPinned {
+            await PinService.unpin(noteId)
+        } else {
+            await PinService.pin(noteId)
+        }
+        if let stored = await NoteStore.shared.editingNote(noteId) {
+            extraFrontmatter = stored.extra ?? ""
+        }
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+    }
+
+    /// このノートを削除して一覧へ戻る。一覧の長押し削除と同じ
+    /// 「pendingDelete → SyncEngine が押し上げ」経路（オフラインでも操作可）。
+    private func deleteThisNote() async {
+        // 進行中・予約済みの保存を止める（削除後に dirty 保存が走ると復活してしまう）
+        isDeletedNote = true
+        saveDebounceTask?.cancel()
+        localSaveDebounceTask?.cancel()
+        hasUnsavedChanges = false
+        await NoteStore.shared.markPendingDelete(noteId)
+        NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
+        onGoToList?()
+        await SyncEngine.shared.flush()
     }
 
     // MARK: - タイトル欄（本文上に固定表示）
@@ -386,10 +480,15 @@ struct NoteDetailView: View {
 
                         guard hasUnsavedChanges else { return }
 
-                        // 既に未保存状態なら .editing に戻さず、未保存表示を維持する
-                        if saveStatus != .unsaved {
-                            saveStatus = .editing
+                        // ローカルへの dirty 永続化は短い間隔で先行させる（ネットワークは絡めない）。
+                        // これにより、サーバ push を待たずに「入力はディスクに乗っている」状態を早く作る。
+                        localSaveDebounceTask?.cancel()
+                        localSaveDebounceTask = Task {
+                            try? await Task.sleep(for: .milliseconds(400))
+                            guard !Task.isCancelled, hasUnsavedChanges else { return }
+                            await persistLocalDirty()
                         }
+
                         saveDebounceTask?.cancel()
                         saveDebounceTask = Task {
                             do {
@@ -447,10 +546,11 @@ struct NoteDetailView: View {
                     Image(systemName: (NoteListLayout(rawValue: layoutRaw) ?? .detail).icon)
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { toggleSearch() } label: {
                     Image(systemName: showSearch ? "xmark" : "magnifyingglass")
                 }
+                noteMenu
             }
         }
         .alert("エラー", isPresented: Binding(
@@ -460,6 +560,14 @@ struct NoteDetailView: View {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        // 削除確認。Mac Catalyst では confirmationDialog が popover 表示になり
+        // クラッシュの前歴があるため alert を使う。
+        .alert("「\(navTitle)」を削除しますか？", isPresented: $showDeleteConfirm) {
+            Button("削除", role: .destructive) { Task { await deleteThisNote() } }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("この操作は元に戻せません。")
         }
         .sheet(isPresented: $showFolderPicker) {
             FolderPickerView(
@@ -498,6 +606,13 @@ struct NoteDetailView: View {
                   !externalChangeAvailable else { return }
             Task { await save() }
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+        ) { _ in
+            // バックグラウンド遷移直前に即ローカル永続化（デバウンス待ちの間にkillされても入力を失わない安全網）。
+            guard hasUnsavedChanges else { return }
+            Task { await persistLocalDirty() }
+        }
         .onChange(of: photoPickerItem) { _, item in
             guard let item else { return }
             Task { await uploadPickedPhoto(item) }
@@ -515,6 +630,7 @@ struct NoteDetailView: View {
         }
         .onDisappear {
             saveDebounceTask?.cancel()
+            localSaveDebounceTask?.cancel()
             if hasUnsavedChanges {
                 Task { await save() }
             }
@@ -606,26 +722,13 @@ struct NoteDetailView: View {
 
     // MARK: - 保存ステータス表示
 
-    /// 保存ステータス（アイコンのみ）。idle/editing は非表示。
+    /// 平常時は非表示。サーバへの反映がまだできていない時だけ雲マークで知らせる。
     @ViewBuilder
     var saveStatusView: some View {
-        switch saveStatus {
-        case .idle, .editing:
-            EmptyView()
-        case .saving:
-            ProgressView().scaleEffect(0.6)
-        case .saved:
-            Image(systemName: "checkmark")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.green)
-        case .unsaved:
+        if saveStatus == .unsaved {
             Image(systemName: "icloud.slash")
                 .font(.footnote)
                 .foregroundStyle(.orange)
-        case .error:
-            Image(systemName: "exclamationmark.triangle")
-                .font(.footnote)
-                .foregroundStyle(.red)
         }
     }
 
@@ -641,26 +744,32 @@ struct NoteDetailView: View {
             NSLog("[cursor-diag] applyExternalChange: ignored stale echo rev=\(record.rev ?? "nil") base=\(baseRev ?? "nil")")
             return
         }
-        await NoteStore.shared.upsert(record)
         let parsed = FrontmatterParser.split(record.content)
+        let fresh  = parsed.body
+
+        // 未保存の編集があるうちは、ローカルの dirty 行に一切触れない。
+        // ここで upsert すると sync_state が clean に戻り、まだサーバへ送れていない
+        // 自分の編集がディスク上から消えてしまう（メモリ上の editingContent だけが頼りになり、
+        // その状態でアプリが終了すると編集が失われる）。バナー表示用に内容だけメモリで保持する。
+        guard !hasUnsavedChanges else {
+            guard fresh != content else { return }
+            pendingExternalContent  = fresh
+            externalChangeAvailable = true
+            return
+        }
+
+        // 未保存の編集が無い場合のみ、サーバ側の内容をローカルへ確定反映する。
+        await NoteStore.shared.upsert(record)
         baseRev          = record.rev
         createdMs        = record.ctime
         updatedMs        = record.mtime
         extraFrontmatter = parsed.extraLines.joined(separator: "\n")
-        let fresh = parsed.body
 
         // 入ってきた本文が現在の基準と同一なら外部変更ではない（自分の保存のエコー等）。
-        // 未保存中でもバナーを出さないよう、hasUnsavedChanges に関係なく早期 return する。
-        if fresh == content { return }
-
-        if !hasUnsavedChanges {
-            logExternalReassign(source: "applyExternalChange", fresh: fresh)
-            content        = fresh
-            editingContent = fresh
-        } else {
-            pendingExternalContent  = fresh
-            externalChangeAvailable = true
-        }
+        guard fresh != content else { return }
+        logExternalReassign(source: "applyExternalChange", fresh: fresh)
+        content        = fresh
+        editingContent = fresh
     }
 
     /// [cursor-diag] editingContent を外部値で差し替える直前に、現行値との差分概要を記録する。
@@ -890,22 +999,9 @@ struct NoteDetailView: View {
 
     // MARK: - 保存
 
-    func save() async {
-        // 保存を直列化：既に保存中なら保留にして即 return。完了後に最新内容で1回だけ再保存する。
-        // （保存を重ねると baseRev が古いまま 2 本目が走り、自分の保存を 409＝外部更新と誤検知してしまう）
-        if saveInFlight {
-            pendingSave = true
-            return
-        }
-        saveInFlight = true
-        defer {
-            saveInFlight = false
-            if pendingSave {
-                pendingSave = false
-                if hasUnsavedChanges { Task { await save() } }
-            }
-        }
-
+    /// 現在の editingContent からフロントマター込みの NoteRecord を組み立てる（保存・ローカル永続化の共通処理）。
+    /// - Returns: record, 保存対象の本文スナップショット, 現在時刻(ms), 作成時刻(ms)
+    private func buildRecordForSave() -> (record: NoteRecord, savedBody: String, nowMs: Double, createdFor: Double) {
         // 実際に保存する本文をスナップショット（保存中にタイプされても基準がズレないように）
         let savedBody  = editingContent
         // フロントマター（created=ctime / updated=now）を付けて全文を組み立てる
@@ -921,6 +1017,37 @@ struct NoteDetailView: View {
             id: noteId, path: displayPath ?? noteId,
             mtime: nowMs, ctime: createdFor, size: fullText.utf8.count, content: fullText
         )
+        return (record, savedBody, nowMs, createdFor)
+    }
+
+    /// ローカルへの dirty 永続化のみ行う（ネットワーク送信はしない）。
+    /// 入力停止直後の短いデバウンスとバックグラウンド遷移時に呼ばれ、
+    /// サーバ push を待たずに「入力はディスクに乗っている」状態を素早く作る安全網。
+    private func persistLocalDirty() async {
+        guard !isDeletedNote else { return }
+        let (record, _, _, _) = buildRecordForSave()
+        await NoteStore.shared.saveDirty(record)
+    }
+
+    func save() async {
+        // 削除済みノートには保存しない（dirty 保存が走ると削除したはずのノートが復活する）
+        guard !isDeletedNote else { return }
+        // 保存を直列化：既に保存中なら保留にして即 return。完了後に最新内容で1回だけ再保存する。
+        // （保存を重ねると baseRev が古いまま 2 本目が走り、自分の保存を 409＝外部更新と誤検知してしまう）
+        if saveInFlight {
+            pendingSave = true
+            return
+        }
+        saveInFlight = true
+        defer {
+            saveInFlight = false
+            if pendingSave {
+                pendingSave = false
+                if hasUnsavedChanges { Task { await save() } }
+            }
+        }
+
+        let (record, savedBody, nowMs, createdFor) = buildRecordForSave()
 
         // 1) まずローカルに dirty として永続化（オフライン・kill されても編集が残る）。
         //    基準(content)はまだ動かさない＝push 成功まで「未保存」のまま retry 対象にする。
@@ -933,10 +1060,9 @@ struct NoteDetailView: View {
         }
 
         // 3) サーバへ push（楽観ロック：基準 rev とずれていれば 409 で競合検知）
-        saveStatus = .saving
         do {
             let newRev = try await CouchDBClient.shared.saveNoteContentChecked(
-                id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: baseRev)
+                id: noteId, path: displayPath ?? noteId, text: record.content, ctime: createdFor, baseRev: baseRev)
             await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
         } catch CouchDBError.networkError {
             // ネットワークエラー: アラートを出さず、未保存(dirty)を保持して再接続を待つ
@@ -949,7 +1075,7 @@ struct NoteDetailView: View {
                 saveStatus = .unsaved
             } else if let tomb = try? await CouchDBClient.shared.currentLeafRev(id: noteId),
                       let newRev = try? await CouchDBClient.shared.saveNoteContentChecked(
-                          id: noteId, path: displayPath ?? noteId, text: fullText, ctime: createdFor, baseRev: tomb) {
+                          id: noteId, path: displayPath ?? noteId, text: record.content, ctime: createdFor, baseRev: tomb) {
                 // 削除 vs 編集 → 墓標の上に編集を復元（データ保全）し、ユーザに通知
                 await markSaved(savedBody: savedBody, nowMs: nowMs, newRev: newRev)
                 errorMessage = "このノートは他の端末で削除されていましたが、あなたの編集で復元しました。"
@@ -963,7 +1089,7 @@ struct NoteDetailView: View {
         }
     }
 
-    /// push 成功後の共通後処理（基準の更新・clean 化・ステータス表示）。
+    /// push 成功後の共通後処理（基準の更新・clean 化）。平常時は表示を出さないので即 .idle に戻す。
     private func markSaved(savedBody: String, nowMs: Double, newRev: String) async {
         if createdMs == nil { createdMs = nowMs }
         updatedMs = nowMs
@@ -975,11 +1101,9 @@ struct NoteDetailView: View {
         hasUnsavedChanges       = editingContent != savedBody
         externalChangeAvailable = false
         pendingExternalContent  = ""
-        saveStatus              = .saved
+        saveStatus              = .idle
         await NoteStore.shared.markClean(noteId, rev: newRev)
         NotificationCenter.default.post(name: .noteSaved, object: nil, userInfo: ["noteId": noteId])
-        try? await Task.sleep(for: .seconds(2))
-        if saveStatus == .saved { saveStatus = .idle }
     }
 }
 
