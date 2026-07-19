@@ -92,6 +92,13 @@ body {
   opacity: 0.4;
 }
 
+/* 引用（> ...）: 左に縦線、本文をやや落ち着いた色に */
+.cm-cn-quote {
+  padding-left: 0.75em;
+  border-left: 3px solid light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
+  color: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
+}
+
 /* チェックボックス */
 .cm-cn-task-open {
   color: light-dark(#007aff, #0a84ff);

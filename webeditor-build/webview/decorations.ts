@@ -170,6 +170,20 @@ function styleLine(
     return;
   }
 
+  // --- 引用（> ...）---
+  const quote = /^>[ \t]?/.exec(text);
+  if (quote) {
+    out.push(lineDeco("cm-cn-quote").range(lineFrom));
+    const markerLen = quote[0].length;
+    if (hide) {
+      out.push(hidden.range(lineFrom, lineFrom + markerLen));
+    } else {
+      out.push(mark("cm-cn-marker").range(lineFrom, lineFrom + markerLen));
+    }
+    styleInline(text, lineFrom, active, hide, out, ctx);
+    return;
+  }
+
   // --- リスト / チェックボックス ---
   const lead = /^[\t ]*/.exec(text)?.[0] ?? "";
   const tabs = (lead.match(/\t/g) ?? []).length;
@@ -301,17 +315,33 @@ function styleInline(
     );
   }
 
-  // Wiki リンク [[...]]（ライブプレビューでは括弧を隠して名前だけ）
+  // Wiki リンク [[...]]（ライブプレビューでは括弧を隠して名前だけ）。
+  // Obsidian 形式の [[ページ#^ブロックID|エイリアス]] に対応:
+  //   - 存在判定はページ名部分（# と | より前）で行う
+  //   - エイリアスがあれば、非アクティブ行では [[ページ#^ID| までを隠してエイリアスだけ表示
   WIKI_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = WIKI_RE.exec(text)); ) {
-    const inner = m[1].toLowerCase();
-    const cls = ctx.wiki.has(inner) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
+    const inner = m[1];
+    const bar = inner.indexOf("|");
+    const alias = bar >= 0 ? inner.slice(bar + 1) : "";
+    const targetFull = bar >= 0 ? inner.slice(0, bar) : inner; // ページ名#フラグメント
+    const hash = targetFull.indexOf("#");
+    const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase();
+    const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     if (hide) {
-      out.push(hidden.range(s, s + 2));
-      out.push(mark(cls).range(s + 2, e - 2));
-      out.push(hidden.range(e - 2, e));
+      if (alias.length > 0) {
+        // "[[ページ#^ID|" を隠し、エイリアスだけリンク表示
+        const aliasStart = s + 2 + targetFull.length + 1;
+        out.push(hidden.range(s, aliasStart));
+        out.push(mark(cls).range(aliasStart, e - 2));
+        out.push(hidden.range(e - 2, e));
+      } else {
+        out.push(hidden.range(s, s + 2));
+        out.push(mark(cls).range(s + 2, e - 2));
+        out.push(hidden.range(e - 2, e));
+      }
     } else {
       out.push(mark(cls).range(s, e));
     }

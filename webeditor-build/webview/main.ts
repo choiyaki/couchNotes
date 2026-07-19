@@ -67,19 +67,22 @@ const initPayload: InitPayload = window.__couchNotesInit ?? {};
 const remote = Annotation.define<boolean>();
 
 // --- リンク判定（クリック追従用） ---
-type LinkHit = { kind: "wiki" | "external"; value: string };
+type LinkHit = { kind: "wiki" | "external"; value: string; start: number; end: number };
 function linkAt(text: string, col: number): LinkHit | null {
   for (const m of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
     const s = m.index!;
-    if (col >= s && col < s + m[0].length) return { kind: "wiki", value: m[1] };
+    const e = s + m[0].length;
+    if (col >= s && col < e) return { kind: "wiki", value: m[1], start: s, end: e };
   }
   for (const m of text.matchAll(/(?<!!)\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g)) {
     const s = m.index!;
-    if (col >= s && col < s + m[0].length) return { kind: "external", value: m[1] };
+    const e = s + m[0].length;
+    if (col >= s && col < e) return { kind: "external", value: m[1], start: s, end: e };
   }
   for (const m of text.matchAll(/https?:\/\/[^\s)\]]+/g)) {
     const s = m.index!;
-    if (col >= s && col < s + m[0].length) return { kind: "external", value: m[0] };
+    const e = s + m[0].length;
+    if (col >= s && col < e) return { kind: "external", value: m[0], start: s, end: e };
   }
   return null;
 }
@@ -127,6 +130,15 @@ const clickHandler = EditorView.domEventHandlers({
 
     const hit = linkAt(line.text, col);
     if (hit) {
+      // ライブプレビューで記法（[[ ]] 等）が隠れている非アクティブ行では、リンクの
+      // 視覚的な終端より右の空白をタップしても posAtCoords が隠れた末尾記号側に
+      // 丸めてしまい、テキスト上は「リンクの範囲内」に見えることがある。
+      // 実際にタップした画面座標がリンクの描画範囲内かどうかも確認し、範囲外なら
+      // 通常のカーソル配置（return false）に任せる。
+      const endCoords = view.coordsAtPos(line.from + hit.end, -1);
+      if (endCoords && e.clientX > endCoords.right) {
+        return false;
+      }
       if (hit.kind === "wiki") native.postMessage({ type: "openWiki", target: hit.value });
       else native.postMessage({ type: "openExternal", url: hit.value });
       e.preventDefault();
@@ -460,6 +472,26 @@ window.couchNotesReceive = (msg: any) => {
     case "footer":
       setFooterData((msg.data ?? null) as FooterData | null);
       break;
+    case "revealBlock": {
+      // ブロック参照リンク（[[ページ#^ID]]）で開かれた: ^ID が行末に付く行へスクロールする。
+      const id = String(msg.id ?? "").toLowerCase();
+      if (!id) break;
+      const doc = view.state.doc;
+      for (let n = 1; n <= doc.lines; n++) {
+        const line = doc.line(n);
+        const bm = /\^([a-zA-Z0-9_-]+)\s*$/.exec(line.text);
+        if (bm && bm[1].toLowerCase() === id) {
+          // 初期レイアウト前に dispatch するとスクロール量が不正確になるため 1 フレーム待つ
+          requestAnimationFrame(() => {
+            view.dispatch({
+              effects: EditorView.scrollIntoView(line.from, { y: "start", yMargin: 24 }),
+            });
+          });
+          break;
+        }
+      }
+      break;
+    }
   }
 };
 

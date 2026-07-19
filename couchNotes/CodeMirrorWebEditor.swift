@@ -104,6 +104,14 @@ final class WebEditorBridge: ObservableObject {
     }
 }
 
+/// ブロック参照リンク（[[ページ#^ID]]）の遷移後スクロール先。
+/// リンクタップ時に積み、遷移先エディタの ready 時に消費して該当行へスクロールする。
+/// 画面をまたぐ受け渡しのため（タップ元と遷移先は別のエディタインスタンス）ここに置く。
+@MainActor
+enum BlockLinkTarget {
+    static var pendingBlockId: String?
+}
+
 /// シェイク Undo／3本指ジェスチャ用のプロキシ NSUndoManager。
 /// 実際の履歴は CodeMirror が持つため、深さ（可否）だけを映し、
 /// 実行はブリッジ経由で CM の undo/redo コマンドへ委譲する。
@@ -416,6 +424,11 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 ])
                 pushFooterIfNeeded(backlinks: parent.backlinks, twoHop: parent.twoHop,
                                    layout: parent.footerLayout)
+                // ブロック参照リンク経由で開かれた場合、init の後に該当行へスクロールさせる
+                if let blockId = BlockLinkTarget.pendingBlockId {
+                    BlockLinkTarget.pendingBlockId = nil
+                    send(type: "revealBlock", extra: ["id": blockId])
+                }
 
             case "edit":
                 // 全文＋世代番号方式（native の parent.text = textView.text と同等）。
@@ -437,7 +450,14 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 // NoteListView 側の解決（完全一致 or "/名前.md" 後方一致）が .md 付き前提のため。
                 var t = target
                 if let bar  = t.firstIndex(of: "|") { t = String(t[..<bar]) }
-                if let hash = t.firstIndex(of: "#") { t = String(t[..<hash]) }
+                if let hash = t.firstIndex(of: "#") {
+                    // ブロック参照（#^ID）は遷移先で該当行へスクロールするため取り出して積む
+                    let frag = String(t[t.index(after: hash)...]).trimmingCharacters(in: .whitespaces)
+                    if frag.hasPrefix("^"), frag.count > 1 {
+                        BlockLinkTarget.pendingBlockId = String(frag.dropFirst())
+                    }
+                    t = String(t[..<hash])
+                }
                 t = t.trimmingCharacters(in: .whitespaces)
                 if !t.lowercased().hasSuffix(".md") { t += ".md" }
                 parent.onLinkTap?(t)

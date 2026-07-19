@@ -33457,6 +33457,18 @@
       styleInline(text2, lineFrom, active, hide, out, ctx);
       return;
     }
+    const quote = /^>[ \t]?/.exec(text2);
+    if (quote) {
+      out.push(lineDeco("cm-cn-quote").range(lineFrom));
+      const markerLen2 = quote[0].length;
+      if (hide) {
+        out.push(hidden.range(lineFrom, lineFrom + markerLen2));
+      } else {
+        out.push(mark("cm-cn-marker").range(lineFrom, lineFrom + markerLen2));
+      }
+      styleInline(text2, lineFrom, active, hide, out, ctx);
+      return;
+    }
     const lead = /^[\t ]*/.exec(text2)?.[0] ?? "";
     const tabs = (lead.match(/\t/g) ?? []).length;
     const spaces = lead.length - tabs;
@@ -33557,14 +33569,26 @@
     }
     WIKI_RE.lastIndex = 0;
     for (let m; m = WIKI_RE.exec(text2); ) {
-      const inner2 = m[1].toLowerCase();
-      const cls = ctx.wiki.has(inner2) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
+      const inner2 = m[1];
+      const bar = inner2.indexOf("|");
+      const alias = bar >= 0 ? inner2.slice(bar + 1) : "";
+      const targetFull = bar >= 0 ? inner2.slice(0, bar) : inner2;
+      const hash = targetFull.indexOf("#");
+      const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase();
+      const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
       const s = lineFrom + m.index;
       const e = s + m[0].length;
       if (hide) {
-        out.push(hidden.range(s, s + 2));
-        out.push(mark(cls).range(s + 2, e - 2));
-        out.push(hidden.range(e - 2, e));
+        if (alias.length > 0) {
+          const aliasStart = s + 2 + targetFull.length + 1;
+          out.push(hidden.range(s, aliasStart));
+          out.push(mark(cls).range(aliasStart, e - 2));
+          out.push(hidden.range(e - 2, e));
+        } else {
+          out.push(hidden.range(s, s + 2));
+          out.push(mark(cls).range(s + 2, e - 2));
+          out.push(hidden.range(e - 2, e));
+        }
       } else {
         out.push(mark(cls).range(s, e));
       }
@@ -33929,18 +33953,21 @@
   function linkAt(text2, col) {
     for (const m of text2.matchAll(/\[\[([^\]]+)\]\]/g)) {
       const s = m.index;
-      if (col >= s && col < s + m[0].length)
-        return { kind: "wiki", value: m[1] };
+      const e = s + m[0].length;
+      if (col >= s && col < e)
+        return { kind: "wiki", value: m[1], start: s, end: e };
     }
     for (const m of text2.matchAll(/(?<!!)\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g)) {
       const s = m.index;
-      if (col >= s && col < s + m[0].length)
-        return { kind: "external", value: m[1] };
+      const e = s + m[0].length;
+      if (col >= s && col < e)
+        return { kind: "external", value: m[1], start: s, end: e };
     }
     for (const m of text2.matchAll(/https?:\/\/[^\s)\]]+/g)) {
       const s = m.index;
-      if (col >= s && col < s + m[0].length)
-        return { kind: "external", value: m[0] };
+      const e = s + m[0].length;
+      if (col >= s && col < e)
+        return { kind: "external", value: m[0], start: s, end: e };
     }
     return null;
   }
@@ -33981,6 +34008,10 @@
       }
       const hit = linkAt(line.text, col);
       if (hit) {
+        const endCoords = view2.coordsAtPos(line.from + hit.end, -1);
+        if (endCoords && e.clientX > endCoords.right) {
+          return false;
+        }
         if (hit.kind === "wiki")
           native.postMessage({ type: "openWiki", target: hit.value });
         else
@@ -34270,6 +34301,25 @@
       case "footer":
         setFooterData(msg.data ?? null);
         break;
+      case "revealBlock": {
+        const id = String(msg.id ?? "").toLowerCase();
+        if (!id)
+          break;
+        const doc2 = view.state.doc;
+        for (let n = 1; n <= doc2.lines; n++) {
+          const line = doc2.line(n);
+          const bm = /\^([a-zA-Z0-9_-]+)\s*$/.exec(line.text);
+          if (bm && bm[1].toLowerCase() === id) {
+            requestAnimationFrame(() => {
+              view.dispatch({
+                effects: EditorView.scrollIntoView(line.from, { y: "start", yMargin: 24 })
+              });
+            });
+            break;
+          }
+        }
+        break;
+      }
     }
   };
   native.postMessage({ type: "ready" });
