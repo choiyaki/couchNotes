@@ -228,6 +228,37 @@ function styleLine(
     markerLen = 2;
   }
 
+  // リスト項目の中身が引用（"- > ..." 等）: リストのインデント・マーカーはそのまま、
+  // 引用の縦線を「マーカー（•/☐）と本文の間」に描く。border-left は行の左端（ドットより
+  // 左）に出てしまうため使わず、背景グラデーションで任意の x 位置に縦線を置く
+  // （レイアウトを乱さず、折り返し行も含めた行全体の高さに伸びる）。
+  if (markerLen > 0) {
+    const rest = stripped.slice(markerLen);
+    const nestedQuote = /^>[ \t]?/.exec(rest);
+    if (nestedQuote) {
+      // 本文の開始位置（listIndentDeco の padding-left と同じ）から少し左に線を置く。
+      const pad = leadCols * INDENT_EM_PER_COL + GLYPH_EM;
+      const barX = (pad - 0.45).toFixed(2);
+      out.push(
+        Decoration.line({
+          attributes: {
+            class: "cm-cn-quote-fg",
+            style:
+              `background:linear-gradient(var(--cn-quote-bar),var(--cn-quote-bar)) no-repeat;` +
+              `background-size:2px 100%;background-position:${barX}em 0`,
+          },
+        }).range(lineFrom)
+      );
+      const qs = markerLoc + markerLen;
+      const qLen = nestedQuote[0].length;
+      if (hide) {
+        out.push(hidden.range(qs, qs + qLen));
+      } else {
+        out.push(mark("cm-cn-marker").range(qs, qs + qLen));
+      }
+    }
+  }
+
   if (markerLen > 0) {
     if (hideLead) {
       out.push(listIndentDeco(leadCols).range(lineFrom));
@@ -326,7 +357,10 @@ function styleInline(
     const alias = bar >= 0 ? inner.slice(bar + 1) : "";
     const targetFull = bar >= 0 ? inner.slice(0, bar) : inner; // ページ名#フラグメント
     const hash = targetFull.indexOf("#");
-    const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase();
+    // NFC 正規化: Obsidian インポート由来のノート名は NFD（macOS ファイル名）のことがあり、
+    // 手入力のリンク（NFC）とコードポイントが一致しない。見た目が同じなら一致させる。
+    const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull)
+      .trim().toLowerCase().normalize("NFC");
     const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
     const s = lineFrom + m.index;
     const e = s + m[0].length;
@@ -460,7 +494,8 @@ function build(view: EditorView): DecorationSet {
     }
   }
   const ctx: Ctx = {
-    wiki: new Set(names.map((n) => n.toLowerCase())),
+    // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
+    wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
     activeLines,
     livePreview: view.state.field(livePreviewField),
   };

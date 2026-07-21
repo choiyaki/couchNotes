@@ -135,8 +135,15 @@ const clickHandler = EditorView.domEventHandlers({
       // 丸めてしまい、テキスト上は「リンクの範囲内」に見えることがある。
       // 実際にタップした画面座標がリンクの描画範囲内かどうかも確認し、範囲外なら
       // 通常のカーソル配置（return false）に任せる。
+      // 折り返しリンクでは終端が別の視覚行にあるため、この判定は「タップが終端と
+      // 同じ視覚行にある」場合だけ適用する（さもないと1行目のリンク部分のタップが
+      // 全て『終端より右』と誤判定されて反応しなくなる）。
       const endCoords = view.coordsAtPos(line.from + hit.end, -1);
-      if (endCoords && e.clientX > endCoords.right) {
+      if (
+        endCoords &&
+        e.clientY >= endCoords.top && e.clientY <= endCoords.bottom &&
+        e.clientX > endCoords.right
+      ) {
         return false;
       }
       if (hit.kind === "wiki") native.postMessage({ type: "openWiki", target: hit.value });

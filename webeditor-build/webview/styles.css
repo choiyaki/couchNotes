@@ -92,11 +92,23 @@ body {
   opacity: 0.4;
 }
 
+/* 引用の色（縦線・本文）。リスト内引用の縦線は背景グラデーションで描くため変数で共有する。 */
+:root {
+  --cn-quote-bar: light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
+  --cn-quote-fg: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
+}
+
 /* 引用（> ...）: 左に縦線、本文をやや落ち着いた色に */
 .cm-cn-quote {
   padding-left: 0.75em;
-  border-left: 3px solid light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
-  color: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
+  border-left: 3px solid var(--cn-quote-bar);
+  color: var(--cn-quote-fg);
+}
+
+/* リスト内引用（- > ...）: 本文の色だけ。縦線はドットと本文の間に
+   背景グラデーションで描く（インラインスタイルで位置を指定）。 */
+.cm-cn-quote-fg {
+  color: var(--cn-quote-fg);
 }
 
 /* チェックボックス */

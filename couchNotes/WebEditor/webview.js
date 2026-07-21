@@ -33508,6 +33508,29 @@
       markerLen = 2;
     }
     if (markerLen > 0) {
+      const rest = stripped.slice(markerLen);
+      const nestedQuote = /^>[ \t]?/.exec(rest);
+      if (nestedQuote) {
+        const pad2 = leadCols * INDENT_EM_PER_COL + GLYPH_EM;
+        const barX = (pad2 - 0.45).toFixed(2);
+        out.push(
+          Decoration.line({
+            attributes: {
+              class: "cm-cn-quote-fg",
+              style: `background:linear-gradient(var(--cn-quote-bar),var(--cn-quote-bar)) no-repeat;background-size:2px 100%;background-position:${barX}em 0`
+            }
+          }).range(lineFrom)
+        );
+        const qs = markerLoc + markerLen;
+        const qLen = nestedQuote[0].length;
+        if (hide) {
+          out.push(hidden.range(qs, qs + qLen));
+        } else {
+          out.push(mark("cm-cn-marker").range(qs, qs + qLen));
+        }
+      }
+    }
+    if (markerLen > 0) {
       if (hideLead) {
         out.push(listIndentDeco(leadCols).range(lineFrom));
       } else {
@@ -33574,7 +33597,7 @@
       const alias = bar >= 0 ? inner2.slice(bar + 1) : "";
       const targetFull = bar >= 0 ? inner2.slice(0, bar) : inner2;
       const hash = targetFull.indexOf("#");
-      const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase();
+      const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase().normalize("NFC");
       const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -33696,7 +33719,8 @@
       }
     }
     const ctx = {
-      wiki: new Set(names.map((n) => n.toLowerCase())),
+      // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
+      wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
       activeLines,
       livePreview: view2.state.field(livePreviewField)
     };
@@ -34009,7 +34033,7 @@
       const hit = linkAt(line.text, col);
       if (hit) {
         const endCoords = view2.coordsAtPos(line.from + hit.end, -1);
-        if (endCoords && e.clientX > endCoords.right) {
+        if (endCoords && e.clientY >= endCoords.top && e.clientY <= endCoords.bottom && e.clientX > endCoords.right) {
           return false;
         }
         if (hit.kind === "wiki")

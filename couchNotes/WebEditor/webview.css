@@ -69,10 +69,17 @@ body {
 .cm-cn-marker {
   opacity: 0.4;
 }
+:root {
+  --cn-quote-bar: light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
+  --cn-quote-fg: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
+}
 .cm-cn-quote {
   padding-left: 0.75em;
-  border-left: 3px solid light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
-  color: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
+  border-left: 3px solid var(--cn-quote-bar);
+  color: var(--cn-quote-fg);
+}
+.cm-cn-quote-fg {
+  color: var(--cn-quote-fg);
 }
 .cm-cn-task-open {
   color: light-dark(#007aff, #0a84ff);
