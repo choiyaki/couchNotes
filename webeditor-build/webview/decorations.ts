@@ -36,8 +36,6 @@ const STRIKE_RE = /~~([^~\n]+?)~~/g;
 const ITALIC_RE = /(?<![*\w])\*([^*\n]+?)\*(?!\*)/g;
 
 const lineDeco = (cls: string) => Decoration.line({ class: cls });
-const hangDeco = (padCh: number) =>
-  Decoration.line({ attributes: { style: `padding-left:${padCh}ch;text-indent:-${padCh}ch` } });
 const mark = (cls: string) => Decoration.mark({ class: cls });
 const hidden = Decoration.replace({});
 
@@ -98,6 +96,34 @@ const listIndentDeco = (leadCols: number) =>
       style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em;text-indent:-${GLYPH_EM}em`,
     },
   });
+
+/** カーソル行（生の記法）の先頭空白（タブ）: 消さずに mark で包み、固定幅の inline-block に
+    する（1 カラム = INDENT_EM_PER_COL em）。タブ文字は残るので直接編集できる。
+    ネイティブのタブは描画幅がプロポーショナルフォントで揺れ、かつタブストップが text-indent の
+    影響を受けないためぶら下げと両立しない。固定幅ボックス化することで両方を解決する。
+    overflow は visible のままにする（visible 以外だと inline-block のベースラインがボックス
+    下端になり、行がせり上がって上に余白・カーソルが縦長になる）。幅は明示指定なので、はみ出す
+    のは不可視の空白だけで実害はない。 */
+const listLeadDeco = (leadCols: number) =>
+  Decoration.mark({
+    attributes: {
+      style: `display:inline-block;width:${(leadCols * INDENT_EM_PER_COL).toFixed(2)}em`,
+    },
+  });
+
+/** カーソル行（生の記法）のぶら下げインデント。折り返し行は非カーソル行の本文と同じ
+    leadCols*INDENT_EM_PER_COL + GLYPH_EM に合わせる。先頭行のマーカー（- / - [ ]）は
+    NUDGE ぶん右へ寄せて • / ☐ と縦位置を合わせる（生の「-」グリフは左に寄って見えるため）。
+    先頭タブは listLeadDeco で固定幅化済みなので text-indent がタブストップと干渉しない。 */
+const MARKER_NUDGE_EM = 0.25; // • と - の見かけの左端を合わせる微調整（要調整）
+const listRawHangDeco = (leadCols: number) => {
+  const hang = leadCols * INDENT_EM_PER_COL + GLYPH_EM;
+  return Decoration.line({
+    attributes: {
+      style: `padding-left:${hang.toFixed(2)}em;text-indent:-${(hang - MARKER_NUDGE_EM).toFixed(2)}em`,
+    },
+  });
+};
 
 interface Ctx {
   wiki: Set<string>;
@@ -263,8 +289,10 @@ function styleLine(
     if (hideLead) {
       out.push(listIndentDeco(leadCols).range(lineFrom));
     } else {
-      // ぶら下げインデント（折り返し行を本文位置に揃える）
-      out.push(hangDeco(leadCols + markerLen).range(lineFrom));
+      // カーソル行（生の記法・タブを残す）: 先頭タブを固定幅 inline-block 化し、
+      // ぶら下げインデントで折り返し行を本文位置に揃える。
+      if (lead.length > 0) out.push(listLeadDeco(leadCols).range(lineFrom, markerLoc));
+      out.push(listRawHangDeco(leadCols).range(lineFrom));
     }
   }
 

@@ -33361,7 +33361,6 @@
   var STRIKE_RE = /~~([^~\n]+?)~~/g;
   var ITALIC_RE = /(?<![*\w])\*([^*\n]+?)\*(?!\*)/g;
   var lineDeco = (cls) => Decoration.line({ class: cls });
-  var hangDeco = (padCh) => Decoration.line({ attributes: { style: `padding-left:${padCh}ch;text-indent:-${padCh}ch` } });
   var mark = (cls) => Decoration.mark({ class: cls });
   var hidden = Decoration.replace({});
   var BulletWidget = class extends WidgetType {
@@ -33410,6 +33409,20 @@
       style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em;text-indent:-${GLYPH_EM}em`
     }
   });
+  var listLeadDeco = (leadCols) => Decoration.mark({
+    attributes: {
+      style: `display:inline-block;width:${(leadCols * INDENT_EM_PER_COL).toFixed(2)}em`
+    }
+  });
+  var MARKER_NUDGE_EM = 0.25;
+  var listRawHangDeco = (leadCols) => {
+    const hang = leadCols * INDENT_EM_PER_COL + GLYPH_EM;
+    return Decoration.line({
+      attributes: {
+        style: `padding-left:${hang.toFixed(2)}em;text-indent:-${(hang - MARKER_NUDGE_EM).toFixed(2)}em`
+      }
+    });
+  };
   function styleLine(view2, lineFrom, lineNumber, text2, out, ctx) {
     const active = ctx.activeLines.has(lineNumber);
     const hide = ctx.livePreview && !active;
@@ -33534,7 +33547,9 @@
       if (hideLead) {
         out.push(listIndentDeco(leadCols).range(lineFrom));
       } else {
-        out.push(hangDeco(leadCols + markerLen).range(lineFrom));
+        if (lead.length > 0)
+          out.push(listLeadDeco(leadCols).range(lineFrom, markerLoc));
+        out.push(listRawHangDeco(leadCols).range(lineFrom));
       }
     }
     styleInline(text2, lineFrom, active, hide, out, ctx);
