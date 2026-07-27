@@ -70,6 +70,9 @@ struct NoteDetailView: View {
     // 新エディタとのブリッジ（ツールバーコマンド・フォーカス状態・画像アップロード）
     @StateObject private var webBridge = WebEditorBridge()
     @State private var photoPickerItem: PhotosPickerItem? = nil
+    // ピッカーの提示はフォーカス連動で消えるツールバーから切り離す（共有アルバム選択で
+    // 親ビューごと破棄されて閉じるのを防ぐ）。提示元は常設の Group（下記）に置く。
+    @State private var showPhotoPicker = false
 
     @State private var content        = ""
     @State private var editingContent = ""
@@ -510,6 +513,12 @@ struct NoteDetailView: View {
                     .overlay(alignment: .top) {
                         if showTitleDropdown { titleDropdown }
                     }
+                    // 写真ピッカーの提示元は常設のこのビューに置く。ツールバー内に置くと、
+                    // ピッカー表示時のエディタ blur で isEditorFocused=false になりツールバー
+                    // ごと破棄され、ピッカーが閉じてしまう（特に共有アルバム）。
+                    .photosPicker(isPresented: $showPhotoPicker,
+                                  selection: $photoPickerItem,
+                                  matching: .images)
             }
 
             // 新エディタでキーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
@@ -659,10 +668,7 @@ struct NoteDetailView: View {
     private var webEditorToolbar: some View {
         HStack(spacing: 5) {
             webToolbarButton(systemImage: "clipboard") { webBridge.pasteFromClipboard() }
-            PhotosPicker(selection: $photoPickerItem, matching: .images) {
-                webToolbarLabel(systemImage: "photo.badge.plus")
-            }
-            .buttonStyle(.plain)
+            webToolbarButton(systemImage: "photo.badge.plus") { showPhotoPicker = true }
             webToolbarButton("[[ ]]") { webBridge.run("wikiLink") }
             webToolbarButton(systemImage: "checklist") { webBridge.run("listToggle") }
             webToolbarButton(systemImage: "arrow.up") { webBridge.run("moveLineUp") }
