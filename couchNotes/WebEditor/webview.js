@@ -33406,7 +33406,7 @@
   var INDENT_EM_PER_COL = 0.75;
   var listIndentDeco = (leadCols) => Decoration.line({
     attributes: {
-      style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em;text-indent:-${GLYPH_EM}em`
+      style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em`
     }
   });
   var listLeadDeco = (leadCols) => Decoration.mark({

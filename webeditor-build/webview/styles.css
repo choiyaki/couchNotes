@@ -169,6 +169,10 @@ body {
   box-sizing: border-box;
   width: 1em;
   height: 1em;
+  /* listIndentDeco の padding-left にはグリフ幅（GLYPH_EM=1.25em）が含まれる。
+     負の text-indent を使うと WebKit が行内 inline-block（数式）の幅を縮めるため、
+     代わりにグリフ自身を margin-left でグリフ幅ぶん左へ出してぶら下げを作る。 */
+  margin-left: -1.25em;
   margin-right: 0.25em;
   vertical-align: -0.12em;
   background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4" fill="%238e8e93"/></svg>')
@@ -185,6 +189,8 @@ body {
   position: relative;
   width: 1em;
   height: 1em;
+  /* bullet と同じ理由でグリフ幅ぶん左へ出す（listIndentDeco の padding と対） */
+  margin-left: -1.25em;
   margin-right: 0.25em;
   vertical-align: -0.12em;
   border: 1.5px solid light-dark(#007aff, #0a84ff);

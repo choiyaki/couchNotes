@@ -125,6 +125,7 @@ body {
   box-sizing: border-box;
   width: 1em;
   height: 1em;
+  margin-left: -1.25em;
   margin-right: 0.25em;
   vertical-align: -0.12em;
   background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4" fill="%238e8e93"/></svg>') center / 100% no-repeat;
@@ -135,6 +136,7 @@ body {
   position: relative;
   width: 1em;
   height: 1em;
+  margin-left: -1.25em;
   margin-right: 0.25em;
   vertical-align: -0.12em;
   border: 1.5px solid light-dark(#007aff, #0a84ff);

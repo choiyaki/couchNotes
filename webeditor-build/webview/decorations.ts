@@ -85,15 +85,18 @@ const checkboxOpenReplace = Decoration.replace({ widget: new CheckboxWidget(fals
 const checkboxDoneReplace = Decoration.replace({ widget: new CheckboxWidget(true) });
 
 /** ライブプレビューのリスト行用インデント: タブ・マーカーを隠した分を padding で作る。
-    先頭行はグリフ（1.25em 幅）ぶんだけ左に出し、折り返し行は本文位置に揃える。
+    折り返し行は本文位置（padding-left）に揃い、先頭のグリフ（•/☐）は自身の負 margin-left
+    （CSS 側 -GLYPH_EM）でグリフ幅ぶん左へ出す。
+    負の text-indent は使わない: WebKit では行内 inline-block（数式ウィジェット等）の幅を
+    text-indent の絶対値ぶん縮めてしまい、数式が欠ける/隣と重なるため。
     単位は em（1 階層 = 1.5em）。ch はプロポーショナル・日本語フォントでタブ幅と
     一致せず、生表示との間で位置がずれるため使わない。 */
-const GLYPH_EM = 1.25;           // •/☐ グリフの占有幅
+const GLYPH_EM = 1.25;           // •/☐ グリフの占有幅（CSS の margin-left:-1.25em と一致させる）
 const INDENT_EM_PER_COL = 0.75;  // 1 カラム（タブ=2カラム）あたりの字下げ
 const listIndentDeco = (leadCols: number) =>
   Decoration.line({
     attributes: {
-      style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em;text-indent:-${GLYPH_EM}em`,
+      style: `padding-left:${(leadCols * INDENT_EM_PER_COL + GLYPH_EM).toFixed(2)}em`,
     },
   });
 
