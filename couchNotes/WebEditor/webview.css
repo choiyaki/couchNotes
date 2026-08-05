@@ -73,7 +73,7 @@ body {
   --cn-quote-bar: light-dark(rgba(60, 60, 67, 0.29), rgba(235, 235, 245, 0.3));
   --cn-quote-fg: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
 }
-.cm-cn-quote {
+.cm-editor .cm-cn-quote {
   padding-left: 0.75em;
   border-left: 3px solid var(--cn-quote-bar);
   color: var(--cn-quote-fg);
@@ -189,6 +189,125 @@ body {
   border: 1px solid light-dark(#d1d1d6, #48484a);
   border-radius: 10px;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+}
+:root {
+  --cn-code-bg: light-dark(rgb(0 0 0 / 0.055), rgb(255 255 255 / 0.08));
+  --cn-code-font:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    "Courier New",
+    monospace;
+}
+.cm-cn-code {
+  font-family: var(--cn-code-font);
+  font-size: 0.88em;
+  background: var(--cn-code-bg);
+  border-radius: 4px;
+  padding: 0.12em 0.32em;
+  color: light-dark(#b02a5b, #ff9ab0);
+}
+.cm-editor .cm-cn-code-line {
+  background: var(--cn-code-bg);
+  font-family: var(--cn-code-font);
+  font-size: 0.88em;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.cm-editor .cm-cn-code-first {
+  border-radius: 8px 8px 0 0;
+  padding-top: 5px;
+}
+.cm-editor .cm-cn-code-last {
+  border-radius: 0 0 8px 8px;
+  padding-bottom: 5px;
+}
+.cm-editor .cm-cn-code-strip-line {
+  font-size: 0;
+  line-height: 0;
+}
+.cm-cn-code-strip {
+  position: relative;
+  height: 8px;
+}
+.cm-cn-code-strip-open {
+  height: 16px;
+}
+.cm-cn-code-lang {
+  position: absolute;
+  right: 0;
+  top: 0;
+  font-family: var(--cn-code-font);
+  font-size: 10px;
+  line-height: 15px;
+  letter-spacing: 0.02em;
+  opacity: 0.45;
+}
+:root {
+  --cn-mdtable-border: light-dark(rgb(0 0 0 / 0.12), rgb(255 255 255 / 0.16));
+  --cn-mdtable-rule: light-dark(rgb(0 0 0 / 0.32), rgb(255 255 255 / 0.36));
+  --cn-mdtable-head-bg: light-dark(rgb(0 0 0 / 0.04), rgb(255 255 255 / 0.06));
+}
+.cm-editor .cm-cn-mdtable-line,
+.cm-editor .cm-cn-mdtable-rule-line {
+  line-height: 0;
+}
+.cm-editor .cm-cn-mdtable-rule-line {
+  font-size: 0;
+}
+.cm-editor .cm-cn-mdtable-line img.cm-widgetBuffer,
+.cm-editor .cm-cn-mdtable-rule-line img.cm-widgetBuffer,
+.cm-editor .cm-cn-code-strip-line img.cm-widgetBuffer {
+  height: 0;
+}
+.cm-cn-mdtable-row {
+  display: inline-block;
+  vertical-align: top;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.cm-cn-mdtable-row::-webkit-scrollbar {
+  display: none;
+}
+.cm-cn-mdtable-head {
+  font-weight: 600;
+}
+.cm-cn-mdtable-inner {
+  display: flex;
+  align-items: stretch;
+  box-sizing: border-box;
+  height: 100%;
+  border-bottom: 1px solid var(--cn-mdtable-border);
+}
+.cm-cn-mdtable-head .cm-cn-mdtable-inner {
+  border-bottom: none;
+}
+.cm-cn-mdtable-head .cm-cn-mdtable-inner {
+  background: var(--cn-mdtable-head-bg);
+}
+.cm-cn-mdtable-cell {
+  flex: none;
+  box-sizing: border-box;
+  padding: 3px 10px;
+  line-height: var(--cn-line-height);
+  white-space: nowrap;
+  overflow: hidden;
+  border-right: 1px solid var(--cn-mdtable-border);
+}
+.cm-cn-mdtable-cell:last-child {
+  border-right: none;
+}
+.cm-cn-mdtable-rule {
+  display: inline-block;
+  vertical-align: top;
+  height: 1px;
+  background: var(--cn-mdtable-rule);
+}
+.cm-cn-mdtable-raw {
+  background: light-dark(rgb(0 0 0 / 0.03), rgb(255 255 255 / 0.045));
 }
 .cm-cn-table {
   display: flex;

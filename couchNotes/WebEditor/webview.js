@@ -32990,8 +32990,7 @@
       document.body.appendChild(measureBox);
     }
     const content2 = getComputedStyle(view2.contentDOM);
-    const lineEl = view2.contentDOM.querySelector(".cm-line");
-    const lineHeight = lineEl ? getComputedStyle(lineEl).lineHeight : "1.45";
+    const lineHeight = getComputedStyle(document.documentElement).getPropertyValue("--cn-line-height").trim() || "1.45em";
     const sig = `${content2.fontFamily}|${content2.fontSize}|${lineHeight}`;
     if (sig !== fontSig) {
       fontSig = sig;
@@ -33009,7 +33008,12 @@
     heightCache.clear();
   }
   var CELL_BREAK_RE = /\s*(?<!:)\/\/\s*/;
-  function appendTextWithBreaks(el, text2) {
+  function appendTextWithBreaks(el, text2, allowBreaks) {
+    if (!allowBreaks) {
+      if (text2)
+        el.appendChild(document.createTextNode(text2));
+      return;
+    }
     const parts = text2.split(CELL_BREAK_RE);
     parts.forEach((part, i) => {
       if (i > 0)
@@ -33018,12 +33022,12 @@
         el.appendChild(document.createTextNode(part));
     });
   }
-  function buildCellContent(el, content2) {
+  function buildCellContent(el, content2, allowBreaks = true) {
     let last = 0;
     INLINE_MATH_RE.lastIndex = 0;
     for (let m; m = INLINE_MATH_RE.exec(content2); ) {
       if (m.index > last)
-        appendTextWithBreaks(el, content2.slice(last, m.index));
+        appendTextWithBreaks(el, content2.slice(last, m.index), allowBreaks);
       const span = document.createElement("span");
       span.className = "cm-cn-math-widget";
       renderTeX(m[1], false, span);
@@ -33031,20 +33035,31 @@
       last = m.index + m[0].length;
     }
     if (last < content2.length)
-      appendTextWithBreaks(el, content2.slice(last));
+      appendTextWithBreaks(el, content2.slice(last), allowBreaks);
   }
-  function naturalWidth(view2, content2) {
-    const cached = naturalWidthCache.get(content2);
+  function naturalWidth(view2, content2, allowBreaks = true) {
+    const key = allowBreaks ? content2 : `\0${content2}`;
+    const cached = naturalWidthCache.get(key);
     if (cached != null)
       return cached;
     const box = measurer(view2);
     box.style.width = "auto";
     box.style.whiteSpace = "nowrap";
     box.textContent = "";
-    buildCellContent(box, content2);
+    buildCellContent(box, content2, allowBreaks);
     const w = box.scrollWidth;
-    naturalWidthCache.set(content2, w);
+    naturalWidthCache.set(key, w);
     return w;
+  }
+  function cellNaturalWidth(view2, content2) {
+    return naturalWidth(view2, content2, false);
+  }
+  function editorLineHeight(view2) {
+    const box = measurer(view2);
+    box.style.width = "auto";
+    box.style.whiteSpace = "nowrap";
+    box.textContent = "M";
+    return box.offsetHeight;
   }
   function wrappedHeight(view2, content2, width) {
     const key = `${Math.round(width)}|${content2}`;
@@ -33205,6 +33220,281 @@
     }
   };
 
+  // webview/blocks.ts
+  var FENCE_RE = /^[\t ]*(`{3,}|~{3,})(.*)$/;
+  var TABLE_ROW_RE = /^[\t ]*\|/;
+  function splitRow(text2) {
+    let body = text2.trim();
+    if (body.startsWith("|"))
+      body = body.slice(1);
+    if (body.endsWith("|") && !body.endsWith("\\|"))
+      body = body.slice(0, -1);
+    const cells = [];
+    let cur2 = "";
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i];
+      if (ch === "\\" && body[i + 1] === "|") {
+        cur2 += "|";
+        i++;
+        continue;
+      }
+      if (ch === "|") {
+        cells.push(cur2.trim());
+        cur2 = "";
+        continue;
+      }
+      cur2 += ch;
+    }
+    cells.push(cur2.trim());
+    return cells;
+  }
+  function isSeparatorRow(cells) {
+    return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+  }
+  function alignOf(cell) {
+    const l = cell.startsWith(":");
+    const r = cell.endsWith(":");
+    if (l && r)
+      return "center";
+    if (r)
+      return "right";
+    if (l)
+      return "left";
+    return null;
+  }
+  function parseBlocks(doc2) {
+    const blocks = [];
+    const byLine = /* @__PURE__ */ new Map();
+    const total = doc2.lines;
+    const push = (blk) => {
+      blocks.push(blk);
+      for (let m = blk.from; m <= blk.to; m++)
+        byLine.set(m, blk);
+    };
+    let n = 1;
+    while (n <= total) {
+      const text2 = doc2.line(n).text;
+      const fence = FENCE_RE.exec(text2);
+      if (fence) {
+        const marker = fence[1];
+        const ch = marker[0];
+        const info = fence[2].trim();
+        if (!info.includes(ch)) {
+          let closeLine = null;
+          for (let m = n + 1; m <= total; m++) {
+            const f = FENCE_RE.exec(doc2.line(m).text);
+            if (f && f[1][0] === ch && f[1].length >= marker.length && f[2].trim() === "") {
+              closeLine = m;
+              break;
+            }
+          }
+          const to = closeLine ?? total;
+          push({ kind: "code", from: n, to, closeLine, lang: info });
+          n = to + 1;
+          continue;
+        }
+      }
+      if (TABLE_ROW_RE.test(text2) && n + 1 <= total) {
+        const sepText = doc2.line(n + 1).text;
+        if (TABLE_ROW_RE.test(sepText)) {
+          const header = splitRow(text2);
+          const sep = splitRow(sepText);
+          if (isSeparatorRow(sep) && sep.length === header.length) {
+            let end = n + 1;
+            while (end + 1 <= total && TABLE_ROW_RE.test(doc2.line(end + 1).text))
+              end++;
+            const cells = [];
+            for (let m = n; m <= end; m++) {
+              cells.push(m === n + 1 ? [] : splitRow(doc2.line(m).text));
+            }
+            push({
+              kind: "table",
+              from: n,
+              to: end,
+              sepLine: n + 1,
+              aligns: sep.map(alignOf),
+              cells
+            });
+            n = end + 1;
+            continue;
+          }
+        }
+      }
+      n++;
+    }
+    return { blocks, byLine };
+  }
+  var blocksField = StateField.define({
+    create: (state) => parseBlocks(state.doc),
+    update(value, tr) {
+      return tr.docChanged ? parseBlocks(tr.state.doc) : value;
+    }
+  });
+
+  // webview/mdtable.ts
+  var CELL_PAD_H = 10;
+  var CELL_PAD_V = 3;
+  var MIN_COL_W = 28;
+  function availableWidth2(view2) {
+    const cs = getComputedStyle(view2.contentDOM);
+    const pad2 = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const w = view2.scrollDOM.clientWidth - pad2;
+    return w > 0 ? Math.floor(w) : 360;
+  }
+  function layoutMdTable(view2, block) {
+    const nCol = block.aligns.length;
+    const colW = new Array(nCol).fill(0);
+    for (const row of block.cells) {
+      if (row.length === 0)
+        continue;
+      for (let i = 0; i < nCol; i++) {
+        const w = cellNaturalWidth(view2, row[i] ?? "");
+        if (w > colW[i])
+          colW[i] = w;
+      }
+    }
+    for (let i = 0; i < nCol; i++) {
+      colW[i] = Math.max(Math.ceil(colW[i]) + CELL_PAD_H * 2, MIN_COL_W);
+    }
+    const totalW = colW.reduce((a, b) => a + b, 0);
+    const viewW = availableWidth2(view2);
+    const rowH = Math.ceil(editorLineHeight(view2)) + CELL_PAD_V * 2;
+    const key = `mdt:${block.from}:${colW.join(",")}:${block.aligns.join(",")}:${rowH}:${viewW}`;
+    return { key, colW, totalW, viewW, rowH, aligns: block.aligns };
+  }
+  var scrollPos = /* @__PURE__ */ new Map();
+  var liveRows = /* @__PURE__ */ new Map();
+  var syncing = false;
+  function registerRow(key, el) {
+    let set = liveRows.get(key);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      liveRows.set(key, set);
+    }
+    set.add(el);
+    const group = set;
+    el.addEventListener(
+      "scroll",
+      () => {
+        if (syncing)
+          return;
+        const x2 = el.scrollLeft;
+        scrollPos.set(key, x2);
+        syncing = true;
+        for (const other of group)
+          if (other !== el)
+            other.scrollLeft = x2;
+        syncing = false;
+      },
+      { passive: true }
+    );
+    const x = scrollPos.get(key);
+    if (x)
+      requestAnimationFrame(() => {
+        el.scrollLeft = x;
+      });
+  }
+  function unregisterRow(key, el) {
+    const set = liveRows.get(key);
+    if (!set)
+      return;
+    set.delete(el);
+    if (set.size === 0)
+      liveRows.delete(key);
+  }
+  var MdTableRowWidget = class extends WidgetType {
+    constructor(layout, cells, isHeader, isLast) {
+      super();
+      this.layout = layout;
+      this.cells = cells;
+      this.isHeader = isHeader;
+      this.isLast = isLast;
+    }
+    eq(other) {
+      return other.layout.key === this.layout.key && other.isHeader === this.isHeader && other.isLast === this.isLast && other.cells.length === this.cells.length && other.cells.every((c, i) => c === this.cells[i]);
+    }
+    ignoreEvent() {
+      return true;
+    }
+    toDOM(view2) {
+      const wrap = document.createElement("div");
+      wrap.className = "cm-cn-mdtable-row" + (this.isHeader ? " cm-cn-mdtable-head" : "") + (this.isLast ? " cm-cn-mdtable-last" : "");
+      wrap.style.width = `${this.layout.viewW}px`;
+      wrap.style.height = `${this.layout.rowH}px`;
+      const inner2 = document.createElement("div");
+      inner2.className = "cm-cn-mdtable-inner";
+      inner2.style.width = `${this.layout.totalW}px`;
+      for (let i = 0; i < this.layout.colW.length; i++) {
+        const cell = document.createElement("div");
+        cell.className = "cm-cn-mdtable-cell";
+        cell.style.width = `${this.layout.colW[i]}px`;
+        const a = this.layout.aligns[i];
+        if (a)
+          cell.style.textAlign = a;
+        buildCellContent(cell, this.cells[i] ?? "", false);
+        inner2.appendChild(cell);
+      }
+      wrap.appendChild(inner2);
+      registerRow(this.layout.key, wrap);
+      wrap.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const pos = Math.min(view2.posAtDOM(wrap), view2.state.doc.length);
+        const line = view2.state.doc.lineAt(pos);
+        view2.dispatch({ selection: { anchor: line.to } });
+        view2.focus();
+      });
+      return wrap;
+    }
+    destroy(dom) {
+      unregisterRow(this.layout.key, dom);
+    }
+  };
+  var MdTableRuleWidget = class extends WidgetType {
+    constructor(key, width) {
+      super();
+      this.key = key;
+      this.width = width;
+    }
+    eq(other) {
+      return other.key === this.key && other.width === this.width;
+    }
+    ignoreEvent() {
+      return true;
+    }
+    toDOM() {
+      const d = document.createElement("div");
+      d.className = "cm-cn-mdtable-rule";
+      d.style.width = `${this.width}px`;
+      return d;
+    }
+  };
+
+  // webview/codeblock.ts
+  var CodeFenceStripWidget = class extends WidgetType {
+    constructor(lang, open2) {
+      super();
+      this.lang = lang;
+      this.open = open2;
+    }
+    eq(other) {
+      return other.lang === this.lang && other.open === this.open;
+    }
+    ignoreEvent() {
+      return true;
+    }
+    toDOM() {
+      const d = document.createElement("div");
+      d.className = "cm-cn-code-strip " + (this.open ? "cm-cn-code-strip-open" : "cm-cn-code-strip-close");
+      if (this.open && this.lang) {
+        const s = document.createElement("span");
+        s.className = "cm-cn-code-lang";
+        s.textContent = this.lang;
+        d.appendChild(s);
+      }
+      return d;
+    }
+  };
+
   // webview/commands.ts
   function selectedLines(state) {
     const { from, to } = state.selection.main;
@@ -33360,6 +33650,7 @@
   var BOLD_RE = /\*\*([^*\n]+?)\*\*/g;
   var STRIKE_RE = /~~([^~\n]+?)~~/g;
   var ITALIC_RE = /(?<![*\w])\*([^*\n]+?)\*(?!\*)/g;
+  var INLINE_CODE_RE = /(?<!`)`(?!`)([^`\n]+?)`(?!`)/g;
   var lineDeco = (cls) => Decoration.line({ class: cls });
   var mark = (cls) => Decoration.mark({ class: cls });
   var hidden = Decoration.replace({});
@@ -33423,6 +33714,72 @@
       }
     });
   };
+  function styleBlockLine(view2, lineFrom, lineNumber, lineTo, text2, blk, out, ctx) {
+    const raw = !ctx.livePreview || ctx.activeBlocks.has(blk);
+    if (blk.kind === "code") {
+      const isFence = lineNumber === blk.from || lineNumber === blk.closeLine;
+      const cls = "cm-cn-code-line" + (lineNumber === blk.from ? " cm-cn-code-first" : "") + (lineNumber === blk.to ? " cm-cn-code-last" : "");
+      if (!raw && isFence && text2.length > 0) {
+        out.push(Decoration.line({ class: cls + " cm-cn-code-strip-line" }).range(lineFrom));
+        const open2 = lineNumber === blk.from;
+        out.push(
+          Decoration.replace({ widget: new CodeFenceStripWidget(open2 ? blk.lang : "", open2) }).range(lineFrom, lineTo)
+        );
+        return;
+      }
+      out.push(Decoration.line({ class: cls }).range(lineFrom));
+      if (isFence && text2.length > 0) {
+        out.push(mark("cm-cn-marker").range(lineFrom, lineTo));
+      }
+      return;
+    }
+    if (!ctx.livePreview) {
+      if (text2.length > 0)
+        styleInline(text2, lineFrom, true, false, out, ctx, true);
+      return;
+    }
+    let layout = ctx.layouts.get(blk);
+    if (!layout) {
+      layout = layoutMdTable(view2, blk);
+      ctx.layouts.set(blk, layout);
+    }
+    if (raw) {
+      out.push(
+        Decoration.line({
+          class: "cm-cn-mdtable-raw",
+          attributes: { style: `min-height:${layout.rowH}px` }
+        }).range(lineFrom)
+      );
+      if (text2.length > 0)
+        styleInline(text2, lineFrom, true, false, out, ctx, true);
+      return;
+    }
+    if (lineNumber === blk.sepLine) {
+      out.push(Decoration.line({ class: "cm-cn-mdtable-rule-line" }).range(lineFrom));
+      if (text2.length > 0) {
+        out.push(
+          Decoration.replace({
+            // 罫線は表の実幅ぶんだけ引く（表が本文幅を超える時は本文幅で頭打ち）
+            widget: new MdTableRuleWidget(layout.key, Math.min(layout.totalW, layout.viewW))
+          }).range(lineFrom, lineTo)
+        );
+      }
+      return;
+    }
+    out.push(Decoration.line({ class: "cm-cn-mdtable-line" }).range(lineFrom));
+    if (text2.length > 0) {
+      out.push(
+        Decoration.replace({
+          widget: new MdTableRowWidget(
+            layout,
+            blk.cells[lineNumber - blk.from] ?? [],
+            lineNumber === blk.from,
+            lineNumber === blk.to
+          )
+        }).range(lineFrom, lineTo)
+      );
+    }
+  }
   function styleLine(view2, lineFrom, lineNumber, text2, out, ctx) {
     const active = ctx.activeLines.has(lineNumber);
     const hide = ctx.livePreview && !active;
@@ -33565,6 +33922,23 @@
   }
   function styleInline(text2, lineFrom, active, hide, out, ctx, skipImageReserve = false) {
     const covered = [];
+    const codeRanges = [];
+    INLINE_CODE_RE.lastIndex = 0;
+    for (let m; m = INLINE_CODE_RE.exec(text2); ) {
+      const s = lineFrom + m.index;
+      const e = s + m[0].length;
+      if (hide) {
+        out.push(hidden.range(s, s + 1));
+        out.push(mark("cm-cn-code").range(s + 1, e - 1));
+        out.push(hidden.range(e - 1, e));
+      } else {
+        out.push(mark("cm-cn-marker").range(s, s + 1));
+        out.push(mark("cm-cn-code").range(s + 1, e - 1));
+        out.push(mark("cm-cn-marker").range(e - 1, e));
+      }
+      codeRanges.push([m.index, m.index + m[0].length]);
+    }
+    const inCode = (idx) => codeRanges.some(([a, b]) => idx >= a && idx < b);
     const linkedByInner = /* @__PURE__ */ new Map();
     LINKED_IMG_RE.lastIndex = 0;
     for (let m; m = LINKED_IMG_RE.exec(text2); ) {
@@ -33574,6 +33948,8 @@
     let imgIndex = 0;
     IMG_MD_RE.lastIndex = 0;
     for (let m; m = IMG_MD_RE.exec(text2); ) {
+      if (inCode(m.index))
+        continue;
       const linked = linkedByInner.get(m.index);
       const rs = linked ? linked.s : m.index;
       const re = linked ? linked.e : m.index + m[0].length;
@@ -33607,6 +33983,8 @@
     }
     WIKI_RE.lastIndex = 0;
     for (let m; m = WIKI_RE.exec(text2); ) {
+      if (inCode(m.index))
+        continue;
       const inner2 = m[1];
       const bar = inner2.indexOf("|");
       const alias = bar >= 0 ? inner2.slice(bar + 1) : "";
@@ -33634,6 +34012,8 @@
     }
     MD_LINK_RE.lastIndex = 0;
     for (let m; m = MD_LINK_RE.exec(text2); ) {
+      if (inCode(m.index))
+        continue;
       const s = lineFrom + m.index;
       const e = s + m[0].length;
       const textLen = m[1].length;
@@ -33649,7 +34029,7 @@
     const inCovered = (idx) => covered.some(([a, b]) => idx >= a && idx < b);
     INLINE_MATH_RE.lastIndex = 0;
     for (let m; m = INLINE_MATH_RE.exec(text2); ) {
-      if (inCovered(m.index))
+      if (inCovered(m.index) || inCode(m.index))
         continue;
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -33666,7 +34046,7 @@
     }
     BOLD_RE.lastIndex = 0;
     for (let m; m = BOLD_RE.exec(text2); ) {
-      if (inCovered(m.index))
+      if (inCovered(m.index) || inCode(m.index))
         continue;
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -33683,7 +34063,7 @@
     }
     STRIKE_RE.lastIndex = 0;
     for (let m; m = STRIKE_RE.exec(text2); ) {
-      if (inCovered(m.index))
+      if (inCovered(m.index) || inCode(m.index))
         continue;
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -33700,7 +34080,7 @@
     }
     ITALIC_RE.lastIndex = 0;
     for (let m; m = ITALIC_RE.exec(text2); ) {
-      if (inCovered(m.index))
+      if (inCovered(m.index) || inCode(m.index))
         continue;
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -33716,7 +34096,7 @@
     }
     BARE_URL_RE.lastIndex = 0;
     for (let m; m = BARE_URL_RE.exec(text2); ) {
-      if (inCovered(m.index))
+      if (inCovered(m.index) || inCode(m.index))
         continue;
       out.push(mark("cm-cn-link").range(lineFrom + m.index, lineFrom + m.index + m[0].length));
     }
@@ -33733,19 +34113,33 @@
           activeLines.add(n);
       }
     }
+    const blocks = view2.state.field(blocksField);
+    const activeBlocks = /* @__PURE__ */ new Set();
+    for (const n of activeLines) {
+      const b = blocks.byLine.get(n);
+      if (b)
+        activeBlocks.add(b);
+    }
     const ctx = {
       // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
       wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
       activeLines,
-      livePreview: view2.state.field(livePreviewField)
+      livePreview: view2.state.field(livePreviewField),
+      blocks,
+      activeBlocks,
+      layouts: /* @__PURE__ */ new Map()
     };
     const out = [];
     for (const { from, to } of view2.visibleRanges) {
       let pos = from;
       while (pos <= to) {
         const line = view2.state.doc.lineAt(pos);
-        if (line.length > 0)
+        const blk = blocks.byLine.get(line.number);
+        if (blk) {
+          styleBlockLine(view2, line.from, line.number, line.to, line.text, blk, out, ctx);
+        } else if (line.length > 0) {
           styleLine(view2, line.from, line.number, line.text, out, ctx);
+        }
         pos = line.to + 1;
       }
     }
@@ -34171,6 +34565,7 @@
         mentionedTargetsField,
         livePreviewField,
         editorFocusedField,
+        blocksField,
         // フォーカス変化を State に流し込む（数式プレビューの表示判定などが参照する）
         EditorView.focusChangeEffect.of((_state, focusing) => setEditorFocused.of(focusing)),
         history(),

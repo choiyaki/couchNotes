@@ -98,8 +98,10 @@ body {
   --cn-quote-fg: light-dark(rgba(60, 60, 67, 0.6), rgba(235, 235, 245, 0.6));
 }
 
-/* 引用（> ...）: 左に縦線、本文をやや落ち着いた色に */
-.cm-cn-quote {
+/* 引用（> ...）: 左に縦線、本文をやや落ち着いた色に。
+   padding は .cm-editor .cm-line { padding: 0 }（詳細度 0,2,0）に負けるため
+   .cm-editor を前置して同じ詳細度にし、後勝ちさせる。 */
+.cm-editor .cm-cn-quote {
   padding-left: 0.75em;
   border-left: 3px solid var(--cn-quote-bar);
   color: var(--cn-quote-fg);
@@ -243,6 +245,163 @@ body {
   border: 1px solid light-dark(#d1d1d6, #48484a);
   border-radius: 10px;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+}
+
+/* ===== コード（インライン `code` / ``` フェンス）================================ */
+
+:root {
+  --cn-code-bg: light-dark(rgb(0 0 0 / 0.055), rgb(255 255 255 / 0.08));
+  --cn-code-font: ui-monospace, SFMono-Regular, Menlo, "Courier New", monospace;
+}
+
+/* インラインコード `code` */
+.cm-cn-code {
+  font-family: var(--cn-code-font);
+  font-size: 0.88em;
+  background: var(--cn-code-bg);
+  border-radius: 4px;
+  padding: 0.12em 0.32em;
+  color: light-dark(#b02a5b, #ff9ab0);
+}
+
+/* フェンス付きコードブロック: 行ごとに背景を敷いて 1 枚のパネルに見せる。
+   ブロックウィジェットは使わない（1 ソース行 = 1 視覚行を保つため）ので、
+   角丸は先頭行・末尾行だけに付ける。
+   padding / line-height は .cm-editor .cm-line（詳細度 0,2,0）を上書きする必要があるため
+   同じく .cm-editor を前置する。 */
+.cm-editor .cm-cn-code-line {
+  background: var(--cn-code-bg);
+  font-family: var(--cn-code-font);
+  font-size: 0.88em;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.cm-editor .cm-cn-code-first {
+  border-radius: 8px 8px 0 0;
+  padding-top: 5px;
+}
+.cm-editor .cm-cn-code-last {
+  border-radius: 0 0 8px 8px;
+  padding-bottom: 5px;
+}
+/* 記法を隠したフェンス行: 中身は帯ウィジェットなので、行自体の行高は潰す。
+   （.cm-cn-code-line より後に置いて font-size を打ち消す） */
+.cm-editor .cm-cn-code-strip-line {
+  font-size: 0;
+  line-height: 0;
+}
+.cm-cn-code-strip {
+  position: relative;
+  height: 8px;
+}
+.cm-cn-code-strip-open {
+  height: 16px;
+}
+.cm-cn-code-lang {
+  position: absolute;
+  right: 0;
+  top: 0;
+  font-family: var(--cn-code-font);
+  font-size: 10px;
+  line-height: 15px;
+  letter-spacing: 0.02em;
+  opacity: 0.45;
+}
+
+/* ===== Markdown テーブル（| a | b |）========================================== */
+
+:root {
+  --cn-mdtable-border: light-dark(rgb(0 0 0 / 0.12), rgb(255 255 255 / 0.16));
+  --cn-mdtable-rule: light-dark(rgb(0 0 0 / 0.32), rgb(255 255 255 / 0.36));
+  --cn-mdtable-head-bg: light-dark(rgb(0 0 0 / 0.04), rgb(255 255 255 / 0.06));
+}
+
+/* 行ウィジェットが高さを持つので、.cm-line 側の行高（ストラット）は消す。
+   セル内の行高は .cm-cn-mdtable-cell で改めて指定する。
+   .cm-editor .cm-line（詳細度 0,2,0）に負けないよう .cm-editor を前置する。 */
+.cm-editor .cm-cn-mdtable-line,
+.cm-editor .cm-cn-mdtable-rule-line {
+  line-height: 0;
+}
+/* 区切り行は中身が 1px の罫線だけ。フォント由来の下駄（ストラット）まで消す。
+   行のセルと違って文字を持たないので font-size:0 にしても影響がない。 */
+.cm-editor .cm-cn-mdtable-rule-line {
+  font-size: 0;
+}
+
+/* CM は編集不可ウィジェットの両脇に高さ 1em の <img class="cm-widgetBuffer"> を挿す
+   （カーソル位置まわりのブラウザ不具合避け）。ブロック要素のウィジェットを挟むと
+   その前後が別々の匿名ブロックになり、行の高さに 1em × 2 が上乗せされてしまう。
+   行全体がウィジェットで置き換わっている行では高さを 0 にする（DOM からは消さない）。 */
+.cm-editor .cm-cn-mdtable-line img.cm-widgetBuffer,
+.cm-editor .cm-cn-mdtable-rule-line img.cm-widgetBuffer,
+.cm-editor .cm-cn-code-strip-line img.cm-widgetBuffer {
+  height: 0;
+}
+
+/* 1 行 = 1 スクローラ。幅を超えた列は横スクロールで見る
+   （同じテーブルの行同士は mdtable.ts が scrollLeft を同期させる）。
+   display:block にしないのは、ブロック要素を挟むと .cm-line の中身が前後の
+   cm-widgetBuffer ごと匿名ブロックに分割され、行の高さに余分が乗るため。
+   inline-block なら 1 つの行ボックスに収まり、行の高さ = ウィジェットの高さになる。
+   幅は px 固定（mdtable.ts）: auto だと .cm-content が中身の幅まで伸びてしまう。 */
+.cm-cn-mdtable-row {
+  display: inline-block;
+  vertical-align: top;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.cm-cn-mdtable-row::-webkit-scrollbar {
+  display: none;
+}
+.cm-cn-mdtable-head {
+  font-weight: 600;
+}
+
+/* 罫線・ヘッダ背景は inner（＝表の実幅）に付ける。row は本文幅いっぱいなので、
+   row 側に付けると列が無い右側まで線や色が伸びてしまう。 */
+.cm-cn-mdtable-inner {
+  display: flex;
+  align-items: stretch;
+  box-sizing: border-box;
+  height: 100%;
+  border-bottom: 1px solid var(--cn-mdtable-border);
+}
+/* ヘッダ下の罫線は区切り行（|---|）が描くので、ヘッダ行自身には引かない */
+.cm-cn-mdtable-head .cm-cn-mdtable-inner {
+  border-bottom: none;
+}
+.cm-cn-mdtable-head .cm-cn-mdtable-inner {
+  background: var(--cn-mdtable-head-bg);
+}
+.cm-cn-mdtable-cell {
+  flex: none;
+  box-sizing: border-box;
+  padding: 3px 10px;          /* mdtable.ts の CELL_PAD_V / CELL_PAD_H と一致させる */
+  line-height: var(--cn-line-height);
+  white-space: nowrap;        /* 隠し測定（nowrap）と同じ規則にする */
+  overflow: hidden;
+  border-right: 1px solid var(--cn-mdtable-border);
+}
+.cm-cn-mdtable-cell:last-child {
+  border-right: none;
+}
+
+/* 区切り行（|---|---|）の代わりのヘッダ下罫線。幅は mdtable.ts が px で入れる。 */
+.cm-cn-mdtable-rule {
+  display: inline-block;
+  vertical-align: top;
+  height: 1px;
+  background: var(--cn-mdtable-rule);
+}
+
+/* カーソルがテーブル内にある間の生記法表示。テーブルの中にいることが分かるよう
+   ごく薄い背景を敷き、行高はレンダリング時と同じ値を min-height で予約する。 */
+.cm-cn-mdtable-raw {
+  background: light-dark(rgb(0 0 0 / 0.03), rgb(255 255 255 / 0.045));
 }
 
 /* 暗黙テーブル（画像＋テキスト混在行）。列幅・高さは table.ts が計算した px 値を強制。 */

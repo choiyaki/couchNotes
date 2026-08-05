@@ -17,6 +17,9 @@ import { wikiTargetsField, livePreviewField } from "./state";
 import { lineImageSizes, InlineImageWidget, imagesChanged, editorContentWidth } from "./images";
 import { MathWidget, BLOCK_MATH_RE, INLINE_MATH_RE } from "./math";
 import { tableForLine, TableRowWidget } from "./table";
+import { Block, BlockMap, blocksField } from "./blocks";
+import { MdTableLayout, MdTableRowWidget, MdTableRuleWidget, layoutMdTable } from "./mdtable";
+import { CodeFenceStripWidget } from "./codeblock";
 import { toggleCheckboxAt } from "./commands";
 
 const TAB_SIZE = 2;
@@ -34,6 +37,8 @@ const BOLD_RE = /\*\*([^*\n]+?)\*\*/g;
 const STRIKE_RE = /~~([^~\n]+?)~~/g;
 // 斜体: 単独の * ペア（** の一部や 単語*単語 は除外）
 const ITALIC_RE = /(?<![*\w])\*([^*\n]+?)\*(?!\*)/g;
+// インラインコード `code`（``  や ``` の一部は除外）
+const INLINE_CODE_RE = /(?<!`)`(?!`)([^`\n]+?)`(?!`)/g;
 
 const lineDeco = (cls: string) => Decoration.line({ class: cls });
 const mark = (cls: string) => Decoration.mark({ class: cls });
@@ -132,6 +137,106 @@ interface Ctx {
   wiki: Set<string>;
   activeLines: Set<number>; // カーソル／選択がある行番号
   livePreview: boolean;
+  blocks: BlockMap;          // コードブロック／Markdown テーブルの地図（blocks.ts）
+  activeBlocks: Set<Block>;  // カーソルが 1 行でも掛かっているブロック（＝全体を生記法に戻す）
+  layouts: Map<Block, MdTableLayout>; // 1 回の build 内でのテーブルレイアウト計算のメモ
+}
+
+// ---- 複数行ブロック（コードブロック / Markdown テーブル）------------------
+// 共通の原則:
+//   - block:true のウィジェットは使わない。1 ソース行 = 1 視覚行のまま、行の中身だけを
+//     置き換える。これでカーソル移動・選択・IME の挙動が今までと変わらない。
+//   - 生記法に戻る単位はブロック全体（ctx.activeBlocks）。1 行ずつ崩れて見えない。
+
+function styleBlockLine(
+  view: EditorView,
+  lineFrom: number,
+  lineNumber: number,
+  lineTo: number,
+  text: string,
+  blk: Block,
+  out: Range<Decoration>[],
+  ctx: Ctx
+) {
+  // ライブプレビュー無効時、またはブロックにカーソルがある時は生記法
+  const raw = !ctx.livePreview || ctx.activeBlocks.has(blk);
+
+  if (blk.kind === "code") {
+    const isFence = lineNumber === blk.from || lineNumber === blk.closeLine;
+    const cls =
+      "cm-cn-code-line" +
+      (lineNumber === blk.from ? " cm-cn-code-first" : "") +
+      (lineNumber === blk.to ? " cm-cn-code-last" : "");
+    if (!raw && isFence && text.length > 0) {
+      // フェンス行: 中身を細い帯に置換し、行高を潰す（空行の隙間を作らない）
+      out.push(Decoration.line({ class: cls + " cm-cn-code-strip-line" }).range(lineFrom));
+      const open = lineNumber === blk.from;
+      out.push(
+        Decoration.replace({ widget: new CodeFenceStripWidget(open ? blk.lang : "", open) })
+          .range(lineFrom, lineTo)
+      );
+      return;
+    }
+    // 中身の行は生のまま（等幅・背景だけ）。コードブロック内では他の記法を一切装飾しない。
+    out.push(Decoration.line({ class: cls }).range(lineFrom));
+    if (isFence && text.length > 0) {
+      out.push(mark("cm-cn-marker").range(lineFrom, lineTo));
+    }
+    return;
+  }
+
+  // --- Markdown テーブル ---
+  if (!ctx.livePreview) {
+    // ライブプレビュー無効時は素の Markdown として扱う（表としての装飾はしない）
+    if (text.length > 0) styleInline(text, lineFrom, true, false, out, ctx, true);
+    return;
+  }
+
+  let layout = ctx.layouts.get(blk);
+  if (!layout) {
+    layout = layoutMdTable(view, blk);
+    ctx.layouts.set(blk, layout);
+  }
+
+  if (raw) {
+    // カーソルがブロック内にある間の生記法。レンダリング時の行高を min-height で
+    // 予約しておき、カーソルの出入りで縦に跳ねないようにする（画像行と同じ手法）。
+    out.push(
+      Decoration.line({
+        class: "cm-cn-mdtable-raw",
+        attributes: { style: `min-height:${layout.rowH}px` },
+      }).range(lineFrom)
+    );
+    if (text.length > 0) styleInline(text, lineFrom, true, false, out, ctx, true);
+    return;
+  }
+
+  if (lineNumber === blk.sepLine) {
+    out.push(Decoration.line({ class: "cm-cn-mdtable-rule-line" }).range(lineFrom));
+    if (text.length > 0) {
+      out.push(
+        Decoration.replace({
+          // 罫線は表の実幅ぶんだけ引く（表が本文幅を超える時は本文幅で頭打ち）
+          widget: new MdTableRuleWidget(layout.key, Math.min(layout.totalW, layout.viewW)),
+        }).range(lineFrom, lineTo)
+      );
+    }
+    return;
+  }
+
+  out.push(Decoration.line({ class: "cm-cn-mdtable-line" }).range(lineFrom));
+  if (text.length > 0) {
+    out.push(
+      Decoration.replace({
+        widget: new MdTableRowWidget(
+          layout,
+          blk.cells[lineNumber - blk.from] ?? [],
+          lineNumber === blk.from,
+          lineNumber === blk.to
+        ),
+      }).range(lineFrom, lineTo)
+    );
+  }
 }
 
 function styleLine(
@@ -325,6 +430,26 @@ function styleInline(
   // covered: 後続の裸 URL・強調判定でスキップする範囲（Markdown リンク・画像）
   const covered: Array<[number, number]> = [];
 
+  // インラインコード `code`: 中身は「そのままの文字列」なので、他のどの記法よりも先に
+  // 範囲を確定させ、その内側では一切装飾しない（`**a**` が太字にならないように）。
+  const codeRanges: Array<[number, number]> = [];
+  INLINE_CODE_RE.lastIndex = 0;
+  for (let m: RegExpExecArray | null; (m = INLINE_CODE_RE.exec(text)); ) {
+    const s = lineFrom + m.index;
+    const e = s + m[0].length;
+    if (hide) {
+      out.push(hidden.range(s, s + 1));
+      out.push(mark("cm-cn-code").range(s + 1, e - 1));
+      out.push(hidden.range(e - 1, e));
+    } else {
+      out.push(mark("cm-cn-marker").range(s, s + 1));
+      out.push(mark("cm-cn-code").range(s + 1, e - 1));
+      out.push(mark("cm-cn-marker").range(e - 1, e));
+    }
+    codeRanges.push([m.index, m.index + m[0].length]);
+  }
+  const inCode = (idx: number) => codeRanges.some(([a, b]) => idx >= a && idx < b);
+
   // リンク付き画像 [![](img)](url): 内側の画像とセットで扱う。
   const linkedByInner = new Map<number, { s: number; e: number; href: string }>();
   LINKED_IMG_RE.lastIndex = 0;
@@ -342,6 +467,7 @@ function styleInline(
   let imgIndex = 0;
   IMG_MD_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = IMG_MD_RE.exec(text)); ) {
+    if (inCode(m.index)) continue;
     const linked = linkedByInner.get(m.index);
     const rs = linked ? linked.s : m.index;               // 置換・装飾の範囲（リンク付きは外側全体）
     const re = linked ? linked.e : m.index + m[0].length;
@@ -383,6 +509,7 @@ function styleInline(
   //   - エイリアスがあれば、非アクティブ行では [[ページ#^ID| までを隠してエイリアスだけ表示
   WIKI_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = WIKI_RE.exec(text)); ) {
+    if (inCode(m.index)) continue;
     const inner = m[1];
     const bar = inner.indexOf("|");
     const alias = bar >= 0 ? inner.slice(bar + 1) : "";
@@ -416,6 +543,7 @@ function styleInline(
   // Markdown リンク [text](url)（ライブプレビューではテキストだけ）
   MD_LINK_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = MD_LINK_RE.exec(text)); ) {
+    if (inCode(m.index)) continue;
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     const textLen = m[1].length;
@@ -434,7 +562,7 @@ function styleInline(
   // インライン数式 $...$（非アクティブ行は \displaystyle でレンダリング）
   INLINE_MATH_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = INLINE_MATH_RE.exec(text)); ) {
-    if (inCovered(m.index)) continue;
+    if (inCovered(m.index) || inCode(m.index)) continue;
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     if (hide) {
@@ -452,7 +580,7 @@ function styleInline(
   // 太字 **text**
   BOLD_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = BOLD_RE.exec(text)); ) {
-    if (inCovered(m.index)) continue;
+    if (inCovered(m.index) || inCode(m.index)) continue;
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     if (hide) {
@@ -470,7 +598,7 @@ function styleInline(
   // 取り消し線 ~~text~~
   STRIKE_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = STRIKE_RE.exec(text)); ) {
-    if (inCovered(m.index)) continue;
+    if (inCovered(m.index) || inCode(m.index)) continue;
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     if (hide) {
@@ -488,7 +616,7 @@ function styleInline(
   // 斜体 *text*（** の一部は除外済み）
   ITALIC_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = ITALIC_RE.exec(text)); ) {
-    if (inCovered(m.index)) continue;
+    if (inCovered(m.index) || inCode(m.index)) continue;
     const s = lineFrom + m.index;
     const e = s + m[0].length;
     if (hide) {
@@ -505,7 +633,7 @@ function styleInline(
   // 裸 URL（Markdown リンク・画像内は除外）
   BARE_URL_RE.lastIndex = 0;
   for (let m: RegExpExecArray | null; (m = BARE_URL_RE.exec(text)); ) {
-    if (inCovered(m.index)) continue;
+    if (inCovered(m.index) || inCode(m.index)) continue;
     out.push(mark("cm-cn-link").range(lineFrom + m.index, lineFrom + m.index + m[0].length));
   }
 }
@@ -524,18 +652,34 @@ function build(view: EditorView): DecorationSet {
       for (let n = a; n <= b; n++) activeLines.add(n);
     }
   }
+  // 複数行ブロックの地図。カーソルが 1 行でも掛かっているブロックは全体を生記法に戻す。
+  const blocks = view.state.field(blocksField);
+  const activeBlocks = new Set<Block>();
+  for (const n of activeLines) {
+    const b = blocks.byLine.get(n);
+    if (b) activeBlocks.add(b);
+  }
   const ctx: Ctx = {
     // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
     wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
     activeLines,
     livePreview: view.state.field(livePreviewField),
+    blocks,
+    activeBlocks,
+    layouts: new Map(),
   };
   const out: Range<Decoration>[] = [];
   for (const { from, to } of view.visibleRanges) {
     let pos = from;
     while (pos <= to) {
       const line = view.state.doc.lineAt(pos);
-      if (line.length > 0) styleLine(view, line.from, line.number, line.text, out, ctx);
+      const blk = blocks.byLine.get(line.number);
+      if (blk) {
+        // 空行もブロックの一部として扱う（コードブロックの背景を途切れさせない）
+        styleBlockLine(view, line.from, line.number, line.to, line.text, blk, out, ctx);
+      } else if (line.length > 0) {
+        styleLine(view, line.from, line.number, line.text, out, ctx);
+      }
       pos = line.to + 1;
     }
   }

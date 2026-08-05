@@ -10,6 +10,7 @@ import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
 import { imageField, refreshImageLayout } from "./images";
 import { clearTableMeasureCache } from "./table";
+import { blocksField } from "./blocks";
 import {
   setWikiTargets,
   wikiTargetsField,
@@ -307,6 +308,7 @@ const view = new EditorView({
       mentionedTargetsField,
       livePreviewField,
       editorFocusedField,
+      blocksField,
       // フォーカス変化を State に流し込む（数式プレビューの表示判定などが参照する）
       EditorView.focusChangeEffect.of((_state, focusing) => setEditorFocused.of(focusing)),
       history(),
