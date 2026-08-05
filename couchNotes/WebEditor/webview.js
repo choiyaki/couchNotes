@@ -32879,9 +32879,86 @@
   // webview/math.ts
   var BLOCK_MATH_RE = /^\s*\$\$([^$]+?)\$\$\s*$/;
   var INLINE_MATH_RE = /(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)/g;
+  var LEFT = "\\left";
+  var RIGHT = "\\right";
+  function delimLength(tex, i) {
+    if (tex[i] !== "\\")
+      return 1;
+    if (/[a-zA-Z]/.test(tex[i + 1] ?? "")) {
+      let j = i + 1;
+      while (j < tex.length && /[a-zA-Z]/.test(tex[j]))
+        j++;
+      return j - i;
+    }
+    return 2;
+  }
+  function nextCommand(tex, from, cmd2) {
+    for (let i = tex.indexOf(cmd2, from); i >= 0; i = tex.indexOf(cmd2, i + 1)) {
+      if (!/[a-zA-Z]/.test(tex[i + cmd2.length] ?? ""))
+        return i;
+    }
+    return -1;
+  }
+  function matchingRight(tex, from) {
+    let depth2 = 0;
+    let i = from;
+    while (i < tex.length) {
+      const l = nextCommand(tex, i, LEFT);
+      const r = nextCommand(tex, i, RIGHT);
+      if (r < 0)
+        return -1;
+      if (l >= 0 && l < r) {
+        depth2++;
+        i = l + LEFT.length;
+        continue;
+      }
+      if (depth2 === 0)
+        return r;
+      depth2--;
+      i = r + RIGHT.length;
+    }
+    return -1;
+  }
+  function needsArray(body) {
+    return /\\\\/.test(body) && !/\\begin\s*\{/.test(body);
+  }
+  function arrayCols(body) {
+    const cols = body.split(/\\\\/).reduce((max, row) => Math.max(max, (row.match(/(?<!\\)&/g) ?? []).length + 1), 1);
+    return "l".repeat(cols);
+  }
+  function wrapLineBreaks(tex) {
+    let out = "";
+    let i = 0;
+    while (i < tex.length) {
+      const l = nextCommand(tex, i, LEFT);
+      if (l < 0) {
+        out += tex.slice(i);
+        break;
+      }
+      const bodyStart = l + LEFT.length + delimLength(tex, l + LEFT.length);
+      const close2 = matchingRight(tex, bodyStart);
+      if (close2 < 0) {
+        out += tex.slice(i, bodyStart);
+        i = bodyStart;
+        continue;
+      }
+      const raw = tex.slice(bodyStart, close2);
+      const body = wrapLineBreaks(raw);
+      const wrapped = needsArray(raw) ? `\\begin{array}{${arrayCols(raw)}}${body}\\end{array}` : body;
+      const afterRight = close2 + RIGHT.length + delimLength(tex, close2 + RIGHT.length);
+      out += tex.slice(i, bodyStart) + wrapped + tex.slice(close2, afterRight);
+      i = afterRight;
+    }
+    return out;
+  }
+  function normalizeTeX(tex) {
+    const delims = tex.replace(/\\left\{/g, "\\left\\{").replace(/\\right\}/g, "\\right\\}");
+    return wrapLineBreaks(delims);
+  }
   function renderTeX(tex, block, el) {
+    const src = normalizeTeX(tex);
     try {
-      katex.render(block ? tex : `\\displaystyle{${tex}}`, el, {
+      katex.render(block ? src : `\\displaystyle{${src}}`, el, {
         displayMode: block,
         throwOnError: false
       });
