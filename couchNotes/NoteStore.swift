@@ -13,6 +13,27 @@ import SQLite3
 // sqlite3_bind_text に渡す「呼び出し中にコピーせよ」フラグ。
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+/// 他アプリと共有するリンク索引の1エントリ。
+/// key=照合用の正規化キー（小文字）, title=挿入・表示名（大小保持）,
+/// path=実在ノートの LiveSync `_id`（＝小文字のパス。言及のみは nil＝省略）,
+/// exists=実在ノートか（言及のみは false）。
+struct LinkIndexEntry: Codable, Hashable {
+    let key: String
+    let title: String
+    let path: String?
+    let exists: Bool
+}
+
+/// トップレベルフォルダ単位の索引グループ（＝CouchDB 上の1文書に対応）。
+/// groupKey="" はルート。folder は表示用のフォルダ名（大小保持、ルートは nil）。
+/// 端末はフォルダ単位（トップレベル）で同期するので、同じ groupKey を書く端末どうしは
+/// 内容が一致し、文書が競合しない（部分同期でも上書き合戦にならない）。
+struct LinkIndexFolderGroup {
+    let groupKey: String
+    let folder: String?
+    let entries: [LinkIndexEntry]
+}
+
 /// SQLite を所有するアクター。すべてのアクセスを直列化し、メインスレッドを塞がない。
 actor NoteStore {
     static let shared = NoteStore()
@@ -72,12 +93,17 @@ actor NoteStore {
             exec("INSERT INTO note_fts (id, content) SELECT id, content FROM notes WHERE deleted = 0;")
         }
 
-        // バックリンク用：source_id（リンク元）→ target_key（リンク先の正規化キー）
+        // バックリンク用：source_id（リンク元）→ target_key（リンク先の正規化キー・小文字）
         exec("CREATE TABLE IF NOT EXISTS links (source_id TEXT, target_key TEXT);")
         exec("CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_key);")
         exec("CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_id);")
-        // 既存DBに links が無かった場合は本文から再構築
-        if linksCount() == 0 && count() > 0 {
+        // 表示用の原文（大小保持・別名/見出し/.md 除去済み）。索引の未作成ページの title に使う。
+        exec("ALTER TABLE links ADD COLUMN target_display TEXT;")   // 既にあればエラー無視
+        // target_display を持たせる移行（既存 DB は本文から一度だけ作り直す）。初回バックフィルも兼ねる。
+        if syncValue("links_display_v1") == nil {
+            if count() > 0 { rebuildLinks() }
+            setSyncValue("links_display_v1", "done")
+        } else if linksCount() == 0 && count() > 0 {
             rebuildLinks()
         }
 
@@ -564,6 +590,81 @@ actor NoteStore {
         return out
     }
 
+    /// 他アプリ共有用リンク索引を、トップレベルフォルダ単位のグループに分けて返す。
+    /// 各グループがそのまま CouchDB 上の1文書になる（フォルダ別インデックス）。
+    /// - 実在ノート（exists=true）: そのフォルダのノート名。path に `_id`（小文字）を入れる。
+    /// - 未作成ページ（exists=false）: そのフォルダのノートが `[[...]]` 言及するキーのうち、
+    ///   ローカルに実在しないもの。実在判定はローカル全体で行う（別フォルダの実在ノートを
+    ///   誤って「未作成」にしない。読み手側もマージ時に exists=true を優先する）。
+    /// すべてローカル SQLite（同期スコープ分）から作るので軽量。
+    func linkIndexByFolder() -> [LinkIndexFolderGroup] {
+        var existingKeys = Set<String>()   // ローカル全体の実在キー（id キー・タイトルキー）
+        var groupKeys = Set<String>()
+        var displayByGroup: [String: String] = [:]
+        var existingByGroup: [String: [LinkIndexEntry]] = [:]
+        var seenTitleByGroup: [String: Set<String>] = [:]
+        var mentionedByGroup: [String: [LinkIndexEntry]] = [:]
+        var seenMentionByGroup: [String: Set<String>] = [:]
+
+        for n in listItems() {
+            var idKey = n.id.lowercased()
+            if idKey.hasSuffix(".md") { idKey = String(idKey.dropLast(3)) }
+            existingKeys.insert(idKey)
+            let title = n.shortTitle
+            let titleKey = title.lowercased()
+            existingKeys.insert(titleKey)
+            let (gk, disp) = Self.topLevelFolder(n.path ?? n.id)
+            groupKeys.insert(gk)
+            if let disp, displayByGroup[gk] == nil { displayByGroup[gk] = disp }
+            if seenTitleByGroup[gk, default: []].insert(titleKey).inserted {
+                // path は文書の path フィールド（大小保持）ではなく _id（小文字）をそのまま入れる。
+                existingByGroup[gk, default: []].append(
+                    LinkIndexEntry(key: titleKey, title: title, path: n.id.lowercased(), exists: true))
+            }
+        }
+
+        for (sourceID, targetKey, display) in linkPairs() where !existingKeys.contains(targetKey) {
+            let (gk, _) = Self.topLevelFolder(sourceID)
+            groupKeys.insert(gk)
+            if seenMentionByGroup[gk, default: []].insert(targetKey).inserted {
+                // title は原文（大小保持）。移行前の行など原文が無ければキー（小文字）で代替。
+                let title = (display?.isEmpty == false) ? display! : targetKey
+                mentionedByGroup[gk, default: []].append(
+                    LinkIndexEntry(key: targetKey, title: title, path: nil, exists: false))
+            }
+        }
+
+        return groupKeys.map { gk in
+            LinkIndexFolderGroup(
+                groupKey: gk,
+                folder: displayByGroup[gk],
+                entries: (existingByGroup[gk] ?? []) + (mentionedByGroup[gk] ?? [])
+            )
+        }
+    }
+
+    /// links テーブルの (リンク元 id, リンク先キー・小文字, 表示用原文) の全ペア。
+    private func linkPairs() -> [(String, String, String?)] {
+        guard let stmt = prepare("SELECT source_id, target_key, target_display FROM links;") else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, String?)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let s = columnText(stmt, 0) ?? ""
+            let t = columnText(stmt, 1) ?? ""
+            let d = columnText(stmt, 2)
+            if !s.isEmpty && !t.isEmpty { out.append((s, t, d)) }
+        }
+        return out
+    }
+
+    /// id/path のトップレベルフォルダを返す。"/" が無ければルート（groupKey="" / display=nil）。
+    /// groupKey は照合・文書 ID 用に小文字、display は表示用に大小保持。
+    private static func topLevelFolder(_ idOrPath: String) -> (groupKey: String, display: String?) {
+        guard let slash = idOrPath.firstIndex(of: "/") else { return ("", nil) }
+        let top = String(idOrPath[..<slash])
+        return (top.lowercased(), top)
+    }
+
     /// 正規化キー（小文字・.md 除去）から生存ノートを解決する。フルパス一致を優先し、次に basename 一致。
     private func resolveNote(forKey key: String) -> NoteItem? {
         let sql = """
@@ -781,26 +882,36 @@ actor NoteStore {
     private static let wikiLinkRegex = try? NSRegularExpression(pattern: #"\[\[([^\]\n]+)\]\]"#)
 
     /// 本文から [[...]] を抜き出し、正規化済みのリンク先キー集合を返す。
-    private static func parseLinkKeys(from content: String) -> [String] {
+    /// 本文中の [[...]] を (key, display) の配列にする（同一ノート内は key で重複除去・先出優先）。
+    /// key=照合用の小文字キー、display=挿入・表示用の原文（大小保持）。
+    private static func parseLinkPairs(from content: String) -> [(key: String, display: String)] {
         guard let regex = wikiLinkRegex else { return [] }
         let ns = content as NSString
-        var keys = Set<String>()
+        var seen = Set<String>()
+        var out: [(key: String, display: String)] = []
         for m in regex.matches(in: content, range: NSRange(location: 0, length: ns.length)) {
-            guard m.numberOfRanges >= 2 else { continue }
-            if let key = normalizeKey(ns.substring(with: m.range(at: 1))) { keys.insert(key) }
+            guard m.numberOfRanges >= 2,
+                  let p = linkParts(ns.substring(with: m.range(at: 1))) else { continue }
+            if seen.insert(p.key).inserted { out.append(p) }
         }
-        return Array(keys)
+        return out
+    }
+
+    /// リンク表記を「照合用キー（小文字）」と「表示用原文（大小保持）」に分解する。
+    /// いずれも別名`|`・見出し`#`除去、前後空白トリム、`.md` 除去、前後 `/ ` トリム。小文字化の有無だけが違う。
+    private static func linkParts(_ raw: String) -> (key: String, display: String)? {
+        var s = raw
+        if let bar  = s.firstIndex(of: "|") { s = String(s[..<bar]) }
+        if let hash = s.firstIndex(of: "#") { s = String(s[..<hash]) }
+        s = s.trimmingCharacters(in: .whitespaces)
+        if s.lowercased().hasSuffix(".md") { s = String(s.dropLast(3)) }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return s.isEmpty ? nil : (s.lowercased(), s)
     }
 
     /// リンク表記を比較用キーに正規化（エイリアス/見出し除去・小文字・.md 除去）。
     private static func normalizeKey(_ raw: String) -> String? {
-        var s = raw
-        if let bar  = s.firstIndex(of: "|") { s = String(s[..<bar]) }
-        if let hash = s.firstIndex(of: "#") { s = String(s[..<hash]) }
-        s = s.trimmingCharacters(in: .whitespaces).lowercased()
-        if s.hasSuffix(".md") { s = String(s.dropLast(3)) }
-        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        return s.isEmpty ? nil : s
+        return linkParts(raw)?.key
     }
 
     private func linksCount() -> Int {
@@ -811,15 +922,16 @@ actor NoteStore {
 
     private func updateLinks(id: String, content: String) {
         deleteLinks(id)
-        let keys = Self.parseLinkKeys(from: content)
-        guard !keys.isEmpty,
-              let stmt = prepare("INSERT INTO links (source_id, target_key) VALUES (?, ?);")
+        let pairs = Self.parseLinkPairs(from: content)
+        guard !pairs.isEmpty,
+              let stmt = prepare("INSERT INTO links (source_id, target_key, target_display) VALUES (?, ?, ?);")
         else { return }
         defer { sqlite3_finalize(stmt) }
-        for key in keys {
+        for p in pairs {
             sqlite3_reset(stmt)
-            sqlite3_bind_text(stmt, 1, id,  -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 1, id,          -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, p.key,       -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, p.display,   -1, SQLITE_TRANSIENT)
             sqlite3_step(stmt)
         }
     }

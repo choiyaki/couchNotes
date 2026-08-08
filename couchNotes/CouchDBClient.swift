@@ -281,6 +281,61 @@ class CouchDBClient {
         return out
     }
 
+    /// 他アプリ共有用リンク索引（フォルダ別）ドキュメント ID の接頭辞。
+    /// これで始まる文書を列挙すれば全フォルダの索引が得られる。`.md` で終わらない／
+    /// `type` が "plain" でないため、ノート取り込み（_find・_all_docs・_changes longpoll）には
+    /// いずれも拾われない。
+    static let linkIndexDocPrefix = "couchnotes_linkindex_"
+
+    /// トップレベルフォルダ（groupKey）から索引ドキュメント ID を作る。
+    /// ルート（groupKey=""）は `..._root`。それ以外は URL エンコード不要にするため
+    /// フォルダ名（小文字）の SHA256 先頭16桁を使う（読み手は接頭辞列挙＋文書内 `folder` で識別）。
+    static func linkIndexDocID(groupKey: String) -> String {
+        if groupKey.isEmpty { return linkIndexDocPrefix + "root" }
+        let hex = SHA256.hash(data: Data(groupKey.utf8))
+            .map { String(format: "%02x", $0) }.joined().prefix(16)
+        return linkIndexDocPrefix + String(hex)
+    }
+
+    private struct LinkIndexDoc: Encodable {
+        let _id: String
+        var _rev: String?          // nil のときは JSONEncoder が省略＝新規作成
+        let type: String
+        let version: Int
+        let folder: String?        // 表示用フォルダ名（大小保持）。ルートは nil＝省略。
+        let generatedAt: String
+        let links: [LinkIndexEntry]
+    }
+
+    /// フォルダ別リンク索引を CouchDB に1文書として保存（他アプリはこれらを GET して読む）。
+    /// 現在の _rev を取り直して PUT。409 競合は rev を取り直して1回だけ再試行（最終書き込み優先）。
+    func saveLinkIndex(groupKey: String, folder: String?,
+                       entries: [LinkIndexEntry], generatedAt: String) async throws {
+        let id = Self.linkIndexDocID(groupKey: groupKey)
+        var doc = LinkIndexDoc(
+            _id: id, _rev: try? await currentLeafRev(id: id),
+            type: "couchnotes-linkindex", version: 2,
+            folder: folder, generatedAt: generatedAt, links: entries
+        )
+        for attempt in 0..<2 {
+            let body = try JSONEncoder().encode(doc)
+            let (data, code) = try await httpRequest(path: id, method: "PUT", body: body)
+            if code == 200 || code == 201 { return }
+            if code == 409 && attempt == 0 {
+                doc._rev = try? await currentLeafRev(id: id)
+                continue
+            }
+            throw CouchDBError.httpError(code, String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
+    /// 予約 ID の文書を（存在すれば）削除する。旧・単一索引文書の後片付け等に使う。
+    func deleteDocIfExists(id: String) async throws {
+        guard let rev = try await currentLeafRev(id: id) else { return }
+        let body = try JSONSerialization.data(withJSONObject: ["_id": id, "_rev": rev, "_deleted": true])
+        _ = try await httpRequest(path: id, method: "PUT", body: body)
+    }
+
     /// ノート本文を保存（存在しない場合は新規作成）
     func saveNoteContent(id: String, text: String) async throws {
         if let existing = try await fetchNote(id: id) {
