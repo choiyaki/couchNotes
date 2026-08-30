@@ -80,6 +80,8 @@ actor NoteStore {
         exec("ALTER TABLE notes ADD COLUMN sync_state TEXT;")   // clean / dirty / pendingDelete（NULL=clean扱い）
         exec("ALTER TABLE notes ADD COLUMN pin INTEGER;")   // ピン留め番号（frontmatter_extra の pin: N をキャッシュ）
         exec("CREATE INDEX IF NOT EXISTS idx_notes_pin ON notes(pin);")
+        exec("ALTER TABLE notes ADD COLUMN id_folded TEXT;")   // id の NFKC+小文字化コピー（全角/半角を無視したタイトル検索・リンク解決用）
+        exec("CREATE INDEX IF NOT EXISTS idx_notes_id_folded ON notes(id_folded);")
         exec("""
         CREATE TABLE IF NOT EXISTS sync_state (
             key   TEXT PRIMARY KEY,
@@ -109,6 +111,17 @@ actor NoteStore {
 
         // 既存行に含まれるフロントマターを本文から分離（1回だけ）
         resplitExistingContent()
+
+        // 全角/半角の不一致でタイトル検索・本文検索・[[ ]] リンク解決が失敗する不具合の是正。
+        // id_folded のバックフィル、FTS 索引・リンクキーの全角/半角折りたたみ込みでの作り直し（1回だけ）。
+        if syncValue("width_fold_v1") == nil {
+            if count() > 0 {
+                backfillIDFolded()
+                rebuildFTSFolded()
+                rebuildLinks()
+            }
+            setSyncValue("width_fold_v1", "done")
+        }
 
         isBootstrapped = true
     }
@@ -263,7 +276,7 @@ actor NoteStore {
         guard !terms.isEmpty else { return [] }
         var result: Set<String>? = nil
         for term in terms {
-            let ids = titleMatchIDs(term.lowercased())
+            let ids = titleMatchIDs(term.foldedForMatch)
             result = (result == nil) ? ids : result!.intersection(ids)
             if result!.isEmpty { return [] }
         }
@@ -298,17 +311,17 @@ actor NoteStore {
     private func andSearch(_ terms: [String]) -> [NoteItem] {
         var result: Set<String>? = nil
         for term in terms {
-            let ids = titleMatchIDs(term.lowercased()).union(bodyMatchIDs(term))
+            let ids = titleMatchIDs(term.foldedForMatch).union(bodyMatchIDs(term))
             result = (result == nil) ? ids : result!.intersection(ids)
             if result!.isEmpty { return [] }
         }
         guard let ids = result, !ids.isEmpty else { return [] }
 
         let items = items(forIDs: Array(ids))
-        let termsLower = terms.map { $0.lowercased() }
+        let termsLower = terms.map { $0.foldedForMatch }
         // 全語がタイトル（ファイル名）に含まれるものを優先（各群は items() の mtime 降順を保つ）
         let titleAll = items.filter { item in
-            let t = item.shortTitle.lowercased()
+            let t = item.shortTitle.foldedForMatch
             return termsLower.allSatisfy { t.contains($0) }
         }
         let titleAllIDs = Set(titleAll.map(\.id))
@@ -327,21 +340,22 @@ actor NoteStore {
         return out
     }
 
-    /// 語をタイトル（ファイル名 basename）に含むノートの id 集合。termLower は小文字。
-    private func titleMatchIDs(_ termLower: String) -> Set<String> {
-        let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 AND lower(id) LIKE ? LIMIT 2000;")
-        sqlite3_bind_text(stmt, 1, "%" + termLower + "%", -1, SQLITE_TRANSIENT)
+    /// 語をタイトル（ファイル名 basename）に含むノートの id 集合。termFolded は NFKC＋小文字。
+    private func titleMatchIDs(_ termFolded: String) -> Set<String> {
+        let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 AND id_folded LIKE ? LIMIT 2000;")
+        sqlite3_bind_text(stmt, 1, "%" + termFolded + "%", -1, SQLITE_TRANSIENT)
         // id にはフォルダ名も含むので、basename（末尾）に含むものだけ採用
         return collectIDs(stmt).filter {
-            let base = $0.components(separatedBy: "/").last ?? $0
-            return base.contains(termLower)
+            let base = $0.foldedForMatch.components(separatedBy: "/").last ?? $0.foldedForMatch
+            return base.contains(termFolded)
         }
     }
 
     /// 語を本文に含むノートの id 集合。3文字以上は FTS5(trigram)、1〜2文字は LIKE。
+    /// いずれも note_fts.content（索引時に NFKC 折りたたみ済み）に対して照合する。
     private func bodyMatchIDs(_ term: String) -> Set<String> {
         if term.count >= 3 {
-            let phrase = "\"" + term.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            let phrase = "\"" + term.nfkc.replacingOccurrences(of: "\"", with: "\"\"") + "\""
             let stmt = prepare("""
             SELECT note_fts.id FROM note_fts
             JOIN notes n ON n.id = note_fts.id
@@ -350,8 +364,12 @@ actor NoteStore {
             sqlite3_bind_text(stmt, 1, phrase, -1, SQLITE_TRANSIENT)
             return collectIDs(stmt)
         } else {
-            let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 AND content LIKE ? LIMIT 2000;")
-            sqlite3_bind_text(stmt, 1, "%" + term + "%", -1, SQLITE_TRANSIENT)
+            let stmt = prepare("""
+            SELECT note_fts.id FROM note_fts
+            JOIN notes n ON n.id = note_fts.id
+            WHERE note_fts.content LIKE ? AND n.deleted = 0 LIMIT 2000;
+            """)
+            sqlite3_bind_text(stmt, 1, "%" + term.nfkc + "%", -1, SQLITE_TRANSIENT)
             return collectIDs(stmt)
         }
     }
@@ -383,25 +401,26 @@ actor NoteStore {
         return Array(all.sorted { ($0.mtime ?? 0) > ($1.mtime ?? 0) }.prefix(200))
     }
 
-    /// タイトル（ファイル名）に語句を含むノート。id で粗く絞り、basename で厳密判定。
+    /// タイトル（ファイル名）に語句を含むノート。id_folded で粗く絞り、basename で厳密判定。
     private func titleSearch(_ query: String) -> [NoteItem] {
         let sql = """
         SELECT id, path, mtime, substr(content, 1, 400)
         FROM notes
-        WHERE deleted = 0 AND lower(id) LIKE ?
+        WHERE deleted = 0 AND id_folded LIKE ?
         ORDER BY mtime DESC
         LIMIT 200;
         """
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
-        let q = query.lowercased()
+        let q = query.foldedForMatch
         sqlite3_bind_text(stmt, 1, "%" + q + "%", -1, SQLITE_TRANSIENT)
-        return readItems(stmt, previewTrim: true).filter { $0.shortTitle.lowercased().contains(q) }
+        return readItems(stmt, previewTrim: true).filter { $0.shortTitle.foldedForMatch.contains(q) }
     }
 
     private func ftsSearch(_ query: String) -> [NoteItem] {
         // trigram では語をフレーズ（"..."）として渡すと部分一致になる。" は "" でエスケープ。
-        let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        // note_fts.content は索引時に NFKC 折りたたみ済みなので、検索語も同じく折りたたむ。
+        let phrase = "\"" + query.nfkc.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         let sql = """
         SELECT n.id, n.path, n.mtime, snippet(note_fts, 1, '', '', '…', 12)
         FROM note_fts
@@ -418,15 +437,16 @@ actor NoteStore {
 
     private func likeSearch(_ query: String) -> [NoteItem] {
         let sql = """
-        SELECT id, path, mtime, substr(content, 1, 400)
-        FROM notes
-        WHERE deleted = 0 AND content LIKE ?
-        ORDER BY mtime DESC
+        SELECT n.id, n.path, n.mtime, substr(note_fts.content, 1, 400)
+        FROM note_fts
+        JOIN notes n ON n.id = note_fts.id
+        WHERE note_fts.content LIKE ? AND n.deleted = 0
+        ORDER BY n.mtime DESC
         LIMIT 200;
         """
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, "%" + query + "%", -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, "%" + query.nfkc + "%", -1, SQLITE_TRANSIENT)
         return readItems(stmt, previewTrim: true)
     }
 
@@ -506,7 +526,7 @@ actor NoteStore {
     /// この id を指している（リンク元の）ノート一覧。
     /// 解決規則は本文タップと同じ：フルパス一致 または ファイル名（basename）一致（小文字）。
     func backlinks(for id: String) -> [NoteItem] {
-        let lower = id.lowercased()
+        let lower = id.foldedForMatch
         let full  = lower.hasSuffix(".md") ? String(lower.dropLast(3)) : lower
         let base  = full.components(separatedBy: "/").last ?? full
         let sql = """
@@ -607,11 +627,11 @@ actor NoteStore {
         var seenMentionByGroup: [String: Set<String>] = [:]
 
         for n in listItems() {
-            var idKey = n.id.lowercased()
+            var idKey = n.id.foldedForMatch
             if idKey.hasSuffix(".md") { idKey = String(idKey.dropLast(3)) }
             existingKeys.insert(idKey)
             let title = n.shortTitle
-            let titleKey = title.lowercased()
+            let titleKey = title.foldedForMatch
             existingKeys.insert(titleKey)
             let (gk, disp) = Self.topLevelFolder(n.path ?? n.id)
             groupKeys.insert(gk)
@@ -665,12 +685,12 @@ actor NoteStore {
         return (top.lowercased(), top)
     }
 
-    /// 正規化キー（小文字・.md 除去）から生存ノートを解決する。フルパス一致を優先し、次に basename 一致。
+    /// 正規化キー（NFKC＋小文字・.md 除去）から生存ノートを解決する。フルパス一致を優先し、次に basename 一致。
     private func resolveNote(forKey key: String) -> NoteItem? {
         let sql = """
         SELECT id, path FROM notes
-        WHERE deleted = 0 AND (id = ? OR id LIKE ?)
-        ORDER BY (id = ?) DESC, mtime DESC
+        WHERE deleted = 0 AND (id_folded = ? OR id_folded LIKE ?)
+        ORDER BY (id_folded = ?) DESC, mtime DESC
         LIMIT 1;
         """
         guard let stmt = prepare(sql) else { return nil }
@@ -821,8 +841,8 @@ actor NoteStore {
 
         // rev は新しい値があればそれを採用し、無ければ（ローカル書き込み等）既存値を保持する。
         let sql = """
-        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, rev, sync_state, pin, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO notes (id, path, mtime, ctime, size, content, frontmatter_extra, rev, sync_state, pin, id_folded, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(id) DO UPDATE SET
             path = excluded.path,
             mtime = excluded.mtime,
@@ -832,6 +852,7 @@ actor NoteStore {
             rev = COALESCE(excluded.rev, rev),
             sync_state = excluded.sync_state,
             pin = excluded.pin,
+            id_folded = excluded.id_folded,
             deleted = 0;
         """
         guard let stmt = prepare(sql) else { return }
@@ -846,6 +867,7 @@ actor NoteStore {
         bindOptionalText(stmt, 8, r.rev)
         sqlite3_bind_text(stmt, 9, state, -1, SQLITE_TRANSIENT)
         if let pin { sqlite3_bind_int64(stmt, 10, Int64(pin)) } else { sqlite3_bind_null(stmt, 10) }
+        sqlite3_bind_text(stmt, 11, r.id.foldedForMatch, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
 
         // 全文検索・バックリンクは本文のみで索引
@@ -866,7 +888,8 @@ actor NoteStore {
         guard let stmt = prepare("INSERT INTO note_fts (id, content) VALUES (?, ?);") else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, content, -1, SQLITE_TRANSIENT)
+        // NFKC で折りたたんでから索引する（全角/半角の不一致で検索漏れが起きるのを防ぐ）。
+        sqlite3_bind_text(stmt, 2, content.nfkc, -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt)
     }
 
@@ -906,7 +929,7 @@ actor NoteStore {
         s = s.trimmingCharacters(in: .whitespaces)
         if s.lowercased().hasSuffix(".md") { s = String(s.dropLast(3)) }
         s = s.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        return s.isEmpty ? nil : (s.lowercased(), s)
+        return s.isEmpty ? nil : (s.foldedForMatch, s)
     }
 
     /// リンク表記を比較用キーに正規化（エイリアス/見出し除去・小文字・.md 除去）。
@@ -972,6 +995,51 @@ actor NoteStore {
         }
         exec("COMMIT;")
         setSyncValue("content_split_v1", "done")
+    }
+
+    /// notes.id_folded（id の NFKC＋小文字化コピー）を全行バックフィルする。
+    private func backfillIDFolded() {
+        var ids: [String] = []
+        if let stmt = prepare("SELECT id FROM notes;") {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) { ids.append(String(cString: c)) }
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("BEGIN TRANSACTION;")
+        if let stmt = prepare("UPDATE notes SET id_folded = ? WHERE id = ?;") {
+            for id in ids {
+                sqlite3_bind_text(stmt, 1, id.foldedForMatch, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("COMMIT;")
+    }
+
+    /// note_fts を全ノートの本文（NFKC 折りたたみ済み）から作り直す（全角/半角修正の移行用）。
+    private func rebuildFTSFolded() {
+        var rows: [(String, String)] = []
+        if let stmt = prepare("SELECT id, content FROM notes WHERE deleted = 0;") {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append((columnText(stmt, 0) ?? "", columnText(stmt, 1) ?? ""))
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("BEGIN TRANSACTION;")
+        exec("DELETE FROM note_fts;")
+        if let stmt = prepare("INSERT INTO note_fts (id, content) VALUES (?, ?);") {
+            for (id, content) in rows {
+                sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, content.nfkc, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("COMMIT;")
     }
 
     /// 全ノートの本文から links を作り直す（既存DB初回のバックフィル）。

@@ -18245,7 +18245,7 @@
       return null;
     const query = before.text.slice(2);
     const from = before.from + 2;
-    const lower = query.toLowerCase();
+    const lower = query.normalize("NFKC").toLowerCase();
     const applyName = (name2) => (view2, _c, aFrom, aTo) => {
       const hasClose = view2.state.sliceDoc(aTo, aTo + 2) === "]]";
       const insert2 = name2 + "]]";
@@ -18256,12 +18256,12 @@
       });
     };
     const names = context.state.field(wikiTargetsField);
-    const existing = names.filter((n) => n.toLowerCase().includes(lower)).slice(0, 50).map((name2) => ({
+    const existing = names.filter((n) => n.normalize("NFKC").toLowerCase().includes(lower)).slice(0, 50).map((name2) => ({
       label: name2,
       type: "text",
       apply: applyName(name2)
     }));
-    const existingLower = new Set(names.map((n) => n.toLowerCase()));
+    const existingLower = new Set(names.map((n) => n.normalize("NFKC").toLowerCase()));
     const mentioned = context.state.field(mentionedTargetsField).filter((n) => n.includes(lower) && !existingLower.has(n)).slice(0, 30).map((name2) => ({
       label: name2,
       type: "text",
@@ -34067,7 +34067,7 @@
       const alias = bar >= 0 ? inner2.slice(bar + 1) : "";
       const targetFull = bar >= 0 ? inner2.slice(0, bar) : inner2;
       const hash = targetFull.indexOf("#");
-      const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase().normalize("NFC");
+      const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull).trim().toLowerCase().normalize("NFKC");
       const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
       const s = lineFrom + m.index;
       const e = s + m[0].length;
@@ -34198,8 +34198,9 @@
         activeBlocks.add(b);
     }
     const ctx = {
-      // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
-      wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
+      // NFKC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致に加え、
+      // 全角/半角の英数・記号・スペースの揺れも拾う）
+      wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFKC"))),
       activeLines,
       livePreview: view2.state.field(livePreviewField),
       blocks,

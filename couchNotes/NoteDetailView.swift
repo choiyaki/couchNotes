@@ -903,10 +903,10 @@ struct NoteDetailView: View {
         // キーは正規化済み（小文字・.md 除去）なので、実在側も同じ形に揃えて比較する。
         var existingKeys = Set<String>()
         for note in notes {
-            var idKey = note.id.lowercased()
+            var idKey = note.id.foldedForMatch
             if idKey.hasSuffix(".md") { idKey = String(idKey.dropLast(3)) }
             existingKeys.insert(idKey)
-            existingKeys.insert(note.shortTitle.lowercased())
+            existingKeys.insert(note.shortTitle.foldedForMatch)
         }
         let allKeys = await NoteStore.shared.allLinkTargetKeys()
         mentionedTargets = allKeys.filter { !existingKeys.contains($0) }

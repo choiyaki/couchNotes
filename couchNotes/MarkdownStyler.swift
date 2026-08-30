@@ -291,8 +291,8 @@ enum MarkdownStyler {
             guard m.range.length > 4 else { continue }
             let innerRange = NSRange(location: m.range.location + 2, length: m.range.length - 4)
             let linkText   = (s.string as NSString).substring(with: innerRange)
-            let lower      = linkText.lowercased()
-            let exists     = notes.contains { $0.shortTitle.lowercased() == lower }
+            let lower      = linkText.foldedForMatch
+            let exists     = notes.contains { $0.shortTitle.foldedForMatch == lower }
             s.addAttribute(.foregroundColor,
                            value: exists ? UIColor.systemBlue : UIColor.systemBlue.withAlphaComponent(0.35),
                            range: m.range)

@@ -93,9 +93,9 @@ struct NoteListView: View {
 
     /// 同じタイトルのノートが無ければ作成可能（「＋」を有効化）。空入力時は不可。
     private var canCreateFromSearch: Bool {
-        let q = trimmedSearch.lowercased()
+        let q = trimmedSearch.foldedForMatch
         guard !q.isEmpty else { return false }
-        return !notes.contains { $0.shortTitle.lowercased() == q }
+        return !notes.contains { $0.shortTitle.foldedForMatch == q }
     }
 
     // 初回インポート（全件取得）の進捗

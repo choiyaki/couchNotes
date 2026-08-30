@@ -515,10 +515,11 @@ function styleInline(
     const alias = bar >= 0 ? inner.slice(bar + 1) : "";
     const targetFull = bar >= 0 ? inner.slice(0, bar) : inner; // ページ名#フラグメント
     const hash = targetFull.indexOf("#");
-    // NFC 正規化: Obsidian インポート由来のノート名は NFD（macOS ファイル名）のことがあり、
-    // 手入力のリンク（NFC）とコードポイントが一致しない。見た目が同じなら一致させる。
+    // NFKC 正規化: Obsidian インポート由来のノート名は NFD（macOS ファイル名）のことがあり、
+    // 手入力のリンク（NFC 相当）とコードポイントが一致しない。NFKC ならその揺れに加えて
+    // 全角/半角の英数・記号・スペースの揺れも吸収できる。見た目が同じなら一致させる。
     const page = (hash >= 0 ? targetFull.slice(0, hash) : targetFull)
-      .trim().toLowerCase().normalize("NFC");
+      .trim().toLowerCase().normalize("NFKC");
     const cls = ctx.wiki.has(page) ? "cm-cn-wiki" : "cm-cn-wiki-missing";
     const s = lineFrom + m.index;
     const e = s + m[0].length;
@@ -660,8 +661,9 @@ function build(view: EditorView): DecorationSet {
     if (b) activeBlocks.add(b);
   }
   const ctx: Ctx = {
-    // NFC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致を拾う）
-    wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFC"))),
+    // NFKC 正規化してから照合（NFD なノート名と手入力リンクの見かけ上の一致に加え、
+    // 全角/半角の英数・記号・スペースの揺れも拾う）
+    wiki: new Set(names.map((n) => n.toLowerCase().normalize("NFKC"))),
     activeLines,
     livePreview: view.state.field(livePreviewField),
     blocks,
