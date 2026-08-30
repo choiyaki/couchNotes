@@ -16,7 +16,8 @@ export function wikiCompletionSource(context: CompletionContext): CompletionResu
 
   const query = before.text.slice(2); // 先頭 "[[" を除く
   const from = before.from + 2; // 候補を差し込む開始位置（[[ の直後）
-  const lower = query.toLowerCase();
+  // NFKC 正規化してから比較する（全角/半角の英数・記号・スペースの揺れを吸収する）。
+  const lower = query.normalize("NFKC").toLowerCase();
 
   // 確定時の挿入（"]]" の重複を防ぐ共通処理）
   const applyName =
@@ -34,7 +35,7 @@ export function wikiCompletionSource(context: CompletionContext): CompletionResu
 
   const names = context.state.field(wikiTargetsField);
   const existing: Completion[] = names
-    .filter((n) => n.toLowerCase().includes(lower))
+    .filter((n) => n.normalize("NFKC").toLowerCase().includes(lower))
     .slice(0, 50)
     .map((name) => ({
       label: name,
@@ -43,7 +44,7 @@ export function wikiCompletionSource(context: CompletionContext): CompletionResu
     }));
 
   // 未作成ページ（言及のみ・正規化済み小文字）。実在ノートと同名は除外し、実在の後ろに並べる。
-  const existingLower = new Set(names.map((n) => n.toLowerCase()));
+  const existingLower = new Set(names.map((n) => n.normalize("NFKC").toLowerCase()));
   const mentioned: Completion[] = context.state
     .field(mentionedTargetsField)
     .filter((n) => n.includes(lower) && !existingLower.has(n))

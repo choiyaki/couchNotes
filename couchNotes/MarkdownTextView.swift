@@ -225,9 +225,9 @@ extension MarkdownTextView {
                 return
             }
 
-            let lower = query.lowercased()
+            let lower = query.foldedForMatch
             let hits  = notes
-                .filter { $0.shortTitle.lowercased().contains(lower) }
+                .filter { $0.shortTitle.foldedForMatch.contains(lower) }
                 .prefix(15)   // 取得は最大15件（画面表示は4件、残りは内部スクロール）
 
             guard !hits.isEmpty else { clearSuggestions(for: tv); return }

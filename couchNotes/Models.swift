@@ -136,6 +136,25 @@ struct StoredNote {
     var rev: String? = nil   // 同期の基準 _rev（楽観ロック用。未取得は nil）
 }
 
+// MARK: - テキスト正規化（検索・リンクキー照合用）
+
+extension String {
+    /// NFKC 正規化のみ（大小文字はそのまま）。
+    /// 全角英数・記号・スペース（"Ａ"→"A"、"　"→" " など）を半角と同一視できるようにする。
+    /// FTS5(trigram) の索引・検索語はこちらを使う（大小文字は trigram 側が別途吸収するため、
+    /// ここで潰すとスニペット表示の大文字/小文字まで変わってしまう）。
+    var nfkc: String {
+        precomposedStringWithCompatibilityMapping
+    }
+
+    /// 検索・リンクキーの突き合わせ用に NFKC 正規化＋小文字化する。
+    /// id/タイトルの完全一致・LIKE 照合（SQLite の `=`／既定の LIKE は大文字小文字だけ吸収するため
+    /// 全角/半角は別途揃える必要がある）に使う。表示用の文字列には使わない。
+    var foldedForMatch: String {
+        nfkc.lowercased()
+    }
+}
+
 // MARK: - 新規ノートの命名
 
 enum NoteNaming {
