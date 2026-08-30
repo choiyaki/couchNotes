@@ -62,6 +62,12 @@ struct NoteListView: View {
         showSearch && !searchCommitted && !trimmedSearch.isEmpty && !titleResults.isEmpty
     }
 
+    /// 本文検索が確定しているときの検索語（空白区切り・AND）。プレビューのハイライト用。
+    private var highlightTerms: [String] {
+        guard searchCommitted, !trimmedSearch.isEmpty else { return [] }
+        return trimmedSearch.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+    }
+
     /// 一覧に表示するノート。Enter で本文検索を確定したら本文一致、それ以外は全件（フォルダ絞り込み適用）。
     /// 本文検索でないときは、絞り込み後の集合内でピン留め（番号昇順）を先頭に並べ替える。
     private var displayedNotes: [NoteItem] {
@@ -722,7 +728,7 @@ struct NoteListView: View {
     @ViewBuilder
     var noteContent: some View {
         switch layout {
-        case .detail: notesList { NoteRowView(note: $0, isUnsynced: unsyncedIDs.contains($0.id)) }
+        case .detail: notesList { NoteRowView(note: $0, isUnsynced: unsyncedIDs.contains($0.id), highlightTerms: highlightTerms) }
         case .list:   notesList { NoteRowCompactView(note: $0, isUnsynced: unsyncedIDs.contains($0.id)) }
         case .card:   notesGrid
         }
@@ -762,7 +768,7 @@ struct NoteListView: View {
                     ForEach(displayedNotes) { note in
                         if isSelecting {
                             Button { toggleSelection(note) } label: {
-                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id))
+                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id), highlightTerms: highlightTerms)
                                     .overlay(alignment: .topTrailing) {
                                         selectionMark(isSelected: selectedIDs.contains(note.id))
                                             .padding(6)
@@ -773,7 +779,7 @@ struct NoteListView: View {
                             Button {
                                 navigate { path.append(note.id) }
                             } label: {
-                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id))
+                                NoteCardView(note: note, isUnsynced: unsyncedIDs.contains(note.id), highlightTerms: highlightTerms)
                             }
                             .buttonStyle(.plain)
                             .contextMenu { contextMenuButtons(for: note) }
@@ -1315,11 +1321,59 @@ enum NoteListLayout: String, CaseIterable {
     }
 }
 
+// MARK: - 検索語ハイライト
+
+/// 本文プレビュー内で検索語（複数=AND）に一致する範囲を強調表示した Text を作る。
+/// 大文字/小文字・全角/半角を区別せずに照合する（`.widthInsensitive` で "Ａ" と "A" も同一視）。
+private func highlightedText(_ text: String, terms: [String]) -> Text {
+    let nonEmptyTerms = terms.filter { !$0.isEmpty }
+    guard !nonEmptyTerms.isEmpty else { return Text(text) }
+
+    var ranges: [Range<String.Index>] = []
+    for term in nonEmptyTerms {
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let r = text.range(of: term, options: [.caseInsensitive, .widthInsensitive],
+                                  range: searchStart..<text.endIndex) {
+            ranges.append(r)
+            searchStart = r.upperBound
+        }
+    }
+    guard !ranges.isEmpty else { return Text(text) }
+
+    // 開始位置順に並べ、重なり／隣接する範囲は1つにまとめる（複数語が近接するケース）。
+    ranges.sort { $0.lowerBound < $1.lowerBound }
+    var merged: [Range<String.Index>] = [ranges[0]]
+    for r in ranges.dropFirst() {
+        let last = merged[merged.count - 1]
+        if r.lowerBound <= last.upperBound {
+            merged[merged.count - 1] = last.lowerBound..<Swift.max(last.upperBound, r.upperBound)
+        } else {
+            merged.append(r)
+        }
+    }
+
+    var result = Text("")
+    var cursor = text.startIndex
+    for r in merged {
+        if cursor < r.lowerBound {
+            result = result + Text(text[cursor..<r.lowerBound])
+        }
+        result = result + Text(text[r]).fontWeight(.bold).foregroundColor(.accentColor)
+        cursor = r.upperBound
+    }
+    if cursor < text.endIndex {
+        result = result + Text(text[cursor...])
+    }
+    return result
+}
+
 // MARK: - ノート行
 
 struct NoteRowView: View {
     let note: NoteItem
     var isUnsynced: Bool = false
+    var highlightTerms: [String] = []
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1353,7 +1407,7 @@ struct NoteRowView: View {
                     .foregroundStyle(.secondary)
 
                 if let preview = note.preview {
-                    Text(preview)
+                    highlightedText(preview, terms: highlightTerms)
                         .font(.footnote)
                         .foregroundStyle(.primary.opacity(0.6))
                         .lineLimit(3)
@@ -1412,6 +1466,7 @@ struct NoteRowCompactView: View {
 struct NoteCardView: View {
     let note: NoteItem
     var isUnsynced: Bool = false
+    var highlightTerms: [String] = []
     @State private var imageURL: URL? = nil       // このノートが画像を持つか（レイアウト判断用）
     @State private var uiImage: UIImage? = nil     // 読み込み済みのサムネイル本体
 
@@ -1474,7 +1529,7 @@ struct NoteCardView: View {
                             .clipped()
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     } else if let preview = note.preview {
-                        Text(preview)
+                        highlightedText(preview, terms: highlightTerms)
                             .font(.caption2)
                             .foregroundStyle(.primary.opacity(0.6))
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
