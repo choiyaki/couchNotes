@@ -158,6 +158,12 @@ struct BackupSettingsView: View {
             if files.isEmpty {
                 resultMessage = "リポジトリに復元できるノートがありません。"
             } else {
+                let existing = await NoteStore.shared.listItems()
+                if let conflict = NoteNaming.titleConflict(
+                    incomingPaths: files.map(\.path), existing: existing
+                ) {
+                    throw MarkdownImportError(message: "同じタイトルのノートが別の場所にあります。復元を中止しました。\n\(conflict)")
+                }
                 let written = try await CouchDBClient.shared.restore(files: files) { p in
                     Task { @MainActor in progress = 0.5 + p * 0.5 }
                 }

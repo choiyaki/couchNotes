@@ -103,8 +103,18 @@ final class URLActionRouter: ObservableObject {
     /// dirty で書けば reconcile から保護され、オフラインでも作成・追記が成立する。
     private func upsertAndOpen(_ target: (id: String, path: String), text: String, addNewlineOnAppend: Bool) async {
         let nowMs = Date().timeIntervalSince1970 * 1000
+        // URL が別フォルダを指定していても、同じタイトルがあれば既存の一意なノートへ追記する。
+        let resolvedTarget: (id: String, path: String)
+        if let exact = await NoteStore.shared.editingNote(target.id) {
+            resolvedTarget = (target.id, exact.path ?? target.path)
+        } else if let existingID = await NoteStore.shared.findIDByTitle(target.path),
+           let existing = await NoteStore.shared.editingNote(existingID) {
+            resolvedTarget = (existingID, existing.path ?? existingID)
+        } else {
+            resolvedTarget = target
+        }
         let record: NoteRecord
-        if let existing = await NoteStore.shared.editingNote(target.id) {
+        if let existing = await NoteStore.shared.editingNote(resolvedTarget.id) {
             // 追記
             let body = existing.body
             let newBody = body
@@ -117,7 +127,7 @@ final class URLActionRouter: ObservableObject {
                 extra: extra, body: newBody
             )
             record = NoteRecord(
-                id: target.id, path: existing.path ?? target.path, mtime: nowMs, ctime: ctime,
+                id: resolvedTarget.id, path: existing.path ?? resolvedTarget.path, mtime: nowMs, ctime: ctime,
                 size: content.utf8.count, content: content
             )
         } else {
@@ -125,13 +135,13 @@ final class URLActionRouter: ObservableObject {
             let sec = Int(nowMs / 1000)
             let content = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: text)
             record = NoteRecord(
-                id: target.id, path: target.path, mtime: nowMs, ctime: nowMs,
+                id: resolvedTarget.id, path: resolvedTarget.path, mtime: nowMs, ctime: nowMs,
                 size: content.utf8.count, content: content
             )
         }
         await NoteStore.shared.saveDirty(record)
         NotificationCenter.default.post(name: .noteStoreDidChange, object: nil)
-        noteToOpen = target.id
+        noteToOpen = resolvedTarget.id
         await SyncEngine.shared.flush()
     }
 }

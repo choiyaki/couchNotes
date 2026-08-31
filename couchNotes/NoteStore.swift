@@ -133,15 +133,32 @@ actor NoteStore {
     /// 末尾のファイル名（basename）が一致する生存ノートの id を返す。
     /// 複数該当する場合は最近更新したものを優先。basenameLower は ".md" 込み・小文字。
     func findIDByBasename(_ basenameLower: String) -> String? {
-        guard let stmt = prepare("SELECT id FROM notes WHERE deleted = 0 ORDER BY mtime DESC;") else { return nil }
+        let wanted = NoteNaming.titleKey(fromPath: basenameLower)
+        guard let stmt = prepare("SELECT id, path FROM notes WHERE deleted = 0 ORDER BY mtime DESC;") else { return nil }
         defer { sqlite3_finalize(stmt) }
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let c = sqlite3_column_text(stmt, 0) else { continue }
-            let id   = String(cString: c)   // 保存時に小文字化済み
-            let base = id.components(separatedBy: "/").last ?? id
-            if base == basenameLower { return id }
+            let id = String(cString: c)
+            let path = columnText(stmt, 1) ?? id
+            if NoteNaming.titleKey(fromPath: path) == wanted { return id }
         }
         return nil
+    }
+
+    /// 同じタイトルを持つ生存ノートを全フォルダから探す。自分自身は除外できる。
+    func findIDByTitle(_ titleOrPath: String, excludingID: String? = nil) -> String? {
+        let wanted = NoteNaming.titleKey(fromPath: titleOrPath)
+        guard !wanted.isEmpty else { return nil }
+        return listItems().first {
+            $0.id != excludingID && NoteNaming.titleKey(fromPath: $0.path ?? $0.id) == wanted
+        }?.id
+    }
+
+    /// 現在存在するタイトル重複。同期や旧データ由来の違反を検出する。
+    func duplicateTitleGroups() -> [[NoteItem]] {
+        Dictionary(grouping: listItems()) {
+            NoteNaming.titleKey(fromPath: $0.path ?? $0.id)
+        }.values.filter { $0.count > 1 }
     }
 
     /// 生存ノートの id→rev マップ（リコンシリエーション用）。rev 未取得は空文字。

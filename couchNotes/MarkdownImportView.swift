@@ -73,6 +73,13 @@ struct MarkdownImportView: View {
                 }
             }.value
 
+            let existing = await NoteStore.shared.listItems()
+            if let conflict = NoteNaming.titleConflict(
+                incomingPaths: loaded.files.map(\.path), existing: existing
+            ) {
+                throw MarkdownImportError(message: "同じタイトルのノートが別の場所にあります。取り込みを中止しました。\n\(conflict)")
+            }
+
             // 2) 同期範囲にフォルダを追加（通知は出さない＝余計なバックフィル取得を避ける）
             SyncScope.add(loaded.rootFolder)
 

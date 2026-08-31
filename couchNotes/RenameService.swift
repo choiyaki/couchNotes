@@ -20,7 +20,7 @@ enum RenameError: LocalizedError {
         case .emptyTitle:    return "タイトルが空です。"
         case .unchanged:     return "タイトルが変わっていません。"
         case .sourceMissing: return "元のノートが見つかりません。"
-        case .duplicate:     return "同じ場所に同名のノートが既に存在します。"
+        case .duplicate:     return "別のフォルダを含め、同名のノートが既に存在します。"
         }
     }
 }
@@ -29,7 +29,8 @@ enum RenameError: LocalizedError {
 enum RenameService {
     /// タイトル変更を実行し、新しい noteId を返す。
     static func rename(oldId: String, oldPath: String?, newTitle: String) async throws -> String {
-        let safe = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safe = newTitle.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
         guard !safe.isEmpty else { throw RenameError.emptyTitle }
 
@@ -42,8 +43,10 @@ enum RenameService {
         let pathFolder = pathSource.components(separatedBy: "/").dropLast()
         let newPath = (pathFolder + [safe + ".md"]).joined(separator: "/")
 
-        // 衝突チェック（ローカル）
-        if await NoteStore.shared.editingNote(newId) != nil { throw RenameError.duplicate }
+        // 衝突チェック（全フォルダでタイトル一意）
+        if await NoteStore.shared.findIDByTitle(newPath, excludingID: oldId) != nil {
+            throw RenameError.duplicate
+        }
 
         // 旧ノート本体（フロントマター除去済み body・ctime・extra）
         guard let stored = await NoteStore.shared.editingNote(oldId) else { throw RenameError.sourceMissing }

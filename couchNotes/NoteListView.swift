@@ -93,9 +93,9 @@ struct NoteListView: View {
 
     /// 同じタイトルのノートが無ければ作成可能（「＋」を有効化）。空入力時は不可。
     private var canCreateFromSearch: Bool {
-        let q = trimmedSearch.lowercased()
+        let q = NoteNaming.titleKey(fromPath: trimmedSearch)
         guard !q.isEmpty else { return false }
-        return !notes.contains { $0.shortTitle.lowercased() == q }
+        return !notes.contains { NoteNaming.titleKey(fromPath: $0.path ?? $0.id) == q }
     }
 
     // 初回インポート（全件取得）の進捗
@@ -598,6 +598,11 @@ struct NoteListView: View {
         let pendingDelete = await NoteStore.shared.pendingDeleteIDs()
         unsyncedIDs = dirty
         unsyncedCount = dirty.count + pendingDelete.count
+        let duplicates = await NoteStore.shared.duplicateTitleGroups()
+        if !duplicates.isEmpty && errorMessage == nil {
+            let paths = duplicates.flatMap { $0.map { $0.path ?? $0.id } }.joined(separator: "\n")
+            errorMessage = "同じタイトルのノートが複数あります。改名して解消してください。\n\(paths)"
+        }
     }
 
     /// 「今日のノート」の1枠を引き直す。
@@ -644,6 +649,10 @@ struct NoteListView: View {
     private func createNoteFromSearch(title: String, folder: String?) async {
         showNewNote = false
         guard let naming = NoteNaming.make(title: title, folder: folder) else { return }
+        if let existingID = await NoteStore.shared.findIDByTitle(naming.path) {
+            errorMessage = "同じタイトルのノートがすでに存在します: \(existingID)"
+            return
+        }
         let nowMs = Date().timeIntervalSince1970 * 1000
         let sec   = Int(nowMs / 1000)
         let fullText = FrontmatterParser.compose(createdSec: sec, updatedSec: sec, extra: [], body: "")
@@ -1042,6 +1051,11 @@ struct NoteListView: View {
         // _id はフォルダも小文字、path はフォルダ原文（Obsidian の実フォルダ名）
         let newId   = folder.map { "\($0.lowercased())/\(filename)" } ?? filename
         let newPath = folder.map { "\($0)/\(displayFilename)" }       ?? displayFilename
+
+        if let conflict = await NoteStore.shared.findIDByTitle(newPath, excludingID: note.id) {
+            errorMessage = "「\(note.shortTitle)」は別の場所にすでに存在します: \(conflict)"
+            return
+        }
 
         do {
             try await CouchDBClient.shared.moveNote(fromId: note.id, toId: newId, newPath: newPath)

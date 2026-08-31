@@ -139,10 +139,50 @@ struct StoredNote {
 // MARK: - 新規ノートの命名
 
 enum NoteNaming {
+    /// 全フォルダでタイトルを一意に保つための比較キー。
+    /// フォルダと拡張子は無視し、Unicode 表現差と英字大小を同一視する。
+    static func titleKey(fromPath path: String) -> String {
+        var name = path.split(separator: "/").last.map(String.init) ?? path
+        if name.lowercased().hasSuffix(".md") { name = String(name.dropLast(3)) }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased()
+    }
+
+    static func normalizedPath(_ path: String) -> String {
+        path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased()
+    }
+
+    /// 一括取り込み前の全件検査。同じ実体への上書きは許し、別パスの同名だけを拒否する。
+    static func titleConflict(incomingPaths: [String], existing: [NoteItem]) -> String? {
+        var owner: [String: String] = [:]
+        for note in existing {
+            let path = note.path ?? note.id
+            let key = titleKey(fromPath: path)
+            let normalized = normalizedPath(path)
+            if let prior = owner[key], prior != normalized {
+                return "\(prior) / \(normalized)"
+            }
+            owner[key] = normalized
+        }
+        for path in incomingPaths {
+            let key = titleKey(fromPath: path)
+            let normalized = normalizedPath(path)
+            if let prior = owner[key], prior != normalized {
+                return "\(prior) / \(normalized)"
+            }
+            owner[key] = normalized
+        }
+        return nil
+    }
+
     /// タイトルとフォルダ（nil=ルート）から (_id, path) を作る。
     /// _id は小文字、path は大小保持。"/" はフォルダ誤生成を防ぐため "-" に置換。
     static func make(title: String, folder: String?) -> (id: String, path: String)? {
-        let safe = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safe = title.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
         guard !safe.isEmpty else { return nil }
         let displayFilename = safe + ".md"
