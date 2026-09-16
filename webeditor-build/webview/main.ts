@@ -12,6 +12,7 @@ import { imageField, refreshImageLayout } from "./images";
 import { clearTableMeasureCache } from "./table";
 import { blocksField } from "./blocks";
 import { ocrOpenField } from "./ocr";
+import { imageMenu, applyOcrMessage } from "./imagemenu";
 import {
   setWikiTargets,
   wikiTargetsField,
@@ -335,6 +336,7 @@ const view = new EditorView({
         activateOnTyping: true,
       }),
       pasteImages(native),
+      imageMenu((msg) => native.postMessage(msg)),
       nativeClipboard,
       footerExtension,
       clickHandler,
@@ -479,6 +481,9 @@ window.couchNotesReceive = (msg: any) => {
     }
     case "pasteResult":
       applyPasteResult(view, msg);
+      break;
+    case "ocrResult":
+      applyOcrMessage(view, msg);
       break;
     case "footer":
       setFooterData((msg.data ?? null) as FooterData | null);

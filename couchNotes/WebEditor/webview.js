@@ -8550,10 +8550,10 @@
         return true;
       }
     }
-    let pending;
-    if (browser.chrome && browser.android && (pending = PendingKeys.find((key) => key.inputType == event.inputType))) {
-      view2.observer.delayAndroidKey(pending.key, pending.keyCode);
-      if (pending.key == "Backspace" || pending.key == "Delete") {
+    let pending2;
+    if (browser.chrome && browser.android && (pending2 = PendingKeys.find((key) => key.inputType == event.inputType))) {
+      view2.observer.delayAndroidKey(pending2.key, pending2.keyCode);
+      if (pending2.key == "Backspace" || pending2.key == "Delete") {
         let startViewHeight = ((_b = window.visualViewport) === null || _b === void 0 ? void 0 : _b.height) || 0;
         setTimeout(() => {
           var _a3;
@@ -10787,19 +10787,19 @@
       } };
     }
     applyEdits(update) {
-      let off = 0, abort = false, pending = this.pendingContextChange;
+      let off = 0, abort = false, pending2 = this.pendingContextChange;
       update.changes.iterChanges((fromA, toA, _fromB, _toB, insert2) => {
         if (abort)
           return;
         let dLen = insert2.length - (toA - fromA);
-        if (pending && toA >= pending.to) {
-          if (pending.from == fromA && pending.to == toA && pending.insert.eq(insert2)) {
-            pending = this.pendingContextChange = null;
+        if (pending2 && toA >= pending2.to) {
+          if (pending2.from == fromA && pending2.to == toA && pending2.insert.eq(insert2)) {
+            pending2 = this.pendingContextChange = null;
             off += dLen;
             this.to += dLen;
             return;
           } else {
-            pending = null;
+            pending2 = null;
             this.revertPending(update.state);
           }
         }
@@ -10818,7 +10818,7 @@
         }
         off += dLen;
       });
-      if (pending && !abort)
+      if (pending2 && !abort)
         this.revertPending(update.state);
       return !abort;
     }
@@ -10855,9 +10855,9 @@
       this.setSelection(state);
     }
     revertPending(state) {
-      let pending = this.pendingContextChange;
+      let pending2 = this.pendingContextChange;
       this.pendingContextChange = null;
-      this.editContext.updateText(this.toContextPos(pending.from), this.toContextPos(pending.from + pending.insert.length), state.doc.sliceString(pending.from, pending.to));
+      this.editContext.updateText(this.toContextPos(pending2.from), this.toContextPos(pending2.from + pending2.insert.length), state.doc.sliceString(pending2.from, pending2.to));
     }
     setSelection(state) {
       let { main: main2 } = state.selection;
@@ -17941,11 +17941,11 @@
     startQuery(active) {
       let { state } = this.view, pos = cur(state);
       let context = new CompletionContext(state, pos, active.explicit, this.view);
-      let pending = new RunningQuery(active, context);
-      this.running.push(pending);
+      let pending2 = new RunningQuery(active, context);
+      this.running.push(pending2);
       Promise.resolve(active.source(context)).then((result) => {
-        if (!pending.context.aborted) {
-          pending.done = result || null;
+        if (!pending2.context.aborted) {
+          pending2.done = result || null;
           this.scheduleAccept();
         }
       }, (err) => {
@@ -18388,6 +18388,7 @@
       wrap.className = "cm-cn-inline-img" + (this.href ? " cm-cn-linked-img" : "");
       if (this.href)
         wrap.setAttribute("data-href", this.href);
+      wrap.setAttribute("data-url", this.url);
       const img = document.createElement("img");
       img.src = this.url;
       img.style.width = `${Math.round(this.w)}px`;
@@ -33631,6 +33632,42 @@
       return s;
     }
   };
+  function ocrBlockAfter(state, lineNo) {
+    if (lineNo >= state.doc.lines)
+      return null;
+    const b = state.field(blocksField).byLine.get(lineNo + 1);
+    if (b && b.kind === "code" && b.from === lineNo + 1 && b.closeLine !== null && isOcrLang(b.lang)) {
+      return b;
+    }
+    return null;
+  }
+  function applyOcrResult(view2, url, text2, hintLine) {
+    const doc2 = view2.state.doc;
+    const needle = `](${url})`;
+    let best = -1;
+    for (let n = 1; n <= doc2.lines; n++) {
+      const t2 = doc2.line(n).text;
+      if (!t2.includes("![") || !t2.includes(needle))
+        continue;
+      if (best < 0 || Math.abs(n - hintLine) < Math.abs(best - hintLine))
+        best = n;
+    }
+    if (best < 0)
+      return;
+    const body = text2.replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).join("\n").trim();
+    if (!body)
+      return;
+    let run = 0;
+    for (const m of body.matchAll(/^[\t ]*(`{3,})/gm))
+      run = Math.max(run, m[1].length);
+    const fence = "`".repeat(Math.max(3, run + 1));
+    const block = `${fence}ocr
+${body}
+${fence}`;
+    const existing = ocrBlockAfter(view2.state, best);
+    const change = existing ? { from: doc2.line(existing.from).from, to: doc2.line(existing.closeLine).to, insert: block } : { from: doc2.line(best).to, to: doc2.line(best).to, insert: "\n" + block };
+    view2.dispatch({ changes: change, userEvent: "input" });
+  }
 
   // webview/commands.ts
   function selectedLines(state) {
@@ -34332,6 +34369,161 @@
     { decorations: (v) => v.decorations }
   );
 
+  // webview/imagemenu.ts
+  var LONG_PRESS_MS = 450;
+  var MOVE_TOLERANCE = 10;
+  var pending = /* @__PURE__ */ new Map();
+  var pendingStyle = null;
+  function refreshPendingStyle() {
+    if (!pendingStyle) {
+      pendingStyle = document.createElement("style");
+      document.head.appendChild(pendingStyle);
+    }
+    const selectors = [...pending.keys()].map(
+      (u) => `.cm-cn-inline-img[data-url="${u.replace(/["\\]/g, "\\$&")}"]::after`
+    );
+    pendingStyle.textContent = selectors.length ? `${selectors.join(",\n")} { content: "\u53D6\u308A\u8FBC\u307F\u4E2D\u2026"; }` : "";
+  }
+  function applyOcrMessage(view2, msg) {
+    const url = String(msg.url ?? "");
+    const hint = pending.get(url) ?? 1;
+    pending.delete(url);
+    refreshPendingStyle();
+    if (msg.text)
+      applyOcrResult(view2, url, msg.text, hint);
+  }
+  function imageMenu(post) {
+    return ViewPlugin.fromClass(
+      class {
+        constructor(view2) {
+          this.view = view2;
+          const c = view2.contentDOM;
+          c.addEventListener("touchstart", this.onTouchStart, { passive: true });
+          c.addEventListener("touchmove", this.onTouchMove, { passive: true });
+          c.addEventListener("touchend", this.onTouchEnd, { passive: false });
+          c.addEventListener("touchcancel", this.cancelTimer, { passive: true });
+          c.addEventListener("contextmenu", this.onContextMenu);
+          document.addEventListener("mousedown", this.onOutside, true);
+          document.addEventListener("touchstart", this.onOutside, true);
+          view2.scrollDOM.addEventListener("scroll", this.close, { passive: true });
+        }
+        menu = null;
+        timer = null;
+        startX = 0;
+        startY = 0;
+        swallowTouchEnd = false;
+        update(u) {
+          if (u.docChanged)
+            this.close();
+        }
+        destroy() {
+          const c = this.view.contentDOM;
+          c.removeEventListener("touchstart", this.onTouchStart);
+          c.removeEventListener("touchmove", this.onTouchMove);
+          c.removeEventListener("touchend", this.onTouchEnd);
+          c.removeEventListener("touchcancel", this.cancelTimer);
+          c.removeEventListener("contextmenu", this.onContextMenu);
+          document.removeEventListener("mousedown", this.onOutside, true);
+          document.removeEventListener("touchstart", this.onOutside, true);
+          this.view.scrollDOM.removeEventListener("scroll", this.close);
+          this.cancelTimer();
+          this.close();
+        }
+        imageAt(target) {
+          return target?.closest?.(".cm-cn-inline-img[data-url]") ?? null;
+        }
+        onTouchStart = (e) => {
+          this.cancelTimer();
+          if (e.touches.length !== 1)
+            return;
+          const wrap = this.imageAt(e.target);
+          if (!wrap)
+            return;
+          this.startX = e.touches[0].clientX;
+          this.startY = e.touches[0].clientY;
+          this.timer = setTimeout(() => {
+            this.timer = null;
+            this.swallowTouchEnd = true;
+            this.open(wrap, this.startX, this.startY);
+          }, LONG_PRESS_MS);
+        };
+        onTouchMove = (e) => {
+          if (!this.timer)
+            return;
+          const t2 = e.touches[0];
+          if (Math.hypot(t2.clientX - this.startX, t2.clientY - this.startY) > MOVE_TOLERANCE) {
+            this.cancelTimer();
+          }
+        };
+        onTouchEnd = (e) => {
+          this.cancelTimer();
+          if (this.swallowTouchEnd) {
+            this.swallowTouchEnd = false;
+            e.preventDefault();
+          }
+        };
+        onContextMenu = (e) => {
+          const wrap = this.imageAt(e.target);
+          if (!wrap)
+            return;
+          e.preventDefault();
+          this.open(wrap, e.clientX, e.clientY);
+        };
+        onOutside = (e) => {
+          if (this.menu && !this.menu.contains(e.target))
+            this.close();
+        };
+        cancelTimer = () => {
+          if (this.timer)
+            clearTimeout(this.timer);
+          this.timer = null;
+        };
+        close = () => {
+          this.menu?.remove();
+          this.menu = null;
+        };
+        open(wrap, x, y) {
+          this.close();
+          const url = wrap.getAttribute("data-url");
+          if (!url)
+            return;
+          const state = this.view.state;
+          const pos = Math.min(this.view.posAtDOM(wrap), state.doc.length);
+          const lineNo = state.doc.lineAt(pos).number;
+          const menu = document.createElement("div");
+          menu.className = "cn-image-menu";
+          const item = document.createElement("button");
+          item.type = "button";
+          if (pending.has(url)) {
+            item.textContent = "\u53D6\u308A\u8FBC\u307F\u4E2D\u2026";
+            item.disabled = true;
+          } else {
+            item.textContent = ocrBlockAfter(state, lineNo) ? "\u6587\u5B57\u3092\u53D6\u308A\u8FBC\u307F\u76F4\u3059" : "\u6587\u5B57\u3092\u53D6\u308A\u8FBC\u3080";
+            item.addEventListener("click", () => {
+              this.close();
+              pending.set(url, lineNo);
+              refreshPendingStyle();
+              post({ type: "recognizeImage", url });
+            });
+          }
+          menu.appendChild(item);
+          menu.addEventListener("mousedown", (e) => e.preventDefault());
+          document.body.appendChild(menu);
+          const margin = 8;
+          const w = menu.offsetWidth;
+          const h = menu.offsetHeight;
+          let left = Math.min(Math.max(x - w / 2, margin), window.innerWidth - w - margin);
+          let top2 = y + 16;
+          if (top2 + h > window.innerHeight - margin)
+            top2 = Math.max(y - h - 16, margin);
+          menu.style.left = `${left}px`;
+          menu.style.top = `${top2}px`;
+          this.menu = menu;
+        }
+      }
+    );
+  }
+
   // webview/paste.ts
   var counter = 0;
   function genId() {
@@ -34760,6 +34952,7 @@
           activateOnTyping: true
         }),
         pasteImages(native),
+        imageMenu((msg) => native.postMessage(msg)),
         nativeClipboard,
         footerExtension,
         clickHandler,
@@ -34901,6 +35094,9 @@
       }
       case "pasteResult":
         applyPasteResult(view, msg);
+        break;
+      case "ocrResult":
+        applyOcrMessage(view, msg);
         break;
       case "footer":
         setFooterData(msg.data ?? null);

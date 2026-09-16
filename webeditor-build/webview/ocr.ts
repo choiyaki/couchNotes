@@ -5,8 +5,10 @@
 //   ノートを開き直すと閉じた状態に戻る。
 // - カーソルがブロックに入れば、他のコードブロックと同じく全体が生記法に戻る（decorations.ts）。
 // - 複数行を 1 つのウィジェットに置き換える方式は使わない（1 ソース行 = 1 視覚行の原則を守る）。
-import { StateEffect, StateField } from "@codemirror/state";
+// - 画像メニュー「文字を取り込む」（imagemenu.ts）の結果もここで画像行の直後へ挿入する。
+import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
+import { blocksField, CodeBlock } from "./blocks";
 
 /** 情報文字列の最初の語が ocr か（```ocr gyazo:xxxx のような付加情報も許す） */
 export function isOcrLang(lang: string): boolean {
@@ -68,4 +70,47 @@ export class OcrToggleWidget extends WidgetType {
     });
     return s;
   }
+}
+
+/** 行 lineNo（画像行）の直後にある ```ocr ブロック（閉じフェンスあり）。無ければ null */
+export function ocrBlockAfter(state: EditorState, lineNo: number): CodeBlock | null {
+  if (lineNo >= state.doc.lines) return null;
+  const b = state.field(blocksField).byLine.get(lineNo + 1);
+  if (b && b.kind === "code" && b.from === lineNo + 1 && b.closeLine !== null && isOcrLang(b.lang)) {
+    return b;
+  }
+  return null;
+}
+
+/** 認識結果を、url の画像行（複数あれば hintLine に最も近い行）の直後へ ```ocr として入れる。
+    既に ```ocr があれば置き換える。画像が消えていれば何もしない。 */
+export function applyOcrResult(view: EditorView, url: string, text: string, hintLine: number) {
+  const doc = view.state.doc;
+  const needle = `](${url})`;
+  let best = -1;
+  for (let n = 1; n <= doc.lines; n++) {
+    const t = doc.line(n).text;
+    if (!t.includes("![") || !t.includes(needle)) continue;
+    if (best < 0 || Math.abs(n - hintLine) < Math.abs(best - hintLine)) best = n;
+  }
+  if (best < 0) return;
+
+  const body = text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .join("\n")
+    .trim();
+  if (!body) return;
+  // 本文にフェンスが含まれても閉じてしまわないよう、それより長いフェンスで囲む
+  let run = 0;
+  for (const m of body.matchAll(/^[\t ]*(`{3,})/gm)) run = Math.max(run, m[1].length);
+  const fence = "`".repeat(Math.max(3, run + 1));
+  const block = `${fence}ocr\n${body}\n${fence}`;
+
+  const existing = ocrBlockAfter(view.state, best);
+  const change = existing
+    ? { from: doc.line(existing.from).from, to: doc.line(existing.closeLine!).to, insert: block }
+    : { from: doc.line(best).to, to: doc.line(best).to, insert: "\n" + block };
+  view.dispatch({ changes: change, userEvent: "input" });
 }

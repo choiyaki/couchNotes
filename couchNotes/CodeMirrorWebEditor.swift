@@ -484,6 +484,20 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 let filename = body["filename"] as? String ?? "image.png"
                 parent.bridge?.handleWebPaste(id: id, mime: mime, base64: data, filename: filename)
 
+            case "recognizeImage":
+                // 画像の長押し／右クリックメニュー「文字を取り込む」。
+                // 結果は ocrResult で返し、JS 側が画像行の直後へ ```ocr を挿入する（text 無し＝失敗）。
+                guard let url = body["url"] as? String else { return }
+                Task { @MainActor in
+                    do {
+                        let text = try await ImageTextRecognizer.recognize(url: url)
+                        send(type: "ocrResult", extra: ["url": url, "text": text])
+                    } catch {
+                        send(type: "ocrResult", extra: ["url": url])
+                        parent.bridge?.onError?(error.localizedDescription)
+                    }
+                }
+
             case "copy":
                 // WKWebView（Mac Catalyst）は clipboardData 経由のコピーがシステムの
                 // ペーストボードへ正しく反映されないことがある（型は宣言されるが中身が

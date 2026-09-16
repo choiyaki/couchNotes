@@ -165,6 +165,7 @@ export class InlineImageWidget extends WidgetType {
     const wrap = document.createElement("span");
     wrap.className = "cm-cn-inline-img" + (this.href ? " cm-cn-linked-img" : "");
     if (this.href) wrap.setAttribute("data-href", this.href);
+    wrap.setAttribute("data-url", this.url); // 長押しメニュー（imagemenu.ts）が対象画像を知るため
     const img = document.createElement("img");
     img.src = this.url;
     img.style.width = `${Math.round(this.w)}px`;

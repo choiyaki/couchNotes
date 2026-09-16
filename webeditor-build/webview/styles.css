@@ -465,6 +465,59 @@ body {
 .cm-cn-linked-img {
   cursor: pointer;
 }
+/* 長押しメニュー（imagemenu.ts）を出すため、画像の長押しで iOS の「画像を保存」等を出さない */
+.cm-cn-inline-img {
+  position: relative;
+}
+.cm-cn-inline-img img {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* 文字取り込み中の表示（対象画像の ::after に content を入れるのは imagemenu.ts） */
+.cm-cn-inline-img::after {
+  position: absolute;
+  left: 6px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.6);
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 画像の長押し／右クリックメニュー（document.body 直下に置く） */
+.cn-image-menu {
+  position: fixed;
+  z-index: 1000;
+  padding: 4px;
+  border-radius: 10px;
+  background: light-dark(#ffffff, #2c2c2e);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2), 0 0 0 0.5px rgb(0 0 0 / 0.12);
+  font-family: var(--cn-font-family);
+}
+.cn-image-menu button {
+  display: block;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cn-image-menu button:active:not(:disabled) {
+  background: rgb(127 127 127 / 0.2);
+}
+.cn-image-menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 /* 画像 Markdown ![](url): 文字は常に少し小さく。 */
 .cm-cn-imgmd {

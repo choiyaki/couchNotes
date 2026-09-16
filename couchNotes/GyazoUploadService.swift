@@ -80,4 +80,35 @@ enum GyazoUploadService {
         }
         return url
     }
+
+    /// Gyazo の画像URL（直リンク i.gyazo.com/<id>.png ／ permalink gyazo.com/<id>）から画像IDを取り出す。
+    /// Gyazo の画像でなければ nil。
+    static func imageId(from urlString: String) -> String? {
+        guard let url = URL(string: urlString), let host = url.host?.lowercased(),
+              host == "gyazo.com" || host.hasSuffix(".gyazo.com") else { return nil }
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.count == 32, name.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return name.lowercased()
+    }
+
+    /// Gyazo が画像に付けた OCR テキスト（GET /api/images/:id の ocr.description）を返す。
+    /// 未処理・文字なし・自分の画像でない（404）場合は nil。
+    static func fetchOCR(imageId: String, token: String) async throws -> String? {
+        let trimmed = normalizedToken(token)
+        guard !trimmed.isEmpty else { throw GyazoUploadError.missingToken }
+
+        var request = URLRequest(url: URL(string: "https://api.gyazo.com/api/images/\(imageId)")!)
+        request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw GyazoUploadError.httpError(-1, nil) }
+        if http.statusCode == 401 { throw GyazoUploadError.unauthorized }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw GyazoUploadError.httpError(http.statusCode, nil) }
+
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let ocr = json?["ocr"] as? [String: Any]
+        let text = (ocr?["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? nil : text
+    }
 }
