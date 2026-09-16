@@ -13,5 +13,18 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>手書きメモを写真アプリに保存するために使用します。</string>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.github.choiyaki.couchNotes.handwrite</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>手書きメモ</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>pencil.tip.crop.circle</string>
+		</dict>
+	</array>
 </dict>
 </plist>

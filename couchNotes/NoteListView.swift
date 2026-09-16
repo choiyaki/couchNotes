@@ -3,6 +3,7 @@ import SwiftUI
 struct NoteListView: View {
     @ObservedObject private var listener = ChangesListener.shared
     @ObservedObject private var urlRouter = URLActionRouter.shared
+    @ObservedObject private var handwritingInbox = HandwritingInbox.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("noteList_layout") private var layoutRaw = NoteListLayout.detail.rawValue
@@ -376,6 +377,12 @@ struct NoteListView: View {
                     navigate { path.append(id) }
                 }
                 urlRouter.noteToOpen = nil
+            }
+        }
+        // アプリの外（couchnotes://handwrite・ホーム画面メニュー）から始める手書きメモ
+        .fullScreenCover(item: $handwritingInbox.captureRequest) { request in
+            HandwritingView { result in
+                Task { await URLActionRouter.shared.openForHandwriting(result, path: request.path) }
             }
         }
         .onChange(of: urlRouter.errorMessage) { _, msg in

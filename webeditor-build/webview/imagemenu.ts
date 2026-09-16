@@ -5,6 +5,7 @@
 // - メニューは HTML で自前描画する（Mac Catalyst ではネイティブのポップオーバーが落ちるため）。
 //   CM の DOM の外（document.body）に置くので、エディタの DOM 監視と干渉しない。
 // - 取り込み中の表示も CM 管理下の DOM を触らず、<style> の属性セレクタで画像に重ねる。
+import { EditorSelection } from "@codemirror/state";
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { applyOcrResult, ocrBlockAfter } from "./ocr";
 
@@ -30,11 +31,11 @@ function refreshPendingStyle() {
     : "";
 }
 
-/** 手書きメモ（アップロード済み）をカーソル位置へ独立した行として挿入する。
+/** 手書きメモ（アップロード済み）をカーソル位置（atEnd なら本文末尾）へ独立した行として挿入する。
     ocrPending なら認識結果が届くまで「取り込み中…」を重ねる。フォーカス（キーボード）は動かさない。 */
-export function insertImageAtCursor(view: EditorView, url: string, ocrPending: boolean) {
+export function insertImageAtCursor(view: EditorView, url: string, ocrPending: boolean, atEnd = false) {
   const { state } = view;
-  const sel = state.selection.main;
+  const sel = atEnd ? EditorSelection.cursor(state.doc.length) : state.selection.main;
   const startLine = state.doc.lineAt(sel.from);
   const endLine = state.doc.lineAt(sel.to);
   const before = state.sliceDoc(startLine.from, sel.from).trim() !== "";
@@ -44,6 +45,8 @@ export function insertImageAtCursor(view: EditorView, url: string, ocrPending: b
     changes: { from: sel.from, to: sel.to, insert },
     selection: { anchor: sel.from + insert.length },
     userEvent: "input.paste",
+    // 末尾追記は画面外になりがちなので見える位置までスクロールする
+    effects: atEnd ? EditorView.scrollIntoView(sel.from + insert.length, { y: "center" }) : [],
   });
   if (ocrPending) {
     pending.set(url, startLine.number + (before ? 1 : 0));

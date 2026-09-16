@@ -72,6 +72,9 @@ struct NoteDetailView: View {
     // 親ビューごと破棄されて閉じるのを防ぐ）。提示元は常設の Group（下記）に置く。
     @State private var showPhotoPicker = false
     @State private var showHandwriting = false
+    @ObservedObject private var handwritingInbox = HandwritingInbox.shared
+    /// ナビゲーションの最前面にいるか（下に積まれた同じノートの画面が手書き挿入を拾わないように）
+    @State private var isOnScreen = false
 
     @State private var content        = ""
     @State private var editingContent = ""
@@ -614,6 +617,13 @@ struct NoteDetailView: View {
             guard let item else { return }
             Task { await uploadPickedPhoto(item) }
         }
+        .onAppear {
+            isOnScreen = true
+            consumePendingHandwriting()
+        }
+        .onChange(of: handwritingInbox.pendingInsert?.id) { _, _ in
+            consumePendingHandwriting()
+        }
         .task {
             // 最後に開いたノートとして記録
             UserDefaults.standard.set(noteId, forKey: "lastOpenedNoteId")
@@ -621,11 +631,13 @@ struct NoteDetailView: View {
             SyncEngine.shared.activeNoteId = noteId
             titleDraft = navTitle
             webBridge.onError = { message in errorMessage = message }
+            webBridge.onReady = { consumePendingHandwriting() }
             await loadContent()
             await loadBacklinks()
             await pollForChanges()
         }
         .onDisappear {
+            isOnScreen = false
             saveDebounceTask?.cancel()
             localSaveDebounceTask?.cancel()
             if hasUnsavedChanges {
@@ -705,6 +717,14 @@ struct NoteDetailView: View {
     }
 
     /// 写真ピッカーで選ばれた画像を Gyazo にアップロードして挿入する。
+    /// アプリの外から始めた手書きメモ（HandwritingInbox）がこのノート宛てなら、エディタ経由で末尾へ挿入する。
+    /// 本文を直接書き換えないので、編集中の内容・保存フローと衝突しない。
+    private func consumePendingHandwriting() {
+        guard isOnScreen, webBridge.isReady,
+              let result = handwritingInbox.takePendingInsert(for: noteId) else { return }
+        webBridge.insertHandwriting(result, atEnd: true)
+    }
+
     private func uploadPickedPhoto(_ item: PhotosPickerItem) async {
         defer { photoPickerItem = nil }
         guard let data = try? await item.loadTransferable(type: Data.self) else { return }

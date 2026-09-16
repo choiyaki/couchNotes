@@ -5,11 +5,13 @@
 //  手書きメモのキャンバス（PencilKit 純正キャンバス＋ツールパレット）。
 //  完了で PNG を書き出して Gyazo へアップロードし、成功したら URL を呼び出し元へ返して閉じる。
 //  失敗時は閉じずに「再試行」できる（手書きは貼り直しができないので、描いた内容を失わせない）。
+//  写真アプリにも保存できる（アップロードできない時に残しておき、後で写真ボタンから貼れるように）。
 //  背景（無地・方眼・罫線・ドット）と OCR のオン/オフは次回も引き継ぐ。
 //
 
 import SwiftUI
 import PencilKit
+import Photos
 
 /// 手書きメモのアップロード結果
 struct HandwritingResult {
@@ -28,6 +30,8 @@ struct HandwritingView: View {
     @State private var isUploading = false
     @State private var uploadError: String?
     @State private var confirmDiscard = false
+    @State private var isSavingPhoto = false
+    @State private var photoMessage: String?
 
     private var paper: PaperStyle { PaperStyle(rawValue: paperRaw) ?? .grid }
 
@@ -56,13 +60,21 @@ struct HandwritingView: View {
             set: { if !$0 { uploadError = nil } }
         )) {
             Button("再試行") { Task { await finish() } }
+            Button("写真に保存して閉じる") { Task { await saveToPhotos(thenClose: true) } }
             Button("閉じる", role: .cancel) {}
         } message: {
             Text(uploadError ?? "")
         }
         .alert("手書きを破棄しますか？", isPresented: $confirmDiscard) {
+            Button("写真に保存して閉じる") { Task { await saveToPhotos(thenClose: true) } }
             Button("破棄", role: .destructive) { dismiss() }
             Button("キャンセル", role: .cancel) {}
+        }
+        .alert(photoMessage ?? "", isPresented: Binding(
+            get: { photoMessage != nil },
+            set: { if !$0 { photoMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
         }
         .interactiveDismissDisabled()
     }
@@ -74,6 +86,13 @@ struct HandwritingView: View {
                     if model.hasDrawing { confirmDiscard = true } else { dismiss() }
                 }
                 Spacer()
+                Button {
+                    Task { await saveToPhotos(thenClose: false) }
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .disabled(!model.hasDrawing || isSavingPhoto)
+                .accessibilityLabel("写真に保存")
                 Toggle(isOn: $ocrEnabled) {
                     Label("OCR", systemImage: "text.viewfinder")
                 }
@@ -97,6 +116,23 @@ struct HandwritingView: View {
         .padding(.vertical, 8)
     }
 
+    /// Gyazo へ上げるのと同じ PNG（白い紙＋模様＋線）を写真アプリへ保存する（追加のみの権限）。
+    @MainActor
+    private func saveToPhotos(thenClose: Bool) async {
+        guard !isSavingPhoto, let canvas = model.canvas,
+              let output = HandwritingExporter.export(drawing: canvas.drawing,
+                                                      width: canvas.bounds.width,
+                                                      paper: paper) else { return }
+        isSavingPhoto = true
+        defer { isSavingPhoto = false }
+        do {
+            try await PhotoLibrarySaver.savePNG(output.png)
+            if thenClose { dismiss() } else { photoMessage = "写真に保存しました" }
+        } catch {
+            photoMessage = error.localizedDescription
+        }
+    }
+
     @MainActor
     private func finish() async {
         guard !isUploading, let canvas = model.canvas,
@@ -118,6 +154,25 @@ struct HandwritingView: View {
             dismiss()
         } catch {
             uploadError = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 写真アプリへの保存
+
+enum PhotoLibrarySaver {
+    enum SaveError: LocalizedError {
+        case denied
+        var errorDescription: String? {
+            "写真へのアクセスが許可されていません。設定アプリ → couchNotes →「写真」で「写真を追加のみ」以上を許可してください。"
+        }
+    }
+
+    static func savePNG(_ data: Data) async throws {
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else { throw SaveError.denied }
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
         }
     }
 }

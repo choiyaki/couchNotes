@@ -34384,9 +34384,9 @@ ${fence}`;
     );
     pendingStyle.textContent = selectors.length ? `${selectors.join(",\n")} { content: "\u53D6\u308A\u8FBC\u307F\u4E2D\u2026"; }` : "";
   }
-  function insertImageAtCursor(view2, url, ocrPending) {
+  function insertImageAtCursor(view2, url, ocrPending, atEnd = false) {
     const { state } = view2;
-    const sel = state.selection.main;
+    const sel = atEnd ? EditorSelection.cursor(state.doc.length) : state.selection.main;
     const startLine = state.doc.lineAt(sel.from);
     const endLine = state.doc.lineAt(sel.to);
     const before = state.sliceDoc(startLine.from, sel.from).trim() !== "";
@@ -34395,7 +34395,9 @@ ${fence}`;
     view2.dispatch({
       changes: { from: sel.from, to: sel.to, insert: insert2 },
       selection: { anchor: sel.from + insert2.length },
-      userEvent: "input.paste"
+      userEvent: "input.paste",
+      // 末尾追記は画面外になりがちなので見える位置までスクロールする
+      effects: atEnd ? EditorView.scrollIntoView(sel.from + insert2.length, { y: "center" }) : []
     });
     if (ocrPending) {
       pending.set(url, startLine.number + (before ? 1 : 0));
@@ -35118,7 +35120,7 @@ ${fence}`;
         break;
       case "insertImage":
         if (msg.url)
-          insertImageAtCursor(view, String(msg.url), !!msg.ocrPending);
+          insertImageAtCursor(view, String(msg.url), !!msg.ocrPending, !!msg.atEnd);
         break;
       case "footer":
         setFooterData(msg.data ?? null);

@@ -23,6 +23,16 @@ final class WebEditorBridge: ObservableObject {
     /// アップロード失敗など、ユーザーへ見せたいエラー。
     var onError: ((String) -> Void)?
 
+    /// エディタが初期本文を受け取り、挿入などの操作を受け付けられる状態か。
+    private(set) var isReady = false
+    /// isReady になった時に呼ばれる（外部から始めた手書きメモの挿入待ちを流す用）。
+    var onReady: (() -> Void)?
+
+    fileprivate func markReady() {
+        isReady = true
+        onReady?()
+    }
+
     /// キーボードツールバーのコマンド（wikiLink / listToggle / moveLineUp / moveLineDown / indent / outdent）
     func run(_ command: String) {
         webView?.evaluateJavaScript("window.couchNotesRunCommand('\(command)');")
@@ -78,11 +88,11 @@ final class WebEditorBridge: ObservableObject {
         }
     }
 
-    /// アップロード済みの手書きメモをカーソル位置へ挿入する。
+    /// アップロード済みの手書きメモをカーソル位置（atEnd なら本文末尾）へ挿入する。
     /// OCR 有効時は裏で文字を認識し（Gyazo の OCR を待ち、だめなら Vision）、画像の直後へ ```ocr を入れる。
     /// 文字が無い（絵だけのメモ）場合は何も入れず、アラートも出さない。
-    func insertHandwriting(_ result: HandwritingResult) {
-        send(["type": "insertImage", "url": result.url, "ocrPending": result.ocrImage != nil])
+    func insertHandwriting(_ result: HandwritingResult, atEnd: Bool = false) {
+        send(["type": "insertImage", "url": result.url, "ocrPending": result.ocrImage != nil, "atEnd": atEnd])
         guard let ocrImage = result.ocrImage else { return }
         Task { @MainActor in
             let text = try? await ImageTextRecognizer.recognize(
@@ -444,6 +454,8 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                     BlockLinkTarget.pendingBlockId = nil
                     send(type: "revealBlock", extra: ["id": blockId])
                 }
+                // init の後に送る操作（手書きメモの挿入など）はここから受け付ける
+                parent.bridge?.markReady()
 
             case "edit":
                 // 全文＋世代番号方式（native の parent.text = textView.text と同等）。

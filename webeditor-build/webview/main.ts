@@ -487,7 +487,7 @@ window.couchNotesReceive = (msg: any) => {
       break;
     case "insertImage":
       // 手書きメモ（アップロード済み）の挿入
-      if (msg.url) insertImageAtCursor(view, String(msg.url), !!msg.ocrPending);
+      if (msg.url) insertImageAtCursor(view, String(msg.url), !!msg.ocrPending, !!msg.atEnd);
       break;
     case "footer":
       setFooterData((msg.data ?? null) as FooterData | null);

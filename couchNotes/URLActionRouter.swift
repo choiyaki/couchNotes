@@ -6,6 +6,8 @@
 //  - couchnotes://open?path=Publish/会議メモ        … 既存ノートを開く（無ければエラー）
 //  - couchnotes://new?path=Inbox/買い物&content=...  … 無ければ作成、あれば追記。常に開く
 //  - couchnotes://append?path=20260606&text=...      … 常に作成 or 追記。常に開く
+//  - couchnotes://handwrite[?path=Inbox/手書き]        … 手書きキャンバスを開く。完了で path（省略時は
+//    今日の日付ノート yyyyMMdd）を作成 or 開き、末尾へ手書き画像を追記（iPhone/iPad のみ）
 //  path はフルパス。スラッシュ有り＝フォルダ内、無し＝ルート直下。.md は任意。
 //  open に限り、path がファイル名だけ（スラッシュ無し）の場合はフォルダ配下も含めて
 //  ファイル名一致で検索する（例: open?path=20260617 で Publish/20260617.md を開く）。
@@ -28,6 +30,11 @@ final class URLActionRouter: ObservableObject {
 
     /// onOpenURL から呼ぶ。準備前なら保留。
     func handle(_ url: URL) {
+        // 手書きはノート一覧の読み込みを待たずにキャンバスを出す（書き込み先は完了時に決める）
+        if (url.host ?? "").lowercased() == "handwrite" {
+            startHandwriting(url)
+            return
+        }
         pendingURL = url
         if isReady { processPending() }
     }
@@ -72,6 +79,36 @@ final class URLActionRouter: ObservableObject {
         }
     }
 
+    // MARK: - 手書き
+
+    private func startHandwriting(_ url: URL) {
+        #if targetEnvironment(macCatalyst)
+        errorMessage = "手書きメモは iPhone／iPad で使えます。"
+        #else
+        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let path = comps?.queryItems?.first { $0.name.lowercased() == "path" }?.value?
+            .trimmingCharacters(in: .whitespaces)
+        HandwritingInbox.shared.captureRequest = .init(path: (path?.isEmpty ?? true) ? nil : path)
+        #endif
+    }
+
+    /// 手書きキャンバスの完了後: 書き込み先ノートを（無ければ空で作成して）開き、
+    /// 末尾への挿入をノート画面（エディタ）へ託す。本文を直接書き換えないので、
+    /// そのノートを編集中でも保存が衝突しない。
+    func openForHandwriting(_ result: HandwritingResult, path: String?) async {
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        let target = resolve(path ?? df.string(from: Date()))
+        let existing = await existingTarget(for: target)
+        // ノート画面が開いた時（既に開いていれば即時）に拾えるよう、遷移より先に積む
+        HandwritingInbox.shared.pendingInsert = .init(noteId: existing?.id ?? target.id, result: result)
+        if let existing {
+            noteToOpen = existing.id
+        } else {
+            await upsertAndOpen(target, text: "", addNewlineOnAppend: false)   // 空で作成して開く
+        }
+    }
+
     /// path パラメータから (_id, 表示パス) を作る。
     private func resolve(_ rawPath: String) -> (id: String, path: String) {
         var p = rawPath.trimmingCharacters(in: .whitespaces)
@@ -96,6 +133,18 @@ final class URLActionRouter: ObservableObject {
         errorMessage = "ノートが見つかりません: \(target.path)"
     }
 
+    /// 既存ノートの解決。URL が別フォルダを指定していても、同じタイトルがあれば既存の一意なノートを使う。
+    private func existingTarget(for target: (id: String, path: String)) async -> (id: String, path: String)? {
+        if let exact = await NoteStore.shared.editingNote(target.id) {
+            return (target.id, exact.path ?? target.path)
+        }
+        if let existingID = await NoteStore.shared.findIDByTitle(target.path),
+           let existing = await NoteStore.shared.editingNote(existingID) {
+            return (existingID, existing.path ?? existingID)
+        }
+        return nil
+    }
+
     /// 無ければ作成、あれば追記。完了後に開く。
     /// アプリ内作成と同じ「ローカルに dirty で保存 → SyncEngine が押し上げ」の書き込み経路を使う。
     /// サーバ直書き＋clean upsert だと、reconcile のサーバスナップショット（作成前に取得）との
@@ -103,16 +152,7 @@ final class URLActionRouter: ObservableObject {
     /// dirty で書けば reconcile から保護され、オフラインでも作成・追記が成立する。
     private func upsertAndOpen(_ target: (id: String, path: String), text: String, addNewlineOnAppend: Bool) async {
         let nowMs = Date().timeIntervalSince1970 * 1000
-        // URL が別フォルダを指定していても、同じタイトルがあれば既存の一意なノートへ追記する。
-        let resolvedTarget: (id: String, path: String)
-        if let exact = await NoteStore.shared.editingNote(target.id) {
-            resolvedTarget = (target.id, exact.path ?? target.path)
-        } else if let existingID = await NoteStore.shared.findIDByTitle(target.path),
-           let existing = await NoteStore.shared.editingNote(existingID) {
-            resolvedTarget = (existingID, existing.path ?? existingID)
-        } else {
-            resolvedTarget = target
-        }
+        let resolvedTarget = await existingTarget(for: target) ?? target
         let record: NoteRecord
         if let existing = await NoteStore.shared.editingNote(resolvedTarget.id) {
             // 追記
