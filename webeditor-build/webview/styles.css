@@ -309,6 +309,29 @@ body {
   opacity: 0.45;
 }
 
+/* ===== ```ocr の折りたたみ（ocr.ts）========================================== */
+
+/* 開きフェンス行: ▶ / ▼ だけを出す。行高は通常行のまま（タップしやすさを保つ）。 */
+.cm-cn-ocr-toggle {
+  display: inline-block;
+  padding-right: 1.5em;
+  font-size: 0.8em;
+  opacity: 0.45;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* 閉じている間の中身と閉じフェンス: 行は残したまま高さを 0 に潰す。 */
+.cm-editor .cm-cn-ocr-hidden-line {
+  font-size: 0;
+  line-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.cm-editor .cm-cn-ocr-hidden-line img.cm-widgetBuffer {
+  height: 0;
+}
+
 /* ===== Markdown テーブル（| a | b |）========================================== */
 
 :root {

@@ -20,6 +20,7 @@ import { tableForLine, TableRowWidget } from "./table";
 import { Block, BlockMap, blocksField } from "./blocks";
 import { MdTableLayout, MdTableRowWidget, MdTableRuleWidget, layoutMdTable } from "./mdtable";
 import { CodeFenceStripWidget } from "./codeblock";
+import { isOcrLang, ocrOpenField, OcrToggleWidget } from "./ocr";
 import { toggleCheckboxAt } from "./commands";
 
 const TAB_SIZE = 2;
@@ -140,6 +141,7 @@ interface Ctx {
   blocks: BlockMap;          // コードブロック／Markdown テーブルの地図（blocks.ts）
   activeBlocks: Set<Block>;  // カーソルが 1 行でも掛かっているブロック（＝全体を生記法に戻す）
   layouts: Map<Block, MdTableLayout>; // 1 回の build 内でのテーブルレイアウト計算のメモ
+  ocrOpen: ReadonlySet<number>; // 開いている ```ocr ブロック（開きフェンス行の先頭位置）
 }
 
 // ---- 複数行ブロック（コードブロック / Markdown テーブル）------------------
@@ -147,6 +149,48 @@ interface Ctx {
 //   - block:true のウィジェットは使わない。1 ソース行 = 1 視覚行のまま、行の中身だけを
 //     置き換える。これでカーソル移動・選択・IME の挙動が今までと変わらない。
 //   - 生記法に戻る単位はブロック全体（ctx.activeBlocks）。1 行ずつ崩れて見えない。
+
+/** ```ocr ブロックのプレビュー表示（ocr.ts）。
+    閉: 開きフェンス行 = ▶ のみ、残りの行 = 高さ 0。
+    開: 開きフェンス行 = ▼ のみ（背景なし）、中身 = 通常のコードブロック表示、閉じフェンス = 細い帯。 */
+function styleOcrLine(
+  view: EditorView,
+  lineFrom: number,
+  lineNumber: number,
+  lineTo: number,
+  text: string,
+  blk: Block & { kind: "code" },
+  out: Range<Decoration>[],
+  ctx: Ctx
+) {
+  const headFrom = view.state.doc.line(blk.from).from;
+  const open = ctx.ocrOpen.has(headFrom);
+
+  if (lineNumber === blk.from) {
+    out.push(Decoration.line({ class: "cm-cn-ocr-head-line" }).range(lineFrom));
+    out.push(Decoration.replace({ widget: new OcrToggleWidget(open) }).range(lineFrom, lineTo));
+    return;
+  }
+  if (!open) {
+    out.push(Decoration.line({ class: "cm-cn-ocr-hidden-line" }).range(lineFrom));
+    if (text.length > 0) out.push(Decoration.replace({}).range(lineFrom, lineTo));
+    return;
+  }
+  const cls =
+    "cm-cn-code-line" +
+    (lineNumber === blk.from + 1 ? " cm-cn-code-first" : "") +
+    (lineNumber === blk.to ? " cm-cn-code-last" : "");
+  if (lineNumber === blk.closeLine) {
+    out.push(Decoration.line({ class: cls + " cm-cn-code-strip-line" }).range(lineFrom));
+    if (text.length > 0) {
+      out.push(
+        Decoration.replace({ widget: new CodeFenceStripWidget("", false) }).range(lineFrom, lineTo)
+      );
+    }
+    return;
+  }
+  out.push(Decoration.line({ class: cls }).range(lineFrom));
+}
 
 function styleBlockLine(
   view: EditorView,
@@ -162,6 +206,11 @@ function styleBlockLine(
   const raw = !ctx.livePreview || ctx.activeBlocks.has(blk);
 
   if (blk.kind === "code") {
+    // ```ocr（閉じフェンスあり）はプレビュー時に折りたたむ。未閉鎖なら文書末まで隠れてしまうので対象外。
+    if (!raw && blk.closeLine !== null && isOcrLang(blk.lang)) {
+      styleOcrLine(view, lineFrom, lineNumber, lineTo, text, blk, out, ctx);
+      return;
+    }
     const isFence = lineNumber === blk.from || lineNumber === blk.closeLine;
     const cls =
       "cm-cn-code-line" +
@@ -669,6 +718,7 @@ function build(view: EditorView): DecorationSet {
     blocks,
     activeBlocks,
     layouts: new Map(),
+    ocrOpen: view.state.field(ocrOpenField),
   };
   const out: Range<Decoration>[] = [];
   for (const { from, to } of view.visibleRanges) {
@@ -702,6 +752,7 @@ export const liveStyling = ViewPlugin.fromClass(
         u.focusChanged || // フォーカス喪失で全行プレビュー／取得でカーソル行を生表示に
         u.startState.field(wikiTargetsField) !== u.state.field(wikiTargetsField) ||
         u.startState.field(livePreviewField) !== u.state.field(livePreviewField) ||
+        u.startState.field(ocrOpenField) !== u.state.field(ocrOpenField) ||
         // 画像の実寸判明・エディタ幅変化でインライン画像のサイズを作り直す
         u.transactions.some((t) => t.effects.some((e) => e.is(imagesChanged)))
       ) {

@@ -33572,6 +33572,66 @@
     }
   };
 
+  // webview/ocr.ts
+  function isOcrLang(lang) {
+    return lang.split(/\s+/)[0].toLowerCase() === "ocr";
+  }
+  var OCR_FENCE_RE = /^[\t ]*(`{3,}|~{3,})[\t ]*ocr(\s|$)/i;
+  var toggleOcr = StateEffect.define();
+  var ocrOpenField = StateField.define({
+    create: () => /* @__PURE__ */ new Set(),
+    update(value, tr) {
+      let next = value;
+      if (tr.docChanged && value.size > 0) {
+        const mapped = /* @__PURE__ */ new Set();
+        for (const pos of value) {
+          const p = tr.changes.mapPos(pos, 1);
+          if (p > tr.state.doc.length)
+            continue;
+          const line = tr.state.doc.lineAt(p);
+          if (line.from === p && OCR_FENCE_RE.test(line.text))
+            mapped.add(p);
+        }
+        next = mapped;
+      }
+      for (const e of tr.effects) {
+        if (!e.is(toggleOcr))
+          continue;
+        const s = new Set(next);
+        if (s.has(e.value))
+          s.delete(e.value);
+        else
+          s.add(e.value);
+        next = s;
+      }
+      return next;
+    }
+  });
+  var OcrToggleWidget = class extends WidgetType {
+    constructor(open2) {
+      super();
+      this.open = open2;
+    }
+    eq(other) {
+      return other.open === this.open;
+    }
+    ignoreEvent() {
+      return true;
+    }
+    toDOM(view2) {
+      const s = document.createElement("span");
+      s.className = "cm-cn-ocr-toggle";
+      s.textContent = this.open ? "\u25BC" : "\u25B6";
+      s.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const line = view2.state.doc.lineAt(Math.min(view2.posAtDOM(s), view2.state.doc.length));
+        view2.dispatch({ effects: toggleOcr.of(line.from) });
+      });
+      return s;
+    }
+  };
+
   // webview/commands.ts
   function selectedLines(state) {
     const { from, to } = state.selection.main;
@@ -33791,9 +33851,39 @@
       }
     });
   };
+  function styleOcrLine(view2, lineFrom, lineNumber, lineTo, text2, blk, out, ctx) {
+    const headFrom = view2.state.doc.line(blk.from).from;
+    const open2 = ctx.ocrOpen.has(headFrom);
+    if (lineNumber === blk.from) {
+      out.push(Decoration.line({ class: "cm-cn-ocr-head-line" }).range(lineFrom));
+      out.push(Decoration.replace({ widget: new OcrToggleWidget(open2) }).range(lineFrom, lineTo));
+      return;
+    }
+    if (!open2) {
+      out.push(Decoration.line({ class: "cm-cn-ocr-hidden-line" }).range(lineFrom));
+      if (text2.length > 0)
+        out.push(Decoration.replace({}).range(lineFrom, lineTo));
+      return;
+    }
+    const cls = "cm-cn-code-line" + (lineNumber === blk.from + 1 ? " cm-cn-code-first" : "") + (lineNumber === blk.to ? " cm-cn-code-last" : "");
+    if (lineNumber === blk.closeLine) {
+      out.push(Decoration.line({ class: cls + " cm-cn-code-strip-line" }).range(lineFrom));
+      if (text2.length > 0) {
+        out.push(
+          Decoration.replace({ widget: new CodeFenceStripWidget("", false) }).range(lineFrom, lineTo)
+        );
+      }
+      return;
+    }
+    out.push(Decoration.line({ class: cls }).range(lineFrom));
+  }
   function styleBlockLine(view2, lineFrom, lineNumber, lineTo, text2, blk, out, ctx) {
     const raw = !ctx.livePreview || ctx.activeBlocks.has(blk);
     if (blk.kind === "code") {
+      if (!raw && blk.closeLine !== null && isOcrLang(blk.lang)) {
+        styleOcrLine(view2, lineFrom, lineNumber, lineTo, text2, blk, out, ctx);
+        return;
+      }
       const isFence = lineNumber === blk.from || lineNumber === blk.closeLine;
       const cls = "cm-cn-code-line" + (lineNumber === blk.from ? " cm-cn-code-first" : "") + (lineNumber === blk.to ? " cm-cn-code-last" : "");
       if (!raw && isFence && text2.length > 0) {
@@ -34205,7 +34295,8 @@
       livePreview: view2.state.field(livePreviewField),
       blocks,
       activeBlocks,
-      layouts: /* @__PURE__ */ new Map()
+      layouts: /* @__PURE__ */ new Map(),
+      ocrOpen: view2.state.field(ocrOpenField)
     };
     const out = [];
     for (const { from, to } of view2.visibleRanges) {
@@ -34232,7 +34323,7 @@
       update(u) {
         if (u.docChanged || u.viewportChanged || u.selectionSet || // カーソル移動で記法の生表示/プレビューを切り替える
         u.focusChanged || // フォーカス喪失で全行プレビュー／取得でカーソル行を生表示に
-        u.startState.field(wikiTargetsField) !== u.state.field(wikiTargetsField) || u.startState.field(livePreviewField) !== u.state.field(livePreviewField) || // 画像の実寸判明・エディタ幅変化でインライン画像のサイズを作り直す
+        u.startState.field(wikiTargetsField) !== u.state.field(wikiTargetsField) || u.startState.field(livePreviewField) !== u.state.field(livePreviewField) || u.startState.field(ocrOpenField) !== u.state.field(ocrOpenField) || // 画像の実寸判明・エディタ幅変化でインライン画像のサイズを作り直す
         u.transactions.some((t2) => t2.effects.some((e) => e.is(imagesChanged)))) {
           this.decorations = build(u.view);
         }
@@ -34644,6 +34735,7 @@
         livePreviewField,
         editorFocusedField,
         blocksField,
+        ocrOpenField,
         // フォーカス変化を State に流し込む（数式プレビューの表示判定などが参照する）
         EditorView.focusChangeEffect.of((_state, focusing) => setEditorFocused.of(focusing)),
         history(),

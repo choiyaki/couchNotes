@@ -244,6 +244,24 @@ body {
   letter-spacing: 0.02em;
   opacity: 0.45;
 }
+.cm-cn-ocr-toggle {
+  display: inline-block;
+  padding-right: 1.5em;
+  font-size: 0.8em;
+  opacity: 0.45;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.cm-editor .cm-cn-ocr-hidden-line {
+  font-size: 0;
+  line-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.cm-editor .cm-cn-ocr-hidden-line img.cm-widgetBuffer {
+  height: 0;
+}
 :root {
   --cn-mdtable-border: light-dark(rgb(0 0 0 / 0.12), rgb(255 255 255 / 0.16));
   --cn-mdtable-rule: light-dark(rgb(0 0 0 / 0.32), rgb(255 255 255 / 0.36));
