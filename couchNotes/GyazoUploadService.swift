@@ -10,13 +10,18 @@ import Foundation
 
 enum GyazoUploadError: LocalizedError {
     case missingToken
-    case httpError(Int)
+    case unauthorized
+    case httpError(Int, String?)
     case noURL
 
     var errorDescription: String? {
         switch self {
         case .missingToken:   return "Gyazo アクセストークンが設定されていません。設定で登録してください。"
-        case .httpError(let code): return "アップロードに失敗しました（\(code)）。"
+        case .unauthorized:
+            return "Gyazo の認証に失敗しました（401）。設定のアクセストークンを再発行し、「Bearer 」を付けずに登録し直してください。"
+        case .httpError(let code, let detail):
+            let suffix = detail.map { "\n\($0)" } ?? ""
+            return "アップロードに失敗しました（\(code)）。\(suffix)"
         case .noURL:          return "アップロード結果に画像URLが含まれていませんでした。"
         }
     }
@@ -25,9 +30,22 @@ enum GyazoUploadError: LocalizedError {
 enum GyazoUploadService {
     static let tokenKey = "gyazo_access_token"
 
+    /// Authorization ヘッダ値をそのまま貼り付けても、トークン部分だけを保存・送信する。
+    static func normalizedToken(_ value: String) -> String {
+        var token = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.count >= 2,
+           (token.first == "\"" && token.last == "\"" || token.first == "'" && token.last == "'") {
+            token = String(token.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if token.lowercased().hasPrefix("bearer ") {
+            token = String(token.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return token
+    }
+
     /// 画像データを Gyazo にアップロードし、直リンクの画像URLを返す。
     static func upload(imageData: Data, filename: String, mimeType: String, token: String) async throws -> String {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = normalizedToken(token)
         guard !trimmed.isEmpty else { throw GyazoUploadError.missingToken }
 
         let boundary = "----CouchNotesGyazoBoundary\(UInt64(Date().timeIntervalSince1970 * 1000))"
@@ -46,8 +64,13 @@ enum GyazoUploadService {
         request.httpBody = body
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw GyazoUploadError.httpError(-1) }
-        guard http.statusCode == 200 else { throw GyazoUploadError.httpError(http.statusCode) }
+        guard let http = response as? HTTPURLResponse else { throw GyazoUploadError.httpError(-1, nil) }
+        if http.statusCode == 401 { throw GyazoUploadError.unauthorized }
+        guard http.statusCode == 200 else {
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let detail = (json?["message"] as? String) ?? (json?["error"] as? String)
+            throw GyazoUploadError.httpError(http.statusCode, detail)
+        }
 
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         // 直リンク画像URL（インラインプレビュー用）。無ければ permalink_url をフォールバック。

@@ -22,6 +22,7 @@ body {
   height: 100%;
 }
 .cm-editor,
+.cm-editor .cm-scroller,
 .cm-tooltip-autocomplete > ul,
 .cn-footer {
   font-family: var(--cn-font-family);

@@ -33,6 +33,7 @@ body {
 /* .cm-tooltip-autocomplete / .cn-footer は .cm-editor の DOM 階層外にあるが、
    CSS カスタムプロパティは :root からドキュメント全体へ継承されるので届く。 */
 .cm-editor,
+.cm-editor .cm-scroller,
 .cm-tooltip-autocomplete > ul,
 .cn-footer {
   font-family: var(--cn-font-family);

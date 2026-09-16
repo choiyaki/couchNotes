@@ -57,17 +57,15 @@ struct NoteDetailView: View {
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
     // 一覧へ戻るボタンのアイコンを一覧の表示モードに合わせる
     @AppStorage("noteList_layout")    private var layoutRaw = NoteListLayout.detail.rawValue
-    // 新エディタ（CodeMirror/WKWebView）。TextKit1 の Mac 矢印キー・iPhone 選択飛び不具合の回避。
-    @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
-    // Web フォント（新エディタのみ）
+    // CodeMirror エディタの Web フォント
     @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
     @AppStorage("editor_webFontFamily") private var webFontFamily = ""
-    // ライブプレビュー（記法隠し。新エディタのみ）
+    // ライブプレビュー（記法隠し）
     @AppStorage("editor_livePreview") private var livePreview = true
 
     @ObservedObject private var network = NetworkMonitor.shared
 
-    // 新エディタとのブリッジ（ツールバーコマンド・フォーカス状態・画像アップロード）
+    // CodeMirror とのブリッジ（ツールバーコマンド・フォーカス状態・画像アップロード）
     @StateObject private var webBridge = WebEditorBridge()
     @State private var photoPickerItem: PhotosPickerItem? = nil
     // ピッカーの提示はフォーカス連動で消えるツールバーから切り離す（共有アルバム選択で
@@ -443,39 +441,27 @@ struct NoteDetailView: View {
                     .padding(.horizontal, landscapeSideInset)
 
                 // テキストビューは全幅のまま（スクロールバーが画面端に出る）。
-                // 余白は textContainerInset（テキストの内側）で寄せる。
+                // 余白は CodeMirror 側の内側 padding で寄せる。
                 Group {
-                    if useCodeMirror {
-                        CodeMirrorWebEditor(
-                            text: $editingContent,
-                            wikiTargets: wikiTargetNames,
-                            mentionedTargets: mentionedTargets,
-                            fontSize: CGFloat(fontSize),
-                            lineSpacing: CGFloat(lineSpacing),
-                            horizontalInset: landscapeSideInset,
-                            fontCSSURL: webFontCSSURL,
-                            fontFamily: webFontFamily,
-                            livePreview: livePreview,
-                            backlinks: backlinks,
-                            twoHop: twoHop,
-                            footerLayout: backlinksLayout,
-                            bridge: webBridge,
-                            onLinkTap: onLinkTap,
-                            onFooterLayoutChange: { backlinksLayout = $0 }
-                        )
-                        .safeAreaInset(edge: .bottom, spacing: 0) {
-                            if webBridge.isEditorFocused { webEditorToolbar }
-                        }
-                    } else {
-                        MarkdownTextView(
-                            text: $editingContent,
-                            notes: notes,
-                            backlinks: backlinks,
-                            fontSize: CGFloat(fontSize),
-                            lineSpacing: CGFloat(lineSpacing),
-                            horizontalInset: landscapeSideInset,
-                            onLinkTap: onLinkTap
-                        )
+                    CodeMirrorWebEditor(
+                        text: $editingContent,
+                        wikiTargets: wikiTargetNames,
+                        mentionedTargets: mentionedTargets,
+                        fontSize: CGFloat(fontSize),
+                        lineSpacing: CGFloat(lineSpacing),
+                        horizontalInset: landscapeSideInset,
+                        fontCSSURL: webFontCSSURL,
+                        fontFamily: webFontFamily,
+                        livePreview: livePreview,
+                        backlinks: backlinks,
+                        twoHop: twoHop,
+                        footerLayout: backlinksLayout,
+                        bridge: webBridge,
+                        onLinkTap: onLinkTap,
+                        onFooterLayoutChange: { backlinksLayout = $0 }
+                    )
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if webBridge.isEditorFocused { webEditorToolbar }
                     }
                 }
                     .onChange(of: editingContent) { _, newVal in
@@ -521,8 +507,8 @@ struct NoteDetailView: View {
                                   matching: .images)
             }
 
-            // 新エディタでキーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
-            if !isLoading, !(useCodeMirror && webBridge.isEditorFocused) {
+            // キーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
+            if !isLoading, !webBridge.isEditorFocused {
                 EditorFooterBar(
                     folderLabel: currentFolderLabel,
                     createdText: DateDisplay.string(fromMs: createdMs),
@@ -542,9 +528,6 @@ struct NoteDetailView: View {
                     .onChange(of: geo.size) { _, newSize in editorSize = newSize }
             }
         )
-        // 旧エディタ: SwiftUI のキーボード回避（フレーム移動）を画面全体で抑止（インセットは自前管理）。
-        // 新エディタ: キーボード回避を活かし、safeAreaInset のツールバーをキーボード上に持ち上げる。
-        .ignoresSafeArea(.keyboard, edges: useCodeMirror ? [] : .bottom)
         .animation(.easeInOut(duration: 0.25), value: externalChangeAvailable)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)

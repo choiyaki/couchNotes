@@ -1,8 +1,8 @@
 {
-  "name": "couchnotes-webeditor-proto",
+  "name": "couchnotes-webeditor",
   "private": true,
   "version": "0.0.1",
-  "description": "couchNotes 用 CodeMirror エディタのプロトタイプビルド（Mac Catalyst 矢印キー／IME 検証用）",
+  "description": "couchNotes アプリ組み込み用 CodeMirror エディタのビルド",
   "scripts": {
     "build": "node esbuild.js"
   },

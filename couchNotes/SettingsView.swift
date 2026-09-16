@@ -56,15 +56,6 @@ struct SettingsView: View {
                         Label("URL スキーム", systemImage: "link")
                     }
                 }
-
-                // TEMP: CodeMirror(WKWebView)プロトタイプの検証用入り口。検証が終わったら削除する。
-                Section(footer: Text("Mac矢印キー・日本語IME検証用の実験画面。本編集画面とは未接続。")) {
-                    NavigationLink {
-                        CodeMirrorPrototypeView()
-                    } label: {
-                        Label("CodeMirror プロトタイプ", systemImage: "curlybraces")
-                    }
-                }
             }
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.inline)
@@ -189,7 +180,6 @@ struct SyncFolderSettingsView: View {
                     }
                 }
             }
-
             Section(footer: Text("フォルダはノートを作成した時点で実際に作られます。ここで作成した名前はフォルダの選択肢に加わり、同期オンになります。")) {
                 HStack {
                     TextField("新しいフォルダ名", text: $newFolder)
@@ -322,7 +312,6 @@ struct RandomNoteSettingsView: View {
 struct EditorSettingsView: View {
     @AppStorage("editor_fontSize")    private var fontSize:    Double = 16
     @AppStorage("editor_lineSpacing") private var lineSpacing: Double = 0
-    @AppStorage("editor_useCodeMirror") private var useCodeMirror = false
     @AppStorage("editor_webFontCSSURL") private var webFontCSSURL = ""
     @AppStorage("editor_webFontFamily") private var webFontFamily = ""
     @AppStorage("editor_livePreview") private var livePreview = true
@@ -343,30 +332,22 @@ struct EditorSettingsView: View {
             }
 
             Section(
-                footer: Text("新エディタ（CodeMirror）に切り替えます。Macの矢印キー・iPhoneの長押し選択の不具合が解消されます。問題があればオフで従来のエディタに戻せます（開き直しで反映）。")
+                footer: Text("カーソルのある行だけ記法（## や [[ ]] など）を表示し、他の行はプレビュー表示にします（Cosense 風）。")
             ) {
-                Toggle("新エディタを使う（ベータ）", isOn: $useCodeMirror)
+                Toggle("記法を隠す（ライブプレビュー）", isOn: $livePreview)
             }
 
-            if useCodeMirror {
-                Section(
-                    footer: Text("カーソルのある行だけ記法（## や [[ ]] など）を表示し、他の行はプレビュー表示にします（Cosense 風）。")
-                ) {
-                    Toggle("記法を隠す（ライブプレビュー）", isOn: $livePreview)
-                }
-
-                Section(
-                    header: Text("Web フォント（新エディタ）"),
-                    footer: Text("Google Fonts 等の CSS URL とフォント名を指定すると本文に適用されます。例: URL に https://fonts.googleapis.com/css2?family=Noto+Serif+JP&display=swap、フォント名に Noto Serif JP。空欄でシステムフォント。オフライン時は自動でシステムフォントに戻ります。")
-                ) {
-                    TextField("CSS の URL", text: $webFontCSSURL)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    TextField("フォント名（font-family）", text: $webFontFamily)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                }
+            Section(
+                header: Text("Web フォント"),
+                footer: Text("Google Fonts 等の CSS URL とフォント名を指定すると本文に適用されます。例: URL に https://fonts.googleapis.com/css2?family=Noto+Serif+JP&display=swap、フォント名に Noto Serif JP。空欄でシステムフォント。オフライン時は自動でシステムフォントに戻ります。")
+            ) {
+                TextField("CSS の URL", text: $webFontCSSURL)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("フォント名（font-family）", text: $webFontFamily)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
             }
         }
         .navigationTitle("エディタ")
@@ -419,12 +400,16 @@ struct ImageUploadSettingsView: View {
     }
 
     private func load() {
-        token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+        let stored = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
+        token = GyazoUploadService.normalizedToken(stored)
+        if token != stored {
+            KeychainManager.shared.save(key: GyazoUploadService.tokenKey, value: token)
+        }
     }
 
     private func save() {
-        KeychainManager.shared.save(key: GyazoUploadService.tokenKey,
-                                    value: token.trimmingCharacters(in: .whitespacesAndNewlines))
+        token = GyazoUploadService.normalizedToken(token)
+        KeychainManager.shared.save(key: GyazoUploadService.tokenKey, value: token)
         saved = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             saved = false
