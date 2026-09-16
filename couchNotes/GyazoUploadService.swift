@@ -91,9 +91,16 @@ enum GyazoUploadService {
         return name.lowercased()
     }
 
-    /// Gyazo が画像に付けた OCR テキスト（GET /api/images/:id の ocr.description）を返す。
-    /// 未処理・文字なし・自分の画像でない（404）場合は nil。
-    static func fetchOCR(imageId: String, token: String) async throws -> String? {
+    /// GET /api/images/:id から取り出す情報。
+    struct ImageInfo {
+        /// Gyazo が付けた OCR テキスト。未処理・文字なしは nil
+        var ocrText: String?
+        /// アップロード日時（解釈できなければ nil）
+        var createdAt: Date?
+    }
+
+    /// 画像の OCR テキストと作成日時を取得する。自分の画像でない（404）場合は nil。
+    static func fetchImageInfo(imageId: String, token: String) async throws -> ImageInfo? {
         let trimmed = normalizedToken(token)
         guard !trimmed.isEmpty else { throw GyazoUploadError.missingToken }
 
@@ -109,6 +116,23 @@ enum GyazoUploadService {
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         let ocr = json?["ocr"] as? [String: Any]
         let text = (ocr?["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return text.isEmpty ? nil : text
+        return ImageInfo(ocrText: text.isEmpty ? nil : text,
+                         createdAt: (json?["created_at"] as? String).flatMap(parseDate))
+    }
+
+    /// created_at は ISO 8601（"2014-05-21T14:24:30+0000" 等）。区切りの揺れも許す。
+    static func parseDate(_ string: String) -> Date? {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = iso.date(from: string) { return d }
+        iso.formatOptions = [.withInternetDateTime]
+        if let d = iso.date(from: string) { return d }
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        for format in ["yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd HH:mm:ssZ"] {
+            df.dateFormat = format
+            if let d = df.date(from: string) { return d }
+        }
+        return nil
     }
 }

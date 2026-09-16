@@ -34384,6 +34384,24 @@ ${fence}`;
     );
     pendingStyle.textContent = selectors.length ? `${selectors.join(",\n")} { content: "\u53D6\u308A\u8FBC\u307F\u4E2D\u2026"; }` : "";
   }
+  function insertImageAtCursor(view2, url, ocrPending) {
+    const { state } = view2;
+    const sel = state.selection.main;
+    const startLine = state.doc.lineAt(sel.from);
+    const endLine = state.doc.lineAt(sel.to);
+    const before = state.sliceDoc(startLine.from, sel.from).trim() !== "";
+    const after = state.sliceDoc(sel.to, endLine.to).trim() !== "";
+    const insert2 = (before ? "\n" : "") + `![](${url})` + (after ? "\n" : "");
+    view2.dispatch({
+      changes: { from: sel.from, to: sel.to, insert: insert2 },
+      selection: { anchor: sel.from + insert2.length },
+      userEvent: "input.paste"
+    });
+    if (ocrPending) {
+      pending.set(url, startLine.number + (before ? 1 : 0));
+      refreshPendingStyle();
+    }
+  }
   function applyOcrMessage(view2, msg) {
     const url = String(msg.url ?? "");
     const hint = pending.get(url) ?? 1;
@@ -35097,6 +35115,10 @@ ${fence}`;
         break;
       case "ocrResult":
         applyOcrMessage(view, msg);
+        break;
+      case "insertImage":
+        if (msg.url)
+          insertImageAtCursor(view, String(msg.url), !!msg.ocrPending);
         break;
       case "footer":
         setFooterData(msg.data ?? null);

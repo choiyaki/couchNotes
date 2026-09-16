@@ -71,6 +71,7 @@ struct NoteDetailView: View {
     // ピッカーの提示はフォーカス連動で消えるツールバーから切り離す（共有アルバム選択で
     // 親ビューごと破棄されて閉じるのを防ぐ）。提示元は常設の Group（下記）に置く。
     @State private var showPhotoPicker = false
+    @State private var showHandwriting = false
 
     @State private var content        = ""
     @State private var editingContent = ""
@@ -505,6 +506,10 @@ struct NoteDetailView: View {
                     .photosPicker(isPresented: $showPhotoPicker,
                                   selection: $photoPickerItem,
                                   matching: .images)
+                    // 手書きメモも同じ理由でここに置く（表示時の blur でツールバーごと消えるため）
+                    .fullScreenCover(isPresented: $showHandwriting) {
+                        HandwritingView { result in webBridge.insertHandwriting(result) }
+                    }
             }
 
             // キーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
@@ -652,6 +657,9 @@ struct NoteDetailView: View {
         HStack(spacing: 5) {
             webToolbarButton(systemImage: "clipboard") { webBridge.pasteFromClipboard() }
             webToolbarButton(systemImage: "photo.badge.plus") { showPhotoPicker = true }
+            #if !targetEnvironment(macCatalyst)
+            webToolbarButton(systemImage: "pencil.tip.crop.circle") { showHandwriting = true }
+            #endif
             webToolbarButton("[[ ]]") { webBridge.run("wikiLink") }
             webToolbarButton(systemImage: "checklist") { webBridge.run("listToggle") }
             webToolbarButton(systemImage: "arrow.up") { webBridge.run("moveLineUp") }

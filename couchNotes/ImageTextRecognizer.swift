@@ -2,9 +2,11 @@
 //  ImageTextRecognizer.swift
 //  couchNotes
 //
-//  画像内の文字を取り出す（エディタの「文字を取り込む」用）。
-//  1. Gyazo の画像なら、Gyazo が付けた OCR テキストを API で取得する
-//  2. Gyazo 以外の画像、または 1 が空・失敗なら、画像をダウンロードして端末の Vision で認識する
+//  画像内の文字を取り出す（エディタの「文字を取り込む」・手書きメモ用）。
+//  1. Gyazo の画像なら、Gyazo が付けた OCR テキストを API で取得する（精度が高いのでこちらが基本）。
+//     Gyazo の OCR はアップロード後しばらくしてから付くので、アップロード直後の画像は
+//     結果が出るまで数秒おきに問い合わせて待つ。
+//  2. Gyazo 以外の画像、または待っても空・失敗なら、端末の Vision で認識する
 //
 
 import Foundation
@@ -23,18 +25,43 @@ enum ImageTextRecognizerError: LocalizedError {
 }
 
 enum ImageTextRecognizer {
-    static func recognize(url: String) async throws -> String {
+    /// Gyazo の OCR を待つ最長時間と問い合わせ間隔
+    static let gyazoWaitLimit: TimeInterval = 30
+    static let gyazoPollInterval: UInt64 = 3_000_000_000
+    /// これより新しい Gyazo 画像は「OCR がまだ付いていないだけ」とみなして待つ
+    static let recentUploadWindow: TimeInterval = 180
+
+    /// - Parameters:
+    ///   - localImage: Vision に渡す画像（手書きメモの白地＋線だけの画像など）。nil なら url からダウンロード
+    ///   - justUploaded: いまアップロードした画像。作成日時に関わらず Gyazo の OCR を待つ
+    static func recognize(url: String, localImage: Data? = nil, justUploaded: Bool = false) async throws -> String {
         if let id = GyazoUploadService.imageId(from: url) {
             let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey) ?? ""
-            if !token.isEmpty,
-               let text = try? await GyazoUploadService.fetchOCR(imageId: id, token: token) {
+            if !token.isEmpty, let text = await gyazoText(imageId: id, token: token, justUploaded: justUploaded) {
                 return text
             }
         }
-        let data = try await download(url)
+        let data: Data
+        if let localImage { data = localImage } else { data = try await download(url) }
         let text = try await visionText(from: data)
         guard !text.isEmpty else { throw ImageTextRecognizerError.noText }
         return text
+    }
+
+    /// Gyazo の OCR テキスト。最近アップロードされた画像で未処理なら、上限時間まで待つ。
+    private static func gyazoText(imageId: String, token: String, justUploaded: Bool) async -> String? {
+        let deadline = Date().addingTimeInterval(gyazoWaitLimit)
+        while true {
+            guard let info = try? await GyazoUploadService.fetchImageInfo(imageId: imageId, token: token) else {
+                return nil   // 通信失敗・自分の画像でない → Vision へ
+            }
+            if let text = info.ocrText { return text }
+            let recent = justUploaded
+                || (info.createdAt.map { Date().timeIntervalSince($0) < recentUploadWindow } ?? false)
+            guard recent, Date() < deadline else { return nil }
+            try? await Task.sleep(nanoseconds: gyazoPollInterval)
+            if Task.isCancelled { return nil }
+        }
     }
 
     private static func download(_ urlString: String) async throws -> Data {

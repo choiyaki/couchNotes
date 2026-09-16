@@ -30,6 +30,27 @@ function refreshPendingStyle() {
     : "";
 }
 
+/** 手書きメモ（アップロード済み）をカーソル位置へ独立した行として挿入する。
+    ocrPending なら認識結果が届くまで「取り込み中…」を重ねる。フォーカス（キーボード）は動かさない。 */
+export function insertImageAtCursor(view: EditorView, url: string, ocrPending: boolean) {
+  const { state } = view;
+  const sel = state.selection.main;
+  const startLine = state.doc.lineAt(sel.from);
+  const endLine = state.doc.lineAt(sel.to);
+  const before = state.sliceDoc(startLine.from, sel.from).trim() !== "";
+  const after = state.sliceDoc(sel.to, endLine.to).trim() !== "";
+  const insert = (before ? "\n" : "") + `![](${url})` + (after ? "\n" : "");
+  view.dispatch({
+    changes: { from: sel.from, to: sel.to, insert },
+    selection: { anchor: sel.from + insert.length },
+    userEvent: "input.paste",
+  });
+  if (ocrPending) {
+    pending.set(url, startLine.number + (before ? 1 : 0));
+    refreshPendingStyle();
+  }
+}
+
 /** ネイティブからの ocrResult（text 無し＝失敗。エラー表示はネイティブ側が行う） */
 export function applyOcrMessage(view: EditorView, msg: { url?: string; text?: string }) {
   const url = String(msg.url ?? "");

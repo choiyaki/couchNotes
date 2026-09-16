@@ -12,7 +12,7 @@ import { imageField, refreshImageLayout } from "./images";
 import { clearTableMeasureCache } from "./table";
 import { blocksField } from "./blocks";
 import { ocrOpenField } from "./ocr";
-import { imageMenu, applyOcrMessage } from "./imagemenu";
+import { imageMenu, applyOcrMessage, insertImageAtCursor } from "./imagemenu";
 import {
   setWikiTargets,
   wikiTargetsField,
@@ -484,6 +484,10 @@ window.couchNotesReceive = (msg: any) => {
       break;
     case "ocrResult":
       applyOcrMessage(view, msg);
+      break;
+    case "insertImage":
+      // 手書きメモ（アップロード済み）の挿入
+      if (msg.url) insertImageAtCursor(view, String(msg.url), !!msg.ocrPending);
       break;
     case "footer":
       setFooterData((msg.data ?? null) as FooterData | null);

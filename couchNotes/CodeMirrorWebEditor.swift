@@ -78,6 +78,21 @@ final class WebEditorBridge: ObservableObject {
         }
     }
 
+    /// アップロード済みの手書きメモをカーソル位置へ挿入する。
+    /// OCR 有効時は裏で文字を認識し（Gyazo の OCR を待ち、だめなら Vision）、画像の直後へ ```ocr を入れる。
+    /// 文字が無い（絵だけのメモ）場合は何も入れず、アラートも出さない。
+    func insertHandwriting(_ result: HandwritingResult) {
+        send(["type": "insertImage", "url": result.url, "ocrPending": result.ocrImage != nil])
+        guard let ocrImage = result.ocrImage else { return }
+        Task { @MainActor in
+            let text = try? await ImageTextRecognizer.recognize(
+                url: result.url, localImage: ocrImage, justUploaded: true)
+            var payload: [String: Any] = ["type": "ocrResult", "url": result.url]
+            if let text { payload["text"] = text }
+            self.send(payload)
+        }
+    }
+
     /// Web 側 paste イベント発の画像（base64）をアップロードする。
     fileprivate func handleWebPaste(id: String, mime: String, base64: String, filename: String) {
         guard let data = Data(base64Encoded: base64) else {
