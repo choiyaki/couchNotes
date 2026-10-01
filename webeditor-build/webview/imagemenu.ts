@@ -6,6 +6,7 @@
 //   CM の DOM の外（document.body）に置くので、エディタの DOM 監視と干渉しない。
 // - 取り込み中の表示も CM 管理下の DOM を触らず、<style> の属性セレクタで画像に重ねる。
 import { EditorSelection } from "@codemirror/state";
+import { isCouchImgUrl } from "./images";
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { applyOcrResult, ocrBlockAfter } from "./ocr";
 
@@ -182,6 +183,19 @@ export function imageMenu(post: Post) {
           });
         }
         menu.appendChild(item);
+        // couchimg（自分のサーバー）の画像だけ: 公開・削除。確認はネイティブ側で出す
+        if (isCouchImgUrl(url)) {
+          for (const [label, type] of [["公開する…", "couchimgPublish"], ["サーバーから削除…", "couchimgDelete"]]) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.textContent = label;
+            b.addEventListener("click", () => {
+              this.close();
+              post({ type, url });
+            });
+            menu.appendChild(b);
+          }
+        }
         // メニュー操作でエディタのフォーカス（キーボード）を動かさない
         menu.addEventListener("mousedown", (e) => e.preventDefault());
         document.body.appendChild(menu);

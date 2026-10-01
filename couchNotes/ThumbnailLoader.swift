@@ -37,8 +37,8 @@ final class ThumbnailLoader {
         let task = Task<UIImage?, Never> { [weak self] in
             let img: UIImage?
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                img = UIImage(data: data)
+                // couchimg の非公開画像はトークンを付けて取る（それ以外の URL は従来どおり）
+                img = UIImage(data: try await CouchImgService.fetchImage(url).data)
             } catch {
                 img = nil
             }

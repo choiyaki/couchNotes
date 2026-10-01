@@ -17,8 +17,9 @@ class KeychainManager {
     private let defaultsPrefix = "cred_"
     private func defaultsKey(_ key: String) -> String { defaultsPrefix + key }
 
+    /// thisDeviceOnly は iOS 用の指定（Mac Catalyst は UserDefaults に置くので効かない）。
     @discardableResult
-    func save(key: String, value: String) -> Bool {
+    func save(key: String, value: String, thisDeviceOnly: Bool = false) -> Bool {
         UserDefaults.standard.set(value, forKey: defaultsKey(key))
         return true
     }
@@ -44,12 +45,17 @@ class KeychainManager {
     }
 
     /// 保存に成功したら true。失敗時は OSStatus をログに残す（無言失敗を避ける）。
+    /// thisDeviceOnly: 端末のバックアップや新しい端末への移行に載せない（couchimg のトークン用。
+    /// 端末をなくしたときにサーバー側で無効にすれば済むよう、複製を作らせない）。
     @discardableResult
-    func save(key: String, value: String) -> Bool {
+    func save(key: String, value: String, thisDeviceOnly: Bool = false) -> Bool {
         let data = value.data(using: .utf8)!
         SecItemDelete(baseQuery(key: key) as CFDictionary)
         var attributes = baseQuery(key: key)
         attributes[kSecValueData as String] = data
+        if thisDeviceOnly {
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
         let status = SecItemAdd(attributes as CFDictionary, nil)
         if status != errSecSuccess {
             syncLog.error("Keychain 保存に失敗 key=\(key, privacy: .public) status=\(status)")

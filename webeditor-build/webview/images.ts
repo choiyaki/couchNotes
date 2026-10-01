@@ -15,6 +15,21 @@ import { EditorState, Range, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
 import { livePreviewField, setLivePreview } from "./state";
 
+// couchimg（自分のサーバー）の画像。非公開画像は認証が要るが <img> はヘッダを付けられないので、
+// 表示のときだけ独自スキームに読み替え、ネイティブ側（CouchImgSchemeHandler）がトークンを付けて取りに行く。
+// ノート本文の URL は https のまま変えない。トークンは JS 側に渡らない。
+const COUCHIMG_RE = /^https:\/\/img\.choiyaki\.com\/([0-9a-f]{32}\.(?:jpg|png|webp|gif))$/i;
+
+export function isCouchImgUrl(url: string): boolean {
+  return COUCHIMG_RE.test(url);
+}
+
+/** <img> の src に入れる URL。couchimg の画像だけ couchimg:// に読み替える。 */
+export function displaySrc(url: string): string {
+  const m = COUCHIMG_RE.exec(url);
+  return m ? `couchimg://img/${m[1].toLowerCase()}` : url;
+}
+
 const PLACEHOLDER_HEIGHT = 200; // 実寸が分かるまでの予約高さ（native placeholderHeight と同値）
 const GAP = 6;                  // 行と画像・画像同士の間隔
 
@@ -167,7 +182,7 @@ export class InlineImageWidget extends WidgetType {
     if (this.href) wrap.setAttribute("data-href", this.href);
     wrap.setAttribute("data-url", this.url); // 長押しメニュー（imagemenu.ts）が対象画像を知るため
     const img = document.createElement("img");
-    img.src = this.url;
+    img.src = displaySrc(this.url);
     img.style.width = `${Math.round(this.w)}px`;
     img.style.height = `${Math.round(this.h)}px`;
     img.addEventListener("load", () => {
@@ -316,7 +331,7 @@ const imageOverlay = ViewPlugin.fromClass(
       while (kids.length < placed.length) {
         const img = document.createElement("img");
         img.addEventListener("load", () => {
-          const key = img.getAttribute("src") ?? "";
+          const key = img.dataset.cnUrl ?? ""; // 実寸は元の URL で覚える（src は読み替え後のことがある）
           if (!key || naturalSizes.has(key)) return;
           naturalSizes.set(key, { w: img.naturalWidth, h: img.naturalHeight });
           viewRef?.dispatch({ effects: imagesChanged.of() }); // 実寸で余白を作り直す
@@ -327,7 +342,10 @@ const imageOverlay = ViewPlugin.fromClass(
       for (let i = 0; i < placed.length; i++) {
         const img = kids[i] as HTMLImageElement;
         const p = placed[i];
-        if (img.getAttribute("src") !== p.url) img.setAttribute("src", p.url);
+        if (img.dataset.cnUrl !== p.url) {
+          img.dataset.cnUrl = p.url;
+          img.setAttribute("src", displaySrc(p.url));
+        }
         Object.assign(img.style, {
           position: "absolute",
           left: `${Math.round(p.x)}px`,

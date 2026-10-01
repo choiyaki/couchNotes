@@ -18275,6 +18275,14 @@
   }
 
   // webview/images.ts
+  var COUCHIMG_RE = /^https:\/\/img\.choiyaki\.com\/([0-9a-f]{32}\.(?:jpg|png|webp|gif))$/i;
+  function isCouchImgUrl(url) {
+    return COUCHIMG_RE.test(url);
+  }
+  function displaySrc(url) {
+    const m = COUCHIMG_RE.exec(url);
+    return m ? `couchimg://img/${m[1].toLowerCase()}` : url;
+  }
   var PLACEHOLDER_HEIGHT = 200;
   var GAP = 6;
   var IMG_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
@@ -18390,7 +18398,7 @@
         wrap.setAttribute("data-href", this.href);
       wrap.setAttribute("data-url", this.url);
       const img = document.createElement("img");
-      img.src = this.url;
+      img.src = displaySrc(this.url);
       img.style.width = `${Math.round(this.w)}px`;
       img.style.height = `${Math.round(this.h)}px`;
       img.addEventListener("load", () => {
@@ -18513,7 +18521,7 @@
         while (kids.length < placed.length) {
           const img = document.createElement("img");
           img.addEventListener("load", () => {
-            const key = img.getAttribute("src") ?? "";
+            const key = img.dataset.cnUrl ?? "";
             if (!key || naturalSizes.has(key))
               return;
             naturalSizes.set(key, { w: img.naturalWidth, h: img.naturalHeight });
@@ -18525,8 +18533,10 @@
         for (let i = 0; i < placed.length; i++) {
           const img = kids[i];
           const p = placed[i];
-          if (img.getAttribute("src") !== p.url)
-            img.setAttribute("src", p.url);
+          if (img.dataset.cnUrl !== p.url) {
+            img.dataset.cnUrl = p.url;
+            img.setAttribute("src", displaySrc(p.url));
+          }
           Object.assign(img.style, {
             position: "absolute",
             left: `${Math.round(p.x)}px`,
@@ -34527,6 +34537,18 @@ ${fence}`;
             });
           }
           menu.appendChild(item);
+          if (isCouchImgUrl(url)) {
+            for (const [label, type] of [["\u516C\u958B\u3059\u308B\u2026", "couchimgPublish"], ["\u30B5\u30FC\u30D0\u30FC\u304B\u3089\u524A\u9664\u2026", "couchimgDelete"]]) {
+              const b = document.createElement("button");
+              b.type = "button";
+              b.textContent = label;
+              b.addEventListener("click", () => {
+                this.close();
+                post({ type, url });
+              });
+              menu.appendChild(b);
+            }
+          }
           menu.addEventListener("mousedown", (e) => e.preventDefault());
           document.body.appendChild(menu);
           const margin = 8;

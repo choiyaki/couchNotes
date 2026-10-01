@@ -33,7 +33,7 @@ struct SettingsView: View {
                     NavigationLink {
                         ImageUploadSettingsView()
                     } label: {
-                        Label("画像アップロード（Gyazo）", systemImage: "photo")
+                        Label("画像アップロード", systemImage: "photo")
                     }
                     NavigationLink {
                         BackupSettingsView()
@@ -355,23 +355,107 @@ struct EditorSettingsView: View {
     }
 }
 
-// MARK: - 画像アップロード（Gyazo）
+// MARK: - 画像アップロード（Gyazo / couchimg）
 
 struct ImageUploadSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ImageUploader.backendKey) private var backend = ImageUploader.Backend.gyazo.rawValue
     @State private var token = ""
     @State private var saved = false
+
+    // couchimg の登録
+    @State private var pairCode = ""
+    @State private var adminCode = ""
+    @State private var isWorking = false
+    @State private var couchImgMessage: String?
+    @State private var registeredName = CouchImgService.deviceName
+    @State private var hasAdmin = CouchImgService.hasAdminToken
+    @State private var confirmForget = false
 
     var body: some View {
         Form {
             Section(
+                header: Text("アップロード先"),
+                footer: Text("写真ボタン・ペースト・手書きメモの画像を上げる先です。問題が出たら Gyazo に戻せます。すでにノートに貼ってある画像は、どちらを選んでも表示されます。")
+            ) {
+                Picker("アップロード先", selection: $backend) {
+                    Text("Gyazo").tag(ImageUploader.Backend.gyazo.rawValue)
+                    Text("couchimg（自分のサーバー）").tag(ImageUploader.Backend.couchimg.rawValue)
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+
+            Section(
+                header: Text("couchimg: この端末の登録"),
+                footer: Text("サーバーで couchimg-token pair <端末名> を実行すると出る8文字の登録コードを入力します（5分・1回だけ有効）。アップロードした画像は、最初はすべて非公開です。")
+            ) {
+                if let registeredName {
+                    LabeledContent("登録済みの端末名", value: registeredName)
+                    Button("登録がまだ有効か確かめる") { run { try await CouchImgService.checkRegistration(); return "登録は有効です。" } }
+                    Button("この端末の登録を消す", role: .destructive) { confirmForget = true }
+                } else {
+                    Text("未登録").foregroundStyle(.secondary)
+                }
+                TextField("登録コード（例: ABCD-EFGH）", text: $pairCode)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.characters)
+                Button(registeredName == nil ? "登録する" : "登録し直す") {
+                    run {
+                        let name = try await CouchImgService.pair(code: pairCode)
+                        pairCode = ""
+                        registeredName = name
+                        return "「\(name)」として登録しました。"
+                    }
+                }
+                .disabled(pairCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+            }
+
+            Section(
+                header: Text("couchimg: 管理用の登録（公開・削除）"),
+                footer: Text("画像の公開と削除は、WireGuard を繋いでいるときだけ使えます。WireGuard を繋いだ状態で、サーバーで couchimg-token admin-pair <端末名> を実行して出たコードを入力します。")
+            ) {
+                LabeledContent("管理用の登録", value: hasAdmin ? "済み" : "なし")
+                TextField("管理用の登録コード", text: $adminCode)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.characters)
+                Button("管理用の登録をする") {
+                    run {
+                        try await CouchImgService.pairAdmin(code: adminCode)
+                        adminCode = ""
+                        hasAdmin = true
+                        return "管理用の登録をしました。"
+                    }
+                }
+                .disabled(adminCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+            }
+
+            Section(
                 header: Text("Gyazo アクセストークン"),
-                footer: Text("キーボードの写真ボタンから画像を Gyazo にアップロードして挿入します。トークンは https://gyazo.com/oauth/applications で取得できます。")
+                footer: Text("トークンは https://gyazo.com/oauth/applications で取得できます。右上の「保存」で保存します。")
             ) {
                 SecureField("アクセストークン", text: $token)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
             }
+        }
+        .alert("couchimg", isPresented: Binding(
+            get: { couchImgMessage != nil },
+            set: { if !$0 { couchImgMessage = nil } }
+        )) {
+            Button("OK") { couchImgMessage = nil }
+        } message: {
+            Text(couchImgMessage ?? "")
+        }
+        .alert("この端末の登録を消しますか？", isPresented: $confirmForget) {
+            Button("消す", role: .destructive) {
+                CouchImgService.forgetRegistration()
+                registeredName = nil
+                hasAdmin = false
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("この端末に保存したトークンを消します。サーバー側でも無効にするには、サーバーで couchimg-token revoke <端末名> を実行してください。")
         }
         .navigationTitle("画像アップロード")
         .navigationBarTitleDisplayMode(.inline)
@@ -397,6 +481,15 @@ struct ImageUploadSettingsView: View {
             }
         }
         .animation(.easeInOut, value: saved)
+    }
+
+    /// couchimg への操作を実行し、結果（成功の文言かエラー）を表示する。
+    private func run(_ work: @escaping () async throws -> String) {
+        isWorking = true
+        Task { @MainActor in
+            defer { isWorking = false }
+            do { couchImgMessage = try await work() } catch { couchImgMessage = error.localizedDescription }
+        }
     }
 
     private func load() {

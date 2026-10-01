@@ -91,6 +91,9 @@ struct NoteDetailView: View {
     @State private var isRefreshing   = false
     @State private var saveStatus: SaveStatus = .idle
     @State private var errorMessage: String? = nil
+    // couchimg の画像の「公開する」「サーバーから削除」（長押しメニュー → 確認 → 結果）
+    @State private var pendingImageAction: ImageAction? = nil
+    @State private var imageNotice: String? = nil
     @State private var hasUnsavedChanges     = false
 
     // 外部更新バナー用
@@ -511,7 +514,7 @@ struct NoteDetailView: View {
                                   matching: .images)
                     // 手書きメモも同じ理由でここに置く（表示時の blur でツールバーごと消えるため）
                     .fullScreenCover(isPresented: $showHandwriting) {
-                        HandwritingView { result in webBridge.insertHandwriting(result) }
+                        HandwritingView(notePath: displayPath ?? noteId) { result in webBridge.insertHandwriting(result) }
                     }
             }
 
@@ -561,6 +564,10 @@ struct NoteDetailView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        // couchimg の画像の公開・削除の確認と結果（本体の式を軽くするため別の modifier に分けてある）
+        .modifier(CouchImgActionAlerts(pending: $pendingImageAction, notice: $imageNotice) { action in
+            Task { await performImageAction(action) }
+        })
         // 削除確認。Mac Catalyst では confirmationDialog が popover 表示になり
         // クラッシュの前歴があるため alert を使う。
         .alert("「\(navTitle)」を削除しますか？", isPresented: $showDeleteConfirm) {
@@ -631,6 +638,8 @@ struct NoteDetailView: View {
             SyncEngine.shared.activeNoteId = noteId
             titleDraft = navTitle
             webBridge.onError = { message in errorMessage = message }
+            webBridge.notePath = displayPath ?? noteId
+            webBridge.onImageAction = { action in pendingImageAction = action }
             webBridge.onReady = { consumePendingHandwriting() }
             await loadContent()
             await loadBacklinks()
@@ -716,13 +725,30 @@ struct NoteDetailView: View {
         .contentShape(Rectangle())
     }
 
-    /// 写真ピッカーで選ばれた画像を Gyazo にアップロードして挿入する。
+    /// 写真ピッカーで選ばれた画像をアップロードして挿入する。
     /// アプリの外から始めた手書きメモ（HandwritingInbox）がこのノート宛てなら、エディタ経由で末尾へ挿入する。
     /// 本文を直接書き換えないので、編集中の内容・保存フローと衝突しない。
     private func consumePendingHandwriting() {
         guard isOnScreen, webBridge.isReady,
               let result = handwritingInbox.takePendingInsert(for: noteId) else { return }
         webBridge.insertHandwriting(result, atEnd: true)
+    }
+
+    /// couchimg の画像を公開・削除する（WireGuard を繋いでいるときだけ届く）。
+    private func performImageAction(_ action: ImageAction) async {
+        do {
+            switch action.kind {
+            case .publish:
+                try await CouchImgService.publish(urlString: action.url)
+                imageNotice = "公開しました。"
+            case .delete:
+                try await CouchImgService.delete(urlString: action.url)
+                imageNotice = "サーバーから削除しました。ノートに残っている画像の行は、必要なら手で消してください。"
+            }
+            CouchImgSchemeHandler.forget(urlString: action.url)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func uploadPickedPhoto(_ item: PhotosPickerItem) async {
@@ -1325,5 +1351,44 @@ struct FolderPickerView: View {
                 }
             }
         }
+    }
+}
+
+/// couchimg の画像の「公開する」「サーバーから削除」の確認と、結果の表示。
+/// 公開は取り消せないので、必ず確かめてから実行する。
+private struct CouchImgActionAlerts: ViewModifier {
+    @Binding var pending: ImageAction?
+    @Binding var notice: String?
+    let perform: (ImageAction) -> Void
+
+    private var title: String {
+        pending?.kind == .publish ? "この画像を公開しますか？" : "この画像をサーバーから削除しますか？"
+    }
+
+    private func message(_ action: ImageAction) -> String {
+        action.kind == .publish
+            ? "公開すると、URL を知っている人は誰でも見られるようになります。公開は取り消せません（サーバーから削除することはできます）。"
+            : "サーバーから画像が消え、この URL では表示できなくなります。元に戻せません。ノートの本文は変わりません。"
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .alert(title, isPresented: Binding(
+                get: { pending != nil },
+                set: { if !$0 { pending = nil } }
+            ), presenting: pending) { action in
+                Button(action.kind == .publish ? "公開する" : "削除する", role: .destructive) { perform(action) }
+                Button("キャンセル", role: .cancel) {}
+            } message: { action in
+                Text(message(action))
+            }
+            .alert("画像", isPresented: Binding(
+                get: { notice != nil },
+                set: { if !$0 { notice = nil } }
+            )) {
+                Button("OK") { notice = nil }
+            } message: {
+                Text(notice ?? "")
+            }
     }
 }

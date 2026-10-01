@@ -23,6 +23,11 @@ final class WebEditorBridge: ObservableObject {
     /// アップロード失敗など、ユーザーへ見せたいエラー。
     var onError: ((String) -> Void)?
 
+    /// いま開いているノートのパス。couchimg へのアップロードに「どのノートから上げたか」の手がかりとして添える。
+    var notePath: String?
+    /// 画像の長押しメニューからの「公開する」「サーバーから削除」。確認は画面側（NoteDetailView）で出す。
+    var onImageAction: ((ImageAction) -> Void)?
+
     /// エディタが初期本文を受け取り、挿入などの操作を受け付けられる状態か。
     private(set) var isReady = false
     /// isReady になった時に呼ばれる（外部から始めた手書きメモの挿入待ちを流す用）。
@@ -54,7 +59,7 @@ final class WebEditorBridge: ObservableObject {
         send(["type": "insertText", "text": text])
     }
 
-    /// ツールバーの「ペースト」。画像優先で Gyazo にアップロードし、テキストはそのまま挿入する。
+    /// ツールバーの「ペースト」。画像優先でアップロードし、テキストはそのまま挿入する。
     func pasteFromClipboard() {
         if UIPasteboard.general.hasImages, let image = UIPasteboard.general.image,
            let data = image.jpegData(compressionQuality: 0.9) {
@@ -64,21 +69,21 @@ final class WebEditorBridge: ObservableObject {
         }
     }
 
-    /// 画像データを Gyazo にアップロードして ![](url) を挿入する（写真ボタン・ペースト共通）。
+    /// 画像データをアップロードして ![](url) を挿入する（写真ボタン・ペースト共通）。
+    /// アップロード先は設定で切り替える（Gyazo / couchimg）。
     /// プレースホルダを即挿入し、完了後に URL へ置換する（既存 UX と同じ）。
     func uploadImage(data: Data, mime: String, filename: String) {
-        let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else {
-            onError?("Gyazo アクセストークンが未設定です。設定 →「画像アップロード（Gyazo）」で登録してください。")
+        if let message = ImageUploader.notReadyMessage() {
+            onError?(message)
             return
         }
+        let notePath = notePath
         webView?.evaluateJavaScript("window.couchNotesInsertPlaceholder();") { [weak self] result, _ in
             guard let self, let id = result as? String else { return }
             Task { @MainActor in
                 do {
-                    let url = try await GyazoUploadService.upload(
-                        imageData: data, filename: filename, mimeType: mime, token: token)
+                    let url = try await ImageUploader.upload(
+                        imageData: data, filename: filename, mimeType: mime, notePath: notePath)
                     self.send(["type": "pasteResult", "id": id, "url": url])
                 } catch {
                     self.send(["type": "pasteResult", "id": id])   // プレースホルダ除去
@@ -109,17 +114,16 @@ final class WebEditorBridge: ObservableObject {
             send(["type": "pasteResult", "id": id])
             return
         }
-        let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else {
+        if let message = ImageUploader.notReadyMessage() {
             send(["type": "pasteResult", "id": id])
-            onError?("Gyazo アクセストークンが未設定です。設定 →「画像アップロード（Gyazo）」で登録してください。")
+            onError?(message)
             return
         }
+        let notePath = notePath
         Task { @MainActor in
             do {
-                let url = try await GyazoUploadService.upload(
-                    imageData: data, filename: filename, mimeType: mime, token: token)
+                let url = try await ImageUploader.upload(
+                    imageData: data, filename: filename, mimeType: mime, notePath: notePath)
                 send(["type": "pasteResult", "id": id, "url": url])
             } catch {
                 send(["type": "pasteResult", "id": id])
@@ -127,6 +131,14 @@ final class WebEditorBridge: ObservableObject {
             }
         }
     }
+}
+
+/// 画像の長押しメニューから頼まれた、サーバー側の操作（couchimg の画像だけ）。
+struct ImageAction: Identifiable {
+    enum Kind { case publish, delete }
+    let kind: Kind
+    let url: String
+    var id: String { "\(kind)-\(url)" }
 }
 
 /// ブロック参照リンク（[[ページ#^ID]]）の遷移後スクロール先。
@@ -223,6 +235,8 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.userContentController.add(context.coordinator, name: "couchNotes")
+        // couchimg の画像は、表示のときだけ couchimg:// に読み替えて、ネイティブ側がトークンを付けて取りに行く
+        config.setURLSchemeHandler(CouchImgSchemeHandler(), forURLScheme: CouchImgService.scheme)
         // ページ自身のどのスクリプト（webview.js）よりも先に、本文・余白・文字サイズ等の
         // 初期値を window.__couchNotesInit として注入する。WKWebView 標準の仕組みなので
         // ファイル書き込み・loadHTMLString は不要で、通常の loadFileURL のまま使える。
@@ -524,6 +538,12 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                         parent.bridge?.onError?(error.localizedDescription)
                     }
                 }
+
+            case "couchimgPublish", "couchimgDelete":
+                // 画像の長押しメニューから。確認は画面側で出す（公開は取り消せないため）
+                guard let url = body["url"] as? String, CouchImgService.imageId(from: url) != nil else { return }
+                parent.bridge?.onImageAction?(
+                    ImageAction(kind: type == "couchimgPublish" ? .publish : .delete, url: url))
 
             case "copy":
                 // WKWebView（Mac Catalyst）は clipboardData 経由のコピーがシステムの

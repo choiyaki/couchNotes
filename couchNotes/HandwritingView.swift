@@ -21,6 +21,8 @@ struct HandwritingResult {
 }
 
 struct HandwritingView: View {
+    /// 貼り先のノートのパス（couchimg へのアップロードに手がかりとして添える。分からなければ nil）
+    var notePath: String? = nil
     var onComplete: (HandwritingResult) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -139,17 +141,15 @@ struct HandwritingView: View {
               let output = HandwritingExporter.export(drawing: canvas.drawing,
                                                       width: canvas.bounds.width,
                                                       paper: paper) else { return }
-        let token = KeychainManager.shared.load(key: GyazoUploadService.tokenKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else {
-            uploadError = "Gyazo アクセストークンが未設定です。設定 →「画像アップロード（Gyazo）」で登録してください。"
+        if let message = ImageUploader.notReadyMessage() {
+            uploadError = message
             return
         }
         isUploading = true
         defer { isUploading = false }
         do {
-            let url = try await GyazoUploadService.upload(
-                imageData: output.png, filename: "handwriting.png", mimeType: "image/png", token: token)
+            let url = try await ImageUploader.upload(
+                imageData: output.png, filename: "handwriting.png", mimeType: "image/png", notePath: notePath)
             onComplete(HandwritingResult(url: url, ocrImage: ocrEnabled ? output.ocrImage : nil))
             dismiss()
         } catch {

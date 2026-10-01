@@ -66,8 +66,8 @@ enum ImageTextRecognizer {
 
     private static func download(_ urlString: String) async throws -> Data {
         guard let url = URL(string: urlString) else { throw ImageTextRecognizerError.downloadFailed }
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else {
+        // couchimg の非公開画像はトークンを付けて取る（それ以外の URL は従来どおり）
+        guard let data = try? await CouchImgService.fetchImage(url).data else {
             throw ImageTextRecognizerError.downloadFailed
         }
         return data

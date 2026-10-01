@@ -13,6 +13,13 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- couchimg の公開・削除は WireGuard のトンネルの中の口（http://10.9.0.10:8751）へ送る。
+		     トンネルが暗号化するので平文の HTTP。IP アドレス宛てのローカル通信だけを許可する -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>手書きメモを写真アプリに保存するために使用します。</string>
 	<key>UIApplicationShortcutItems</key>

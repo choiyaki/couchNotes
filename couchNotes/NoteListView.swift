@@ -381,7 +381,7 @@ struct NoteListView: View {
         }
         // アプリの外（couchnotes://handwrite・ホーム画面メニュー）から始める手書きメモ
         .fullScreenCover(item: $handwritingInbox.captureRequest) { request in
-            HandwritingView { result in
+            HandwritingView(notePath: request.path) { result in
                 Task { await URLActionRouter.shared.openForHandwriting(result, path: request.path) }
             }
         }
