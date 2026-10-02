@@ -50,6 +50,16 @@ final class CouchImgServiceTests: XCTestCase {
         }
     }
 
+    // MARK: - 公開状態
+
+    func testPublicIsReadFromCacheControl() {
+        XCTAssertTrue(CouchImgService.isPublicCacheControl("public, max-age=31536000, immutable"))
+        XCTAssertTrue(CouchImgService.isPublicCacheControl("max-age=60, Public"))
+        XCTAssertFalse(CouchImgService.isPublicCacheControl("private, no-store"))
+        XCTAssertFalse(CouchImgService.isPublicCacheControl("no-store, x-public-ish"))
+        XCTAssertFalse(CouchImgService.isPublicCacheControl(nil))
+    }
+
     // MARK: - ノートのパス
 
     func testNotePathIsPercentEncodedASCII() {

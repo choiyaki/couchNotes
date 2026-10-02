@@ -8,7 +8,7 @@ import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown, undo, 
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
-import { imageField, refreshImageLayout } from "./images";
+import { imageField, refreshImageLayout, setImagePublic } from "./images";
 import { clearTableMeasureCache } from "./table";
 import { blocksField } from "./blocks";
 import { ocrOpenField } from "./ocr";
@@ -484,6 +484,10 @@ window.couchNotesReceive = (msg: any) => {
       break;
     case "ocrResult":
       applyOcrMessage(view, msg);
+      break;
+    case "imageVisibility":
+      // couchimg の画像が公開されているか（公開画像に枠を付ける）
+      if (msg.url) setImagePublic(String(msg.url), !!msg.public);
       break;
     case "insertImage":
       // 手書きメモ（アップロード済み）の挿入

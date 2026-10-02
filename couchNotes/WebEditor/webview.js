@@ -18283,6 +18283,29 @@
     const m = COUCHIMG_RE.exec(url);
     return m ? `couchimg://img/${m[1].toLowerCase()}` : url;
   }
+  var publicImages = /* @__PURE__ */ new Set();
+  var publicStyle = null;
+  function isPublicImage(url) {
+    return publicImages.has(url.toLowerCase());
+  }
+  function setImagePublic(url, isPublic) {
+    const key = url.toLowerCase();
+    if (!isCouchImgUrl(key) || publicImages.has(key) === isPublic)
+      return;
+    if (isPublic)
+      publicImages.add(key);
+    else
+      publicImages.delete(key);
+    if (!publicStyle) {
+      publicStyle = document.createElement("style");
+      document.head.appendChild(publicStyle);
+    }
+    const selectors = [...publicImages].flatMap((u) => [
+      `.cm-cn-inline-img[data-url="${u}" i] img`,
+      `.cm-cn-image-overlay img[data-cn-url="${u}" i]`
+    ]);
+    publicStyle.textContent = selectors.length ? `${selectors.join(",\n")} { outline: 2px solid var(--cn-public-img-outline); outline-offset: -2px; }` : "";
+  }
   var PLACEHOLDER_HEIGHT = 200;
   var GAP = 6;
   var IMG_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
@@ -34425,23 +34448,25 @@ ${fence}`;
   function imageMenu(post) {
     return ViewPlugin.fromClass(
       class {
+        // メニューを出した長押しの指がまだ離れていない
         constructor(view2) {
           this.view = view2;
           const c = view2.contentDOM;
           c.addEventListener("touchstart", this.onTouchStart, { passive: true });
           c.addEventListener("touchmove", this.onTouchMove, { passive: true });
           c.addEventListener("touchend", this.onTouchEnd, { passive: false });
-          c.addEventListener("touchcancel", this.cancelTimer, { passive: true });
+          c.addEventListener("touchcancel", this.onTouchCancel, { passive: true });
           c.addEventListener("contextmenu", this.onContextMenu);
           document.addEventListener("mousedown", this.onOutside, true);
           document.addEventListener("touchstart", this.onOutside, true);
-          view2.scrollDOM.addEventListener("scroll", this.close, { passive: true });
+          view2.scrollDOM.addEventListener("wheel", this.close, { passive: true });
         }
         menu = null;
         timer = null;
         startX = 0;
         startY = 0;
         swallowTouchEnd = false;
+        pressing = false;
         update(u) {
           if (u.docChanged)
             this.close();
@@ -34451,11 +34476,11 @@ ${fence}`;
           c.removeEventListener("touchstart", this.onTouchStart);
           c.removeEventListener("touchmove", this.onTouchMove);
           c.removeEventListener("touchend", this.onTouchEnd);
-          c.removeEventListener("touchcancel", this.cancelTimer);
+          c.removeEventListener("touchcancel", this.onTouchCancel);
           c.removeEventListener("contextmenu", this.onContextMenu);
           document.removeEventListener("mousedown", this.onOutside, true);
           document.removeEventListener("touchstart", this.onOutside, true);
-          this.view.scrollDOM.removeEventListener("scroll", this.close);
+          this.view.scrollDOM.removeEventListener("wheel", this.close);
           this.cancelTimer();
           this.close();
         }
@@ -34474,6 +34499,7 @@ ${fence}`;
           this.timer = setTimeout(() => {
             this.timer = null;
             this.swallowTouchEnd = true;
+            this.pressing = true;
             this.open(wrap, this.startX, this.startY);
           }, LONG_PRESS_MS);
         };
@@ -34487,10 +34513,17 @@ ${fence}`;
         };
         onTouchEnd = (e) => {
           this.cancelTimer();
+          this.pressing = false;
           if (this.swallowTouchEnd) {
             this.swallowTouchEnd = false;
             e.preventDefault();
           }
+        };
+        // 長押しを続けて iOS に操作を引き取られると touchend は来ない。印を残すと次のタップが効かなくなる
+        onTouchCancel = () => {
+          this.cancelTimer();
+          this.pressing = false;
+          this.swallowTouchEnd = false;
         };
         onContextMenu = (e) => {
           const wrap = this.imageAt(e.target);
@@ -34500,6 +34533,8 @@ ${fence}`;
           this.open(wrap, e.clientX, e.clientY);
         };
         onOutside = (e) => {
+          if (this.pressing && e.type === "mousedown")
+            return;
           if (this.menu && !this.menu.contains(e.target))
             this.close();
         };
@@ -34541,11 +34576,16 @@ ${fence}`;
             for (const [label, type] of [["\u516C\u958B\u3059\u308B\u2026", "couchimgPublish"], ["\u30B5\u30FC\u30D0\u30FC\u304B\u3089\u524A\u9664\u2026", "couchimgDelete"]]) {
               const b = document.createElement("button");
               b.type = "button";
-              b.textContent = label;
-              b.addEventListener("click", () => {
-                this.close();
-                post({ type, url });
-              });
+              if (type === "couchimgPublish" && isPublicImage(url)) {
+                b.textContent = "\u516C\u958B\u4E2D";
+                b.disabled = true;
+              } else {
+                b.textContent = label;
+                b.addEventListener("click", () => {
+                  this.close();
+                  post({ type, url });
+                });
+              }
               menu.appendChild(b);
             }
           }
@@ -35139,6 +35179,10 @@ ${fence}`;
         break;
       case "ocrResult":
         applyOcrMessage(view, msg);
+        break;
+      case "imageVisibility":
+        if (msg.url)
+          setImagePublic(String(msg.url), !!msg.public);
         break;
       case "insertImage":
         if (msg.url)

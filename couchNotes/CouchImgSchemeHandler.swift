@@ -22,7 +22,10 @@ final class CouchImgSchemeHandler: NSObject, WKURLSchemeHandler {
     private final class CachedImage {
         let data: Data
         let mimeType: String
-        init(data: Data, mimeType: String) { self.data = data; self.mimeType = mimeType }
+        let isPublic: Bool
+        init(data: Data, mimeType: String, isPublic: Bool) {
+            self.data = data; self.mimeType = mimeType; self.isPublic = isPublic
+        }
     }
 
     /// 進行中の要求。中止された要求に応答を返すと WebKit が例外を出すので、返す前に必ず確かめる。
@@ -42,6 +45,7 @@ final class CouchImgSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         if let hit = Self.cache.object(forKey: remote as NSURL) {
             respond(urlSchemeTask, url: requestURL, data: hit.data, mimeType: hit.mimeType)
+            Self.notifyVisibility(webView, remote: remote, isPublic: hit.isPublic)
             return
         }
         let key = ObjectIdentifier(urlSchemeTask)
@@ -52,10 +56,21 @@ final class CouchImgSchemeHandler: NSObject, WKURLSchemeHandler {
                 urlSchemeTask.didFailWithError(URLError(.resourceUnavailable))
                 return
             }
-            Self.cache.setObject(CachedImage(data: result.data, mimeType: result.mimeType),
-                                 forKey: remote as NSURL, cost: result.data.count)
+            Self.cache.setObject(
+                CachedImage(data: result.data, mimeType: result.mimeType, isPublic: result.isPublic),
+                forKey: remote as NSURL, cost: result.data.count)
             self.respond(urlSchemeTask, url: requestURL, data: result.data, mimeType: result.mimeType)
+            Self.notifyVisibility(webView, remote: remote, isPublic: result.isPublic)
         }
+    }
+
+    /// 画像が公開されているかを編集画面へ知らせる（公開画像に枠を付け、メニューを「公開中」にするため）。
+    /// 知らせるのは画像の URL と公開状態だけ。
+    private static func notifyVisibility(_ webView: WKWebView, remote: URL, isPublic: Bool) {
+        let payload: [String: Any] = ["type": "imageVisibility", "url": remote.absoluteString, "public": isPublic]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.couchNotesReceive(\(json));")
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {

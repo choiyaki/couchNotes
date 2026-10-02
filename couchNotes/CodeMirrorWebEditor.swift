@@ -93,6 +93,11 @@ final class WebEditorBridge: ObservableObject {
         }
     }
 
+    /// 画像を公開した直後に、編集画面の表示（公開画像の枠・メニューの「公開中」）を更新する。
+    func markImagePublic(url: String) {
+        send(["type": "imageVisibility", "url": url, "public": true])
+    }
+
     /// アップロード済みの手書きメモをカーソル位置（atEnd なら本文末尾）へ挿入する。
     /// OCR 有効時は裏で文字を認識し（Gyazo の OCR を待ち、だめなら Vision）、画像の直後へ ```ocr を入れる。
     /// 文字が無い（絵だけのメモ）場合は何も入れず、アラートも出さない。

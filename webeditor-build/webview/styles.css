@@ -14,6 +14,8 @@
   --cn-font-size: 16px;
   --cn-line-height: 1.45em;
   --cn-padding-h: 16px;
+  /* 公開されている画像（couchimg）の枠の色。枠を付ける対象は images.ts が決める */
+  --cn-public-img-outline: light-dark(#34c759, #30d158);
 }
 
 html,

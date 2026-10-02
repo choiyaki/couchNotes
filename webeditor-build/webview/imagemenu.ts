@@ -6,7 +6,7 @@
 //   CM の DOM の外（document.body）に置くので、エディタの DOM 監視と干渉しない。
 // - 取り込み中の表示も CM 管理下の DOM を触らず、<style> の属性セレクタで画像に重ねる。
 import { EditorSelection } from "@codemirror/state";
-import { isCouchImgUrl } from "./images";
+import { isCouchImgUrl, isPublicImage } from "./images";
 import { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { applyOcrResult, ocrBlockAfter } from "./ocr";
 
@@ -72,17 +72,21 @@ export function imageMenu(post: Post) {
       startX = 0;
       startY = 0;
       swallowTouchEnd = false;
+      pressing = false; // メニューを出した長押しの指がまだ離れていない
 
       constructor(readonly view: EditorView) {
         const c = view.contentDOM;
         c.addEventListener("touchstart", this.onTouchStart, { passive: true });
         c.addEventListener("touchmove", this.onTouchMove, { passive: true });
         c.addEventListener("touchend", this.onTouchEnd, { passive: false });
-        c.addEventListener("touchcancel", this.cancelTimer, { passive: true });
+        c.addEventListener("touchcancel", this.onTouchCancel, { passive: true });
         c.addEventListener("contextmenu", this.onContextMenu);
         document.addEventListener("mousedown", this.onOutside, true);
         document.addEventListener("touchstart", this.onOutside, true);
-        view.scrollDOM.addEventListener("scroll", this.close, { passive: true });
+        // scroll では閉じない: 長押しを続けると iOS がカーソルを画像の行へ動かし、追従スクロールで
+        // 出したばかりのメニューが消えてしまう。指でのスクロールは touchstart（onOutside）で閉じるので、
+        // ここで拾うのは Mac のホイール・トラックパッドだけでよい。
+        view.scrollDOM.addEventListener("wheel", this.close, { passive: true });
       }
 
       update(u: ViewUpdate) {
@@ -94,11 +98,11 @@ export function imageMenu(post: Post) {
         c.removeEventListener("touchstart", this.onTouchStart);
         c.removeEventListener("touchmove", this.onTouchMove);
         c.removeEventListener("touchend", this.onTouchEnd);
-        c.removeEventListener("touchcancel", this.cancelTimer);
+        c.removeEventListener("touchcancel", this.onTouchCancel);
         c.removeEventListener("contextmenu", this.onContextMenu);
         document.removeEventListener("mousedown", this.onOutside, true);
         document.removeEventListener("touchstart", this.onOutside, true);
-        this.view.scrollDOM.removeEventListener("scroll", this.close);
+        this.view.scrollDOM.removeEventListener("wheel", this.close);
         this.cancelTimer();
         this.close();
       }
@@ -117,6 +121,7 @@ export function imageMenu(post: Post) {
         this.timer = setTimeout(() => {
           this.timer = null;
           this.swallowTouchEnd = true; // 指を離した時にカーソル配置・タップ処理を起こさせない
+          this.pressing = true;
           this.open(wrap, this.startX, this.startY);
         }, LONG_PRESS_MS);
       };
@@ -131,10 +136,18 @@ export function imageMenu(post: Post) {
 
       onTouchEnd = (e: TouchEvent) => {
         this.cancelTimer();
+        this.pressing = false;
         if (this.swallowTouchEnd) {
           this.swallowTouchEnd = false;
           e.preventDefault();
         }
+      };
+
+      // 長押しを続けて iOS に操作を引き取られると touchend は来ない。印を残すと次のタップが効かなくなる
+      onTouchCancel = () => {
+        this.cancelTimer();
+        this.pressing = false;
+        this.swallowTouchEnd = false;
       };
 
       onContextMenu = (e: MouseEvent) => {
@@ -145,6 +158,8 @@ export function imageMenu(post: Post) {
       };
 
       onOutside = (e: Event) => {
+        // メニューを出した長押しの最中に来る mousedown では閉じない（同じ指の操作なので）
+        if (this.pressing && e.type === "mousedown") return;
         if (this.menu && !this.menu.contains(e.target as Node)) this.close();
       };
 
@@ -188,11 +203,17 @@ export function imageMenu(post: Post) {
           for (const [label, type] of [["公開する…", "couchimgPublish"], ["サーバーから削除…", "couchimgDelete"]]) {
             const b = document.createElement("button");
             b.type = "button";
-            b.textContent = label;
-            b.addEventListener("click", () => {
-              this.close();
-              post({ type, url });
-            });
+            if (type === "couchimgPublish" && isPublicImage(url)) {
+              // 公開は一方通行なので、公開済みなら状態を見せるだけ
+              b.textContent = "公開中";
+              b.disabled = true;
+            } else {
+              b.textContent = label;
+              b.addEventListener("click", () => {
+                this.close();
+                post({ type, url });
+              });
+            }
             menu.appendChild(b);
           }
         }

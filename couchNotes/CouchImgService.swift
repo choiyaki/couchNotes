@@ -219,12 +219,22 @@ enum CouchImgService {
     }
 
     /// 画像を取得する。couchimg の画像は、ディスクにキャッシュを残さない通信で取る。
-    static func fetchImage(_ url: URL) async throws -> (data: Data, mimeType: String) {
+    /// isPublic は couchimg の画像が公開されているか（それ以外の URL では常に false）。
+    static func fetchImage(_ url: URL) async throws -> (data: Data, mimeType: String, isPublic: Bool) {
         let isOurs = url.host?.lowercased() == host
         let (data, response) = try await (isOurs ? session : URLSession.shared).data(for: imageRequest(for: url))
         let http = response as? HTTPURLResponse
         guard http?.statusCode == 200, !data.isEmpty else { throw error(for: http?.statusCode ?? -1) }
-        return (data, http?.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream")
+        return (data, http?.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream",
+                isOurs && isPublicCacheControl(http?.value(forHTTPHeaderField: "Cache-Control")))
+    }
+
+    /// サーバーは公開画像に「public, max-age=…, immutable」、非公開画像に「private, no-store」を付けて返す。
+    /// 公開状態はこのヘッダで見分ける（問い合わせの通信を増やさない）。
+    static func isPublicCacheControl(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value.lowercased().split(separator: ",")
+            .contains { $0.trimmingCharacters(in: .whitespaces) == "public" }
     }
 
     // MARK: - アップロード

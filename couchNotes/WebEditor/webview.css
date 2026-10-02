@@ -8,6 +8,7 @@
   --cn-font-size: 16px;
   --cn-line-height: 1.45em;
   --cn-padding-h: 16px;
+  --cn-public-img-outline: light-dark(#34c759, #30d158);
 }
 html,
 body {

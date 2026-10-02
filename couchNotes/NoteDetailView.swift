@@ -740,6 +740,7 @@ struct NoteDetailView: View {
             switch action.kind {
             case .publish:
                 try await CouchImgService.publish(urlString: action.url)
+                webBridge.markImagePublic(url: action.url)
                 imageNotice = "公開しました。"
             case .delete:
                 try await CouchImgService.delete(urlString: action.url)

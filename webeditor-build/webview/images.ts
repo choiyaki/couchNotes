@@ -30,6 +30,36 @@ export function displaySrc(url: string): string {
   return m ? `couchimg://img/${m[1].toLowerCase()}` : url;
 }
 
+// 公開されている couchimg の画像（URL は小文字にそろえて覚える）。
+// ネイティブ側が画像を取ったときの応答で見分けて、imageVisibility で知らせてくる。
+// 枠は CM 管理下の DOM を触らず、<style> の属性セレクタで付ける（色は styles.css の --cn-public-img-outline）。
+const publicImages = new Set<string>();
+let publicStyle: HTMLStyleElement | null = null;
+
+export function isPublicImage(url: string): boolean {
+  return publicImages.has(url.toLowerCase());
+}
+
+/** ネイティブからの imageVisibility。公開画像に枠を付ける（非公開に戻ることはないが、取り直しの結果には従う）。 */
+export function setImagePublic(url: string, isPublic: boolean) {
+  const key = url.toLowerCase();
+  if (!isCouchImgUrl(key) || publicImages.has(key) === isPublic) return;
+  if (isPublic) publicImages.add(key);
+  else publicImages.delete(key);
+  if (!publicStyle) {
+    publicStyle = document.createElement("style");
+    document.head.appendChild(publicStyle);
+  }
+  // 本文の URL は大文字のこともあるので、属性の比較は大文字・小文字を区別しない（i）
+  const selectors = [...publicImages].flatMap((u) => [
+    `.cm-cn-inline-img[data-url="${u}" i] img`,
+    `.cm-cn-image-overlay img[data-cn-url="${u}" i]`,
+  ]);
+  publicStyle.textContent = selectors.length
+    ? `${selectors.join(",\n")} { outline: 2px solid var(--cn-public-img-outline); outline-offset: -2px; }`
+    : "";
+}
+
 const PLACEHOLDER_HEIGHT = 200; // 実寸が分かるまでの予約高さ（native placeholderHeight と同値）
 const GAP = 6;                  // 行と画像・画像同士の間隔
 
