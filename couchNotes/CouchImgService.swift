@@ -93,6 +93,13 @@ enum CouchImgService {
     static func forgetRegistration() {
         for key in [uploadTokenKey, appTokenKey, adminTokenKey] { KeychainManager.shared.delete(key: key) }
         UserDefaults.standard.removeObject(forKey: deviceNameKey)
+        syncShareExtensionToken()
+    }
+
+    /// 共有シートの拡張機能に渡すアップロード専用トークンの写しを、今の登録に合わせる。
+    /// 登録・登録の消去のときと、起動のとき（拡張機能を足す前からの登録を写すため）に呼ぶ。
+    static func syncShareExtensionToken() {
+        ShareExtensionToken.sync(token(uploadTokenKey))
     }
 
     // MARK: - 通信
@@ -153,6 +160,7 @@ enum CouchImgService {
         if let t = result.tokens["upload"] { save(t, key: uploadTokenKey) }
         if let t = result.tokens["app"] { save(t, key: appTokenKey) }
         UserDefaults.standard.set(result.name, forKey: deviceNameKey)
+        syncShareExtensionToken()
         return result.name
     }
 

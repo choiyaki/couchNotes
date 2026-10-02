@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- 1つ目 = このアプリだけの置き場（既定の保存先。これまでどおり）。
+         2つ目 = 共有シートの拡張機能と共有する置き場（couchimg のアップロード専用トークンの写しだけを置く） -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.github.choiyaki.couchNotes</string>
+        <string>$(AppIdentifierPrefix)com.github.choiyaki.couchNotes.shared</string>
+    </array>
     <key>com.apple.security.app-sandbox</key>
     <true/>
     <key>com.apple.security.files.user-selected.read-only</key>

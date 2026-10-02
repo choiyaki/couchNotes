@@ -13,6 +13,8 @@ struct couchNotesApp: App {
                     ChangesListener.shared.start()
                     // リンクサジェスト索引を CouchDB に書き出す（他アプリ共有用・docs/link-index.md）
                     LinkIndexPublisher.shared.start()
+                    // 共有シートの拡張機能に、couchimg のアップロード専用トークンの写しを渡す
+                    CouchImgService.syncShareExtensionToken()
                 }
                 .onOpenURL { url in
                     URLActionRouter.shared.handle(url)
