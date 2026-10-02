@@ -78,7 +78,7 @@ enum CouchImgService {
     static var hasAppToken: Bool { token(appTokenKey) != nil }
     static var hasAdminToken: Bool { token(adminTokenKey) != nil }
 
-    private static func token(_ key: String) -> String? {
+    static func token(_ key: String) -> String? {
         guard let t = KeychainManager.shared.load(key: key), !t.isEmpty else { return nil }
         return t
     }
@@ -92,7 +92,7 @@ enum CouchImgService {
     // MARK: - 通信
 
     /// キャッシュをディスクに残さない設定（非公開画像を端末の保存領域に残さないため）
-    private static let session: URLSession = {
+    static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -101,12 +101,12 @@ enum CouchImgService {
         return URLSession(configuration: config)
     }()
 
-    private static func send(_ request: URLRequest) async throws -> (Data, Int) {
+    static func send(_ request: URLRequest) async throws -> (Data, Int) {
         let (data, response) = try await session.data(for: request)
         return (data, (response as? HTTPURLResponse)?.statusCode ?? -1)
     }
 
-    private static func error(for status: Int) -> CouchImgError {
+    static func error(for status: Int) -> CouchImgError {
         switch status {
         case 401: return .unauthorized
         case 403: return .badCode

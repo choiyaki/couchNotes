@@ -34573,6 +34573,14 @@ ${fence}`;
           }
           menu.appendChild(item);
           if (isCouchImgUrl(url)) {
+            const p = document.createElement("button");
+            p.type = "button";
+            p.textContent = "\u30D7\u30EC\u30D3\u30E5\u30FC";
+            p.addEventListener("click", () => {
+              this.close();
+              post({ type: "openImage", url });
+            });
+            menu.insertBefore(p, menu.firstChild);
             for (const [label, type] of [["\u516C\u958B\u3059\u308B\u2026", "couchimgPublish"], ["\u30B5\u30FC\u30D0\u30FC\u304B\u3089\u524A\u9664\u2026", "couchimgDelete"]]) {
               const b = document.createElement("button");
               b.type = "button";
@@ -34866,6 +34874,13 @@ ${fence}`;
           e.preventDefault();
           return true;
         }
+      }
+      const ownImg = e.target?.closest?.(".cm-cn-inline-img[data-url]");
+      const ownUrl = ownImg?.getAttribute("data-url");
+      if (ownUrl && e.button === 0 && isCouchImgUrl(ownUrl)) {
+        native.postMessage({ type: "openImage", url: ownUrl });
+        e.preventDefault();
+        return true;
       }
       const pos = view2.posAtCoords({ x: e.clientX, y: e.clientY });
       if (pos == null)
@@ -35187,6 +35202,11 @@ ${fence}`;
       case "insertImage":
         if (msg.url)
           insertImageAtCursor(view, String(msg.url), !!msg.ocrPending, !!msg.atEnd);
+        break;
+      case "insertImages":
+        if (Array.isArray(msg.urls))
+          for (const u of msg.urls)
+            insertImageAtCursor(view, String(u), false, false);
         break;
       case "footer":
         setFooterData(msg.data ?? null);

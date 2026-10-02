@@ -41,6 +41,12 @@ enum ImageTextRecognizer {
                 return text
             }
         }
+        // couchimg の画像は、サーバーが読み終えていればその文字を使う（人が直した文字もここに入っている）
+        if localImage == nil, let id = CouchImgService.imageId(from: url), CouchImgService.hasAppToken,
+           let info = try? await CouchImgService.imageInfo(id: id), info.ocr.status == "done",
+           let text = info.ocr.text, !text.isEmpty {
+            return text
+        }
         let data: Data
         if let localImage { data = localImage } else { data = try await download(url) }
         let text = try await visionText(from: data)

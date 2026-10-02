@@ -158,3 +158,57 @@ final class CouchImgServiceTests: XCTestCase {
         XCTAssertEqual(ImageUploader.backend, .gyazo)
     }
 }
+
+/// サーバーの応答の形（../couchimg/docs/DESIGN.md 3.2）を読めること。サーバー側のテストが返す形をそのまま写したもの。
+final class CouchImgAPIDecodingTests: XCTestCase {
+    private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
+        try JSONDecoder().decode(T.self, from: Data(json.utf8))
+    }
+
+    func testImageInfo() throws {
+        let info = try decode(CouchImgService.ImageInfo.self, """
+        {"id":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","url":"https://img.choiyaki.com/a0a1a2a3a4a5a6a7a8a9aaabacadaeaf.png","public":false,
+         "ext":"png","mime":"image/png","width":640,"height":480,"bytes":12345,"created_at":1800000000,"uploaded_by":"iphone","upload_source":null,
+         "ocr":{"status":"pending","text":null,"revision":0,"edited":false,"model":null,"updated_at":null,"truncated":false,"queue":{"ahead":2,"eta_seconds":720}},
+         "notes":[{"doc_id":"publish/a.md","path":"Publish/a.md","kind":"embed","public":true}],"suggest_publish":true}
+        """)
+        XCTAssertEqual(info.ocr.queue, .init(ahead: 2, etaSeconds: 720))
+        XCTAssertEqual(info.notes.first?.isPublic, true)
+        XCTAssertTrue(info.suggestPublish)
+        XCTAssertNil(info.uploadSource)
+        XCTAssertFalse(info.isPublic)
+    }
+
+    func testListChangesHints() throws {
+        let list = try decode(CouchImgService.ImageList.self, """
+        {"items":[{"id":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","ext":"jpg","public":true,"created_at":5,"width":1,"height":2,"bytes":3,
+          "uploaded_by":"mac","upload_source":"share","ocr_status":"done","ocr_edited":false,"notes":0,"snippet":"…合計…","url":"https://img.choiyaki.com/a0a1a2a3a4a5a6a7a8a9aaabacadaeaf.jpg"}],"next":"5:a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"}
+        """)
+        XCTAssertEqual(list.items.first?.snippet, "…合計…")
+        XCTAssertEqual(list.next, "5:a0a1a2a3a4a5a6a7a8a9aaabacadaeaf")
+
+        let changes = try decode(CouchImgService.Changes.self, """
+        {"gen":"0123456789abcdef0123456789abcdef","reset":true,"next":6,"more":false,"items":[
+          {"id":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","seq":5,"deleted":false,"ext":"png","public":false,"created_at":1,"ocr_status":"done","ocr_text":"直した","ocr_revision":2,"ocr_edited":true},
+          {"id":"b0b1b2b3b4b5b6b7b8b9babbbcbdbebf","seq":6,"deleted":true}]}
+        """)
+        XCTAssertEqual(changes.items.map(\.ocrText), ["直した", nil])
+        XCTAssertEqual(changes.items.map(\.deleted), [false, true])
+        XCTAssertTrue(changes.reset)
+
+        let hints = try decode(CouchImgService.Hints.self, """
+        {"index_at":null,"unattached":[],"public_only_in_private_notes":[],"private_in_public_notes":[{"id":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","url":"https://img.choiyaki.com/a0a1a2a3a4a5a6a7a8a9aaabacadaeaf.png","created_at":9}]}
+        """)
+        XCTAssertNil(hints.indexAt)
+        XCTAssertEqual(hints.privateInPublicNotes.count, 1)
+    }
+
+    func testPreviewTargetOnlyForOurImages() {
+        let id = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+        XCTAssertEqual(ImagePreviewTarget(urlString: "https://img.choiyaki.com/\(id).jpg"), ImagePreviewTarget(id: id, ext: "jpg"))
+        XCTAssertEqual(ImagePreviewTarget(urlString: "https://IMG.choiyaki.com/\(id.uppercased()).PNG")?.url.absoluteString,
+                       "https://img.choiyaki.com/\(id).png")
+        XCTAssertNil(ImagePreviewTarget(urlString: "https://i.gyazo.com/\(id).png"))
+        XCTAssertNil(ImagePreviewTarget(urlString: "https://img.choiyaki.com.evil.example/\(id).png"))
+    }
+}

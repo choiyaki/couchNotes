@@ -8,7 +8,7 @@ import { history, historyKeymap, defaultKeymap, moveLineUp, moveLineDown, undo, 
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { wikiCompletionSource } from "./complete";
 import { liveStyling } from "./decorations";
-import { imageField, refreshImageLayout, setImagePublic } from "./images";
+import { imageField, isCouchImgUrl, refreshImageLayout, setImagePublic } from "./images";
 import { clearTableMeasureCache } from "./table";
 import { blocksField } from "./blocks";
 import { ocrOpenField } from "./ocr";
@@ -113,6 +113,16 @@ const clickHandler = EditorView.domEventHandlers({
         e.preventDefault();
         return true;
       }
+    }
+
+    // couchimg（自分のサーバー）の画像のタップ → プレビュー画面を開く（公開状態・画像内の文字・貼られているノート）。
+    // 長押しはメニュー（imagemenu.ts）。その行を編集したいときは、画像の横をタップする。
+    const ownImg = (e.target as HTMLElement | null)?.closest?.<HTMLElement>(".cm-cn-inline-img[data-url]");
+    const ownUrl = ownImg?.getAttribute("data-url");
+    if (ownUrl && e.button === 0 && isCouchImgUrl(ownUrl)) {
+      native.postMessage({ type: "openImage", url: ownUrl });
+      e.preventDefault();
+      return true;
     }
 
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
@@ -490,8 +500,12 @@ window.couchNotesReceive = (msg: any) => {
       if (msg.url) setImagePublic(String(msg.url), !!msg.public);
       break;
     case "insertImage":
-      // 手書きメモ（アップロード済み）の挿入
+      // 手書きメモ・画像一覧から選んだ画像（アップロード済み）の挿入
       if (msg.url) insertImageAtCursor(view, String(msg.url), !!msg.ocrPending, !!msg.atEnd);
+      break;
+    case "insertImages":
+      // 書類スキャンの各ページ。1ページ1行で、順番どおりに入れる
+      if (Array.isArray(msg.urls)) for (const u of msg.urls) insertImageAtCursor(view, String(u), false, false);
       break;
     case "footer":
       setFooterData((msg.data ?? null) as FooterData | null);

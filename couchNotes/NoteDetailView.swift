@@ -72,6 +72,10 @@ struct NoteDetailView: View {
     // 親ビューごと破棄されて閉じるのを防ぐ）。提示元は常設の Group（下記）に置く。
     @State private var showPhotoPicker = false
     @State private var showHandwriting = false
+    @State private var showImageLibrary = false
+    @State private var showScanner = false
+    @State private var scanProgress: String? = nil
+    @State private var previewTarget: ImagePreviewTarget? = nil
     @ObservedObject private var handwritingInbox = HandwritingInbox.shared
     /// ナビゲーションの最前面にいるか（下に積まれた同じノートの画面が手書き挿入を拾わないように）
     @State private var isOnScreen = false
@@ -516,6 +520,37 @@ struct NoteDetailView: View {
                     .fullScreenCover(isPresented: $showHandwriting) {
                         HandwritingView(notePath: displayPath ?? noteId) { result in webBridge.insertHandwriting(result) }
                     }
+                    // 画像のプレビュー・画像一覧・書類スキャンも同じ理由でここに置く
+                    .sheet(item: $previewTarget) { target in
+                        ImagePreviewView(
+                            target: target,
+                            onInsertOCR: { text in webBridge.insertOCRBlock(url: target.url.absoluteString, text: text) },
+                            onOpenNote: { id in onLinkTap?(id) },
+                            onChanged: { change in
+                                if change == .published { webBridge.markImagePublic(url: target.url.absoluteString) }
+                            }
+                        )
+                    }
+                    .sheet(isPresented: $showImageLibrary) {
+                        ImageLibraryView(onPick: { url in webBridge.insertImage(url: url) },
+                                         onOpenNote: { id in onLinkTap?(id) })
+                    }
+                    .fullScreenCover(isPresented: $showScanner) {
+                        DocumentScannerView { pages in
+                            showScanner = false
+                            Task { await uploadScannedPages(pages) }
+                        }
+                        .ignoresSafeArea()
+                    }
+                    .overlay(alignment: .bottom) {
+                        if let scanProgress {
+                            Label(scanProgress, systemImage: "arrow.up.circle")
+                                .font(.footnote)
+                                .padding(.horizontal, 14).padding(.vertical, 8)
+                                .background(.regularMaterial, in: Capsule())
+                                .padding(.bottom, 12)
+                        }
+                    }
             }
 
             // キーボード表示中はフッターを隠す（キーボード上に浮くのを防ぐ）
@@ -640,6 +675,7 @@ struct NoteDetailView: View {
             webBridge.onError = { message in errorMessage = message }
             webBridge.notePath = displayPath ?? noteId
             webBridge.onImageAction = { action in pendingImageAction = action }
+            webBridge.onOpenImage = { url in previewTarget = ImagePreviewTarget(urlString: url) }
             webBridge.onReady = { consumePendingHandwriting() }
             await loadContent()
             await loadBacklinks()
@@ -677,7 +713,19 @@ struct NoteDetailView: View {
     private var webEditorToolbar: some View {
         HStack(spacing: 5) {
             webToolbarButton(systemImage: "clipboard") { webBridge.pasteFromClipboard() }
-            webToolbarButton(systemImage: "photo.badge.plus") { showPhotoPicker = true }
+            // 画像: 写真を選ぶ / アップロード済みの画像一覧から選ぶ / 書類をスキャン
+            Menu {
+                Button { showPhotoPicker = true } label: { Label("写真を選ぶ", systemImage: "photo.on.rectangle") }
+                if CouchImgService.hasAppToken {
+                    Button { showImageLibrary = true } label: { Label("画像一覧から選ぶ", systemImage: "square.grid.2x2") }
+                }
+                if DocumentScannerView.isSupported {
+                    Button { showScanner = true } label: { Label("書類をスキャン", systemImage: "doc.viewfinder") }
+                }
+            } label: {
+                webToolbarLabel(systemImage: "photo.badge.plus")
+            }
+            .buttonStyle(.plain)
             #if !targetEnvironment(macCatalyst)
             webToolbarButton(systemImage: "pencil.tip.crop.circle") { showHandwriting = true }
             #endif
@@ -750,6 +798,31 @@ struct NoteDetailView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// 書類スキャンの各ページを順番にアップロードし、1ページ1枚の画像として、順番どおりにノートへ貼る。
+    /// 途中で失敗したら、そこまでの分だけ貼って知らせる。
+    private func uploadScannedPages(_ pages: [UIImage]) async {
+        guard !pages.isEmpty else { return }
+        if let message = ImageUploader.notReadyMessage() {
+            errorMessage = message
+            return
+        }
+        var urls: [String] = []
+        defer { scanProgress = nil }
+        for (index, page) in pages.enumerated() {
+            scanProgress = "スキャンをアップロード中 \(index + 1) / \(pages.count)"
+            guard let data = page.jpegData(compressionQuality: 0.9) else { continue }
+            do {
+                urls.append(try await ImageUploader.upload(
+                    imageData: data, filename: "scan-\(index + 1).jpg", mimeType: "image/jpeg",
+                    notePath: displayPath ?? noteId))
+            } catch {
+                errorMessage = "\(pages.count) ページ中 \(urls.count) ページまで貼りました。\(index + 1) ページ目: \(error.localizedDescription)"
+                break
+            }
+        }
+        webBridge.insertImages(urls: urls)
     }
 
     private func uploadPickedPhoto(_ item: PhotosPickerItem) async {

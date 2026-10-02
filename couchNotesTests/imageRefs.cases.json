@@ -1,0 +1,105 @@
+{
+  "説明": "本文から画像 URL を抜き出す規則の例（DESIGN.md 3.4）。server/lib/imageRefs.mjs と couchNotes（Swift）の両方のテストで読む。text の {A} {B} {C} は ids の値に置き換える。expect の id も同じ。config を書かない例は couchimg。規則を変えるときは、先にここへ1行足す",
+  "ids": {
+    "A": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "B": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "C": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+  },
+  "configs": {
+    "couchimg": { "hosts": ["img.choiyaki.com"], "idPattern": "[0-9a-f]{32}" },
+    "gyazo": { "hosts": ["gyazo.com", "i.gyazo.com"], "idPattern": "[0-9a-f]{32}" }
+  },
+  "cases": [
+    { "name": "空の本文", "text": "", "expect": [] },
+    { "name": "URL のない本文", "text": "# 見出し\n\nただの文。![](local.png)\n", "expect": [] },
+
+    { "name": "画像: 通常", "text": "![](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: 前後に文と alt", "text": "前の文 ![写真](https://img.choiyaki.com/{A}.jpg) 後ろの文", "expect": [{ "id": "A", "ext": "jpg", "kind": "embed" }] },
+    { "name": "画像: alt の |50（大きさの指定）", "text": "![図|50](https://img.choiyaki.com/{A}.webp)", "expect": [{ "id": "A", "ext": "webp", "kind": "embed" }] },
+    { "name": "画像: alt の中に角括弧", "text": "![a [b] c](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: タイトル付き", "text": "![a](https://img.choiyaki.com/{A}.png \"題\")", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: 山括弧", "text": "![a](<https://img.choiyaki.com/{A}.png>)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: 括弧の内側に空白", "text": "![a]( https://img.choiyaki.com/{A}.png )", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: クエリ付き", "text": "![a](https://img.choiyaki.com/{A}.png?w=300)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: # 付き", "text": "![a](https://img.choiyaki.com/{A}.png#x)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: 同じ行に隣り合う2枚", "text": "![](https://img.choiyaki.com/{A}.png)![](https://img.choiyaki.com/{B}.gif)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }, { "id": "B", "ext": "gif", "kind": "embed" }] },
+    { "name": "画像: 表の中", "text": "| 図 | 説明 |\n|---|---|\n|![](https://img.choiyaki.com/{A}.png)| あ |", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: 箇条書きと引用の中", "text": "- ![](https://img.choiyaki.com/{A}.png)\n> ![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }, { "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "画像: http でも数える", "text": "![](http://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "参照形式: ![alt][ラベル]", "text": "![図][f1]\n\n[f1]: https://img.choiyaki.com/{A}.png", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "参照形式: ![ラベル][] と ![ラベル]", "text": "![f2][] と ![f3]\n\n[f2]: https://img.choiyaki.com/{A}.png\n[f3]: <https://img.choiyaki.com/{B}.png> \"題\"", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }, { "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "参照形式: ラベルの大文字小文字と空白の数は無視", "text": "![図][My  Label]\n\n[my label]: https://img.choiyaki.com/{A}.png", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "参照形式: 定義が先でも同じ", "text": "[f1]: https://img.choiyaki.com/{A}.png\n\n![図][f1]", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "参照形式: リンクからしか使われない定義は link", "text": "[ここ][f1] を見る\n\n[f1]: https://img.choiyaki.com/{A}.png", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "参照形式: 脚注は link", "text": "本文[^1]\n\n[^1]: https://img.choiyaki.com/{A}.png", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+
+    { "name": "<img>: 二重引用符", "text": "<img src=\"https://img.choiyaki.com/{A}.png\">", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "<img>: 一重引用符と他の属性", "text": "<img width=\"300\" src='https://img.choiyaki.com/{A}.png' alt=\"x\" />", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "<img>: 引用符なし", "text": "<img src=https://img.choiyaki.com/{A}.png>", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "<img>: 大文字と = の前後の空白", "text": "<IMG SRC = \"https://img.choiyaki.com/{A}.png\">", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "<img>: 複数行のタグ", "text": "<img\n  alt=\"x\"\n  src=\"https://img.choiyaki.com/{A}.png\"\n>", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "<a href> は link", "text": "<a href=\"https://img.choiyaki.com/{A}.png\">図</a>", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+
+    { "name": "リンクのみ: [文字](URL)", "text": "[図はこちら](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "リンクのみ: 裸の URL", "text": "https://img.choiyaki.com/{A}.png", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "リンクのみ: <URL>", "text": "<https://img.choiyaki.com/{A}.png>", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "リンクのみ: 日本語の文にそのまま続く URL", "text": "これhttps://img.choiyaki.com/{A}.pngです。次https://img.choiyaki.com/{B}.png。", "expect": [{ "id": "A", "ext": "png", "kind": "link" }, { "id": "B", "ext": "png", "kind": "link" }] },
+    { "name": "リンクのみ: ! と [ の間や ] と ( の間が離れている", "text": "! [a](https://img.choiyaki.com/{A}.png) ![b] (https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "link" }, { "id": "B", "ext": "png", "kind": "link" }] },
+    { "name": "リンクのみ: ![[URL]]", "text": "![[https://img.choiyaki.com/{A}.png]]", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "リンク付きの画像: 画像は embed、リンク先は link", "text": "[![a](https://img.choiyaki.com/{A}.png)](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }, { "id": "B", "ext": "png", "kind": "link" }] },
+
+    { "name": "同じ画像: 何度出ても1件", "text": "![](https://img.choiyaki.com/{A}.png)\n![](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "同じ画像: link が先でも、1か所 embed なら embed（順番は最初に出た順）", "text": "https://img.choiyaki.com/{A}\n![](https://img.choiyaki.com/{B}.png)\n![](https://img.choiyaki.com/{A}.jpg)", "expect": [{ "id": "A", "ext": "jpg", "kind": "embed" }, { "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "同じ画像: embed の後の link で変わらない", "text": "![](https://img.choiyaki.com/{A}.png)\nhttps://img.choiyaki.com/{A}.jpg", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "コードブロック: ``` の中は数えない", "text": "```\n![](https://img.choiyaki.com/{A}.png)\n```", "expect": [] },
+    { "name": "コードブロック: 言語名付き。後ろは数える", "text": "```md\n![](https://img.choiyaki.com/{A}.png)\n```\n![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "コードブロック: ~~~", "text": "~~~\nhttps://img.choiyaki.com/{A}.png\n~~~", "expect": [] },
+    { "name": "コードブロック: 閉じ忘れは最後まで", "text": "![](https://img.choiyaki.com/{A}.png)\n```\n![](https://img.choiyaki.com/{B}.png)\n\n![](https://img.choiyaki.com/{C}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "コードブロック: 箇条書きの中（字下げ）", "text": "- 項目\n    ```\n    https://img.choiyaki.com/{A}.png\n    ```\n- ![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "コードブロック: 引用の中", "text": "> ```\n> https://img.choiyaki.com/{A}.png\n> ```\n> ![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "コードブロック: 長い柵の中の短い柵では閉じない", "text": "````\n```\nhttps://img.choiyaki.com/{A}.png\n```\nhttps://img.choiyaki.com/{B}.png\n````\nhttps://img.choiyaki.com/{C}.png", "expect": [{ "id": "C", "ext": "png", "kind": "link" }] },
+    { "name": "コードブロック: ~~~ は ``` では閉じない", "text": "~~~\n```\nhttps://img.choiyaki.com/{A}.png\n~~~\nhttps://img.choiyaki.com/{B}.png", "expect": [{ "id": "B", "ext": "png", "kind": "link" }] },
+    { "name": "コードブロック: 改行が CRLF", "text": "```\r\nhttps://img.choiyaki.com/{A}.png\r\n```\r\n![](https://img.choiyaki.com/{B}.png)\r\n", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "コードブロック: 4文字の字下げだけではコードにしない", "text": "    ![](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "インラインコード: 数えない", "text": "書き方は `![](https://img.choiyaki.com/{A}.png)` です", "expect": [] },
+    { "name": "インラインコード: 二重のバッククォート", "text": "`` ` https://img.choiyaki.com/{A}.png ` `` と ![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "インラインコード: 1行に ``` で挟んだもの", "text": "```https://img.choiyaki.com/{A}.png```\n![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "インラインコード: 閉じていないバッククォートは普通の文字", "text": "` ![](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "インラインコード: 空行はまたがない", "text": "` 開いたまま\n\n![](https://img.choiyaki.com/{A}.png) `", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "インラインコード: 改行1つはまたぐ", "text": "` 開いて\nhttps://img.choiyaki.com/{A}.png ` 閉じた", "expect": [] },
+
+    { "name": "HTML コメント: 数えない。後ろは数える", "text": "<!-- ![](https://img.choiyaki.com/{A}.png) --> ![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "B", "ext": "png", "kind": "embed" }] },
+    { "name": "HTML コメント: 複数行", "text": "<!--\nhttps://img.choiyaki.com/{A}.png\n\nhttps://img.choiyaki.com/{B}.png\n-->\nhttps://img.choiyaki.com/{C}.png", "expect": [{ "id": "C", "ext": "png", "kind": "link" }] },
+    { "name": "HTML コメント: 閉じ忘れは最後まで", "text": "![](https://img.choiyaki.com/{A}.png)\n<!-- ここから\n![](https://img.choiyaki.com/{B}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "インラインコードの中の <!-- はコメントを始めない", "text": "`<!--` ![](https://img.choiyaki.com/{A}.png) -->", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "HTML コメントの中のバッククォートはコードを始めない", "text": "<!-- ` -->![](https://img.choiyaki.com/{A}.png) `", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "バックスラッシュ: \\![ は画像ではない", "text": "\\![a](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "link" }] },
+    { "name": "バックスラッシュ: \\` はコードを始めない", "text": "\\`![](https://img.choiyaki.com/{A}.png)\\`", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+    { "name": "バックスラッシュ: alt の中の \\]", "text": "![a\\]b](https://img.choiyaki.com/{A}.png)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "偽ホスト: 後ろに別のドメインが続く", "text": "![](https://img.choiyaki.com.evil.example/{A}.png)", "expect": [] },
+    { "name": "偽ホスト: パスにホスト名が入っている", "text": "![](https://evil.example/img.choiyaki.com/{A}.png)", "expect": [] },
+    { "name": "偽ホスト: @ の前に置く", "text": "![](https://img.choiyaki.com@evil.example/{A}.png)", "expect": [] },
+    { "name": "偽ホスト: 前に文字が付く・サブドメイン", "text": "https://ximg.choiyaki.com/{A}.png https://a.img.choiyaki.com/{B}.png https://choiyaki.com/{C}.png", "expect": [] },
+    { "name": "偽ホスト: 別の URL のクエリに埋まっている", "text": "https://evil.example/?u=https://img.choiyaki.com/{A}.png", "expect": [] },
+    { "name": "偽ホスト: ポート番号付き・末尾の点", "text": "https://img.choiyaki.com:8443/{A}.png https://img.choiyaki.com./{B}.png", "expect": [] },
+    { "name": "URL は ASCII 以外の文字の手前まで（k や s に似た文字 K・ſ も区切り）", "text": "https://img.choiyaki.com/{A}.png\u017f https://img.choiyaki.com/{B}.png\u212a", "expect": [{ "id": "A", "ext": "png", "kind": "link" }, { "id": "B", "ext": "png", "kind": "link" }] },
+    { "name": "http(s):// のないものは数えない", "text": "img.choiyaki.com/{A}.png と //img.choiyaki.com/{B}.png と ftp://img.choiyaki.com/{C}.png", "expect": [] },
+    { "name": "大文字のホストと拡張子・ID は小文字にそろえる", "text": "![](HTTPS://IMG.Choiyaki.COM/A0A1A2A3A4A5A6A7A8A9AAABACADAEAF.PNG)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }] },
+
+    { "name": "ID の形: 1文字多い・少ない・16進でない", "text": "https://img.choiyaki.com/{A}0.png https://img.choiyaki.com/b0b1b2b3b4b5b6b7b8b9babbbcbdbeb.png https://img.choiyaki.com/g0a1a2a3a4a5a6a7a8a9aaabacadaeaf.png", "expect": [] },
+    { "name": "ID の形: 後ろに - や _ が続く", "text": "https://img.choiyaki.com/{A}-x.png https://img.choiyaki.com/{B}_x.png", "expect": [] },
+    { "name": "ID の形: ホストの直後でない", "text": "https://img.choiyaki.com/x/{A}.png https://img.choiyaki.com/api/images/{B}", "expect": [] },
+    { "name": "拡張子なし・文末の句点", "text": "https://img.choiyaki.com/{A} と https://img.choiyaki.com/{B}.", "expect": [{ "id": "A", "ext": null, "kind": "link" }, { "id": "B", "ext": null, "kind": "link" }] },
+    { "name": "後ろにパスが続く", "text": "https://img.choiyaki.com/{A}.png/x https://img.choiyaki.com/{B}/raw", "expect": [{ "id": "A", "ext": "png", "kind": "link" }, { "id": "B", "ext": null, "kind": "link" }] },
+
+    { "name": "gyazo: ページの URL を画像として貼る（拡張子なし）", "config": "gyazo", "text": "![](https://gyazo.com/{A})", "expect": [{ "id": "A", "ext": null, "kind": "embed" }] },
+    { "name": "gyazo: i.gyazo.com と誤った拡張子", "config": "gyazo", "text": "![](https://i.gyazo.com/{A}.png)\n![](https://gyazo.com/{B}.img)\n[x](https://gyazo.com/{C}/raw)", "expect": [{ "id": "A", "ext": "png", "kind": "embed" }, { "id": "B", "ext": "img", "kind": "embed" }, { "id": "C", "ext": null, "kind": "link" }] },
+    { "name": "gyazo: 偽ホストと couchimg の URL は数えない", "config": "gyazo", "text": "https://gyazo.com.evil.example/{A} https://img.choiyaki.com/{B}.png https://t.gyazo.com/{C}", "expect": [] },
+    { "name": "couchimg の設定では gyazo の URL を数えない", "text": "![](https://gyazo.com/{A}) ![](https://i.gyazo.com/{B}.png)", "expect": [] }
+  ]
+}

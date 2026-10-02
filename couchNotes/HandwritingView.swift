@@ -95,10 +95,13 @@ struct HandwritingView: View {
                 }
                 .disabled(!model.hasDrawing || isSavingPhoto)
                 .accessibilityLabel("写真に保存")
-                Toggle(isOn: $ocrEnabled) {
-                    Label("OCR", systemImage: "text.viewfinder")
+                // couchimg に上げるときは、文字はサーバーが読んでプレビュー画面に出す（ノートには入れない）
+                if ImageUploader.backend != .couchimg {
+                    Toggle(isOn: $ocrEnabled) {
+                        Label("OCR", systemImage: "text.viewfinder")
+                    }
+                    .toggleStyle(.button)
                 }
-                .toggleStyle(.button)
                 Spacer()
                 Button {
                     Task { await finish() }
@@ -150,7 +153,9 @@ struct HandwritingView: View {
         do {
             let url = try await ImageUploader.upload(
                 imageData: output.png, filename: "handwriting.png", mimeType: "image/png", notePath: notePath)
-            onComplete(HandwritingResult(url: url, ocrImage: ocrEnabled ? output.ocrImage : nil))
+            // couchimg に上げた画像はサーバーが読むので、ノートに ```ocr を入れない（文字はプレビュー画面と検索で使う）
+            let insertOCR = ocrEnabled && ImageUploader.backend != .couchimg
+            onComplete(HandwritingResult(url: url, ocrImage: insertOCR ? output.ocrImage : nil))
             dismiss()
         } catch {
             uploadError = error.localizedDescription

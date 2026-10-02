@@ -27,6 +27,8 @@ final class WebEditorBridge: ObservableObject {
     var notePath: String?
     /// 画像の長押しメニューからの「公開する」「サーバーから削除」。確認は画面側（NoteDetailView）で出す。
     var onImageAction: ((ImageAction) -> Void)?
+    /// couchimg の画像がタップされた。画面側がプレビュー画面を開く。
+    var onOpenImage: ((String) -> Void)?
 
     /// エディタが初期本文を受け取り、挿入などの操作を受け付けられる状態か。
     private(set) var isReady = false
@@ -96,6 +98,22 @@ final class WebEditorBridge: ObservableObject {
     /// 画像を公開した直後に、編集画面の表示（公開画像の枠・メニューの「公開中」）を更新する。
     func markImagePublic(url: String) {
         send(["type": "imageVisibility", "url": url, "public": true])
+    }
+
+    /// アップロード済みの画像（画像一覧から選んだもの）をカーソル位置へ、独立した行として挿入する。
+    func insertImage(url: String) {
+        send(["type": "insertImage", "url": url, "ocrPending": false, "atEnd": false])
+    }
+
+    /// 複数の画像（書類スキャンの各ページ）を、順番どおりにカーソル位置へ挿入する。
+    func insertImages(urls: [String]) {
+        guard !urls.isEmpty else { return }
+        send(["type": "insertImages", "urls": urls])
+    }
+
+    /// プレビュー画面の「ノートに貼る」: 画像の行の直後へ ```ocr として文字を入れる。
+    func insertOCRBlock(url: String, text: String) {
+        send(["type": "ocrResult", "url": url, "text": text])
     }
 
     /// アップロード済みの手書きメモをカーソル位置（atEnd なら本文末尾）へ挿入する。
@@ -508,9 +526,20 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 if !t.lowercased().hasSuffix(".md") { t += ".md" }
                 parent.onLinkTap?(t)
 
+            case "openImage":
+                // couchimg の画像のタップ（または長押しメニューの「プレビュー」）
+                guard let url = body["url"] as? String, CouchImgService.imageId(from: url) != nil else { return }
+                webView?.endEditing(true)
+                parent.bridge?.onOpenImage?(url)
+
             case "openExternal":
                 guard let urlStr = body["url"] as? String, let url = URL(string: urlStr) else { return }
                 webView?.endEditing(true)
+                // couchimg の画像の URL は Safari に渡さず（非公開画像は開けない）、プレビュー画面で開く
+                if CouchImgService.imageId(from: urlStr) != nil, let open = parent.bridge?.onOpenImage {
+                    open(urlStr)
+                    return
+                }
                 UIApplication.shared.open(url)
 
             case "openNote":

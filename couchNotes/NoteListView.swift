@@ -32,6 +32,7 @@ struct NoteListView: View {
     @State private var path: [String]    = []
     @State private var errorMessage: String? = nil
     @State private var showSettings      = false
+    @State private var showImageLibrary = false
     @State private var hasLoadedOnce     = false   // 初回ロード完了後の再ロードを制御
     @State private var noteToDelete: NoteItem? = nil   // 長押し削除の確認対象
     @State private var noteToRename: NoteItem? = nil   // タイトル変更の対象
@@ -309,6 +310,13 @@ struct NoteListView: View {
                 layoutRaw = savedLayout(for: layoutKey).rawValue
             }
         }
+        .sheet(isPresented: $showImageLibrary) {
+            ImageLibraryView(onOpenNote: { id in
+                isClosureNavigation = true
+                historyForward = []
+                navigate { path.append(id) }
+            })
+        }
         .sheet(isPresented: $showSettings, onDismiss: {
             // 除外フォルダ設定が変わっている可能性があるので今日のピックを再解決
             randomPicks = RandomNotes.todaysPicks(from: notes)
@@ -399,6 +407,7 @@ struct NoteListView: View {
             // バックグラウンドから復帰した時にも更新
             guard newPhase == .active, hasLoadedOnce else { return }
             Task { await loadNotes() }
+            Task { await ImageOCRSync.run() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .noteSaved)) { _ in
             // 詳細画面で保存が完了したタイミングで再ロード
@@ -530,6 +539,12 @@ struct NoteListView: View {
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape")
             }
+            if CouchImgService.hasAppToken {
+                Button { showImageLibrary = true } label: {
+                    Image(systemName: "photo.on.rectangle.angled")
+                }
+                .padding(.leading, 18)
+            }
             Spacer()
         }
         .font(.title3)
@@ -550,6 +565,8 @@ struct NoteListView: View {
             bodyResults = []
         } else {
             showSearch = true
+            // 検索を始める前に、画像内の文字（OCR）の取り込みを進めておく
+            Task { await ImageOCRSync.run() }
         }
     }
 

@@ -198,8 +198,16 @@ export function imageMenu(post: Post) {
           });
         }
         menu.appendChild(item);
-        // couchimg（自分のサーバー）の画像だけ: 公開・削除。確認はネイティブ側で出す
+        // couchimg（自分のサーバー）の画像だけ: プレビュー・公開・削除。確認はネイティブ側で出す
         if (isCouchImgUrl(url)) {
+          const p = document.createElement("button");
+          p.type = "button";
+          p.textContent = "プレビュー";
+          p.addEventListener("click", () => {
+            this.close();
+            post({ type: "openImage", url });
+          });
+          menu.insertBefore(p, menu.firstChild);
           for (const [label, type] of [["公開する…", "couchimgPublish"], ["サーバーから削除…", "couchimgDelete"]]) {
             const b = document.createElement("button");
             b.type = "button";

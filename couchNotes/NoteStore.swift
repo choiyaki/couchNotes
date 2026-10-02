@@ -109,8 +109,19 @@ actor NoteStore {
             rebuildLinks()
         }
 
+        // 画像 → 貼られているノート（端末に同期されている範囲だけ。本文から作り直せる派生の表）
+        exec("CREATE TABLE IF NOT EXISTS image_refs (image_id TEXT, note_id TEXT, kind TEXT);")
+        exec("CREATE INDEX IF NOT EXISTS idx_image_refs_image ON image_refs(image_id);")
+        exec("CREATE INDEX IF NOT EXISTS idx_image_refs_note ON image_refs(note_id);")
+        attachOCRDatabase()
+
         // 既存行に含まれるフロントマターを本文から分離（1回だけ）
         resplitExistingContent()
+
+        if syncValue("image_refs_v1") == nil {
+            if count() > 0 { rebuildImageRefs() }
+            setSyncValue("image_refs_v1", "done")
+        }
 
         // 全角/半角の不一致でタイトル検索・本文検索・[[ ]] リンク解決が失敗する不具合の是正。
         // id_folded のバックフィル、FTS 索引・リンクキーの全角/半角折りたたみ込みでの作り直し（1回だけ）。
@@ -305,12 +316,20 @@ actor NoteStore {
         let terms = query.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
         guard !terms.isEmpty else { return [] }
         var result: Set<String>? = nil
+        // 本文には無く、貼ってある画像の中の文字で一致したノート → その語（一覧に「画像内の文字: …」と出すため）
+        var viaImage: [String: String] = [:]
         for term in terms {
-            let ids = bodyMatchIDs(term)
+            let inBody = noteBodyMatchIDs(term)
+            let inImage = imageOCRMatchNoteIDs(term)
+            for id in inImage.subtracting(inBody) where viaImage[id] == nil { viaImage[id] = term }
+            let ids = inBody.union(inImage)
             result = (result == nil) ? ids : result!.intersection(ids)
             if result!.isEmpty { return [] }
         }
-        return items(forIDs: Array(result ?? []))
+        return items(forIDs: Array(result ?? [])).map { item in
+            guard let term = viaImage[item.id], let snippet = imageOCRSnippet(noteID: item.id, term: term) else { return item }
+            return NoteItem(id: item.id, mtime: item.mtime, path: item.path, preview: "画像内の文字: " + snippet, pin: item.pin)
+        }
     }
 
     /// 1語の検索：タイトル（ファイル名）一致を先頭に、続けて本文一致を並べる。
@@ -368,9 +387,14 @@ actor NoteStore {
         }
     }
 
+    /// 語を「本文」または「貼ってある画像の中の文字（OCR）」に含むノートの id 集合。
+    private func bodyMatchIDs(_ term: String) -> Set<String> {
+        noteBodyMatchIDs(term).union(imageOCRMatchNoteIDs(term))
+    }
+
     /// 語を本文に含むノートの id 集合。3文字以上は FTS5(trigram)、1〜2文字は LIKE。
     /// いずれも note_fts.content（索引時に NFKC 折りたたみ済み）に対して照合する。
-    private func bodyMatchIDs(_ term: String) -> Set<String> {
+    private func noteBodyMatchIDs(_ term: String) -> Set<String> {
         if term.count >= 3 {
             let phrase = "\"" + term.nfkc.replacingOccurrences(of: "\"", with: "\"\"") + "\""
             let stmt = prepare("""
@@ -784,6 +808,7 @@ actor NoteStore {
         sqlite3_step(stmt)
         deleteFTS(id)
         deleteLinks(id)
+        deleteImageRefs(id)
     }
 
     /// サーバ削除が確定したノートを物理的に行ごと消す。
@@ -795,6 +820,7 @@ actor NoteStore {
         }
         deleteFTS(id)
         deleteLinks(id)
+        deleteImageRefs(id)
     }
 
     /// 未同期（dirty）ノートの id 集合（同期ワーカの押し上げ対象・リコンシリエーションの保護対象）。
@@ -828,6 +854,7 @@ actor NoteStore {
         sqlite3_step(stmt)
         deleteFTS(id)
         deleteLinks(id)
+        deleteImageRefs(id)
     }
 
     /// 同期対象から外れたフォルダ配下の行をローカルから物理削除する（サーバには影響なし）。
@@ -843,6 +870,11 @@ actor NoteStore {
             }
         }
         if let stmt = prepare("DELETE FROM links WHERE source_id LIKE ?;") {
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+        if let stmt = prepare("DELETE FROM image_refs WHERE note_id LIKE ?;") {
             sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
             sqlite3_step(stmt)
             sqlite3_finalize(stmt)
@@ -890,6 +922,7 @@ actor NoteStore {
         // 全文検索・バックリンクは本文のみで索引
         updateFTS(id: r.id, content: body)
         updateLinks(id: r.id, content: body)
+        updateImageRefs(id: r.id, content: body)
     }
 
     // MARK: - FTS メンテナンス
@@ -1070,6 +1103,217 @@ actor NoteStore {
         }
         exec("BEGIN TRANSACTION;")
         for (id, content) in rows { updateLinks(id: id, content: content) }
+        exec("COMMIT;")
+    }
+
+    // MARK: - 画像（couchimg）: 貼られているノートと、画像内の文字（OCR）
+    //
+    // 設計は ../couchimg/docs/DESIGN.md 4.4。
+    // - image_refs: 画像 → ノート。端末に同期されているノートの本文から作る（サーバーの対応表とは別。D11）
+    // - OCR の文字: サーバーの /api/changes から取り込み、別ファイル（couchimg-ocr.sqlite）に置く。
+    //   サーバーから取り直せるので、iCloud・端末のバックアップから外す。ATTACH しているので検索で一緒に引ける
+
+    private static func ocrDatabaseURL() -> URL {
+        databaseURL().deletingLastPathComponent().appendingPathComponent("couchimg-ocr.sqlite")
+    }
+
+    private func attachOCRDatabase() {
+        var url = Self.ocrDatabaseURL()
+        exec("ATTACH DATABASE '\(url.path.replacingOccurrences(of: "'", with: "''"))' AS ocr;")
+        exec("""
+        CREATE TABLE IF NOT EXISTS ocr.image_ocr (
+            image_id TEXT PRIMARY KEY,
+            text     TEXT,
+            seq      INTEGER NOT NULL,
+            deleted  INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+        exec("CREATE VIRTUAL TABLE IF NOT EXISTS ocr.image_ocr_fts USING fts5(image_id UNINDEXED, content, tokenize='trigram');")
+        exec("CREATE TABLE IF NOT EXISTS ocr.state (key TEXT PRIMARY KEY, value TEXT);")
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+    }
+
+    private func ocrState(_ key: String) -> String? {
+        guard let stmt = prepare("SELECT value FROM ocr.state WHERE key = ?;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        return sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
+    }
+
+    private func setOCRState(_ key: String, _ value: String) {
+        guard let stmt = prepare("INSERT INTO ocr.state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    /// 取り込みの続きの位置（since）と、サーバーの DB の世代（gen）
+    func ocrSyncPosition() -> (since: Int, gen: String?) {
+        (Int(ocrState("since") ?? "") ?? 0, ocrState("gen"))
+    }
+
+    /// /api/changes の1回分を取り込む。「文字の書き込み・索引の更新・続きの位置の保存」を1つのトランザクションで行うので、
+    /// 途中で落ちても、取りこぼしも二重適用も起きない（次回は同じ位置から取り直す）。
+    /// 行ごとに、端末にある番号より新しいときだけ適用する（応答の順序が入れ替わっても古い値で上書きしない）。
+    func applyOCRChanges(_ changes: CouchImgService.Changes) {
+        exec("BEGIN IMMEDIATE;")
+        if changes.reset {
+            // サーバーの DB が作り直された・復元された。手元を空にして最初から取り直す
+            exec("DELETE FROM ocr.image_ocr;")
+            exec("DELETE FROM ocr.image_ocr_fts;")
+        }
+        for item in changes.items {
+            if let stmt = prepare("SELECT seq FROM ocr.image_ocr WHERE image_id = ?;") {
+                sqlite3_bind_text(stmt, 1, item.id, -1, SQLITE_TRANSIENT)
+                let known = sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : -1
+                sqlite3_finalize(stmt)
+                if known >= item.seq { continue }
+            }
+            let text = item.deleted ? nil : item.ocrText
+            if let stmt = prepare("""
+                INSERT INTO ocr.image_ocr (image_id, text, seq, deleted) VALUES (?, ?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET text = excluded.text, seq = excluded.seq, deleted = excluded.deleted;
+                """) {
+                sqlite3_bind_text(stmt, 1, item.id, -1, SQLITE_TRANSIENT)
+                bindOptionalText(stmt, 2, text)
+                sqlite3_bind_int64(stmt, 3, Int64(item.seq))
+                sqlite3_bind_int64(stmt, 4, item.deleted ? 1 : 0)
+                sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+            if let stmt = prepare("DELETE FROM ocr.image_ocr_fts WHERE image_id = ?;") {
+                sqlite3_bind_text(stmt, 1, item.id, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+            if let text, !text.isEmpty, let stmt = prepare("INSERT INTO ocr.image_ocr_fts (image_id, content) VALUES (?, ?);") {
+                sqlite3_bind_text(stmt, 1, item.id, -1, SQLITE_TRANSIENT)
+                // ノートの本文と同じく、NFKC で折りたたんでから索引する（全角/半角の違いで検索漏れしないように）
+                sqlite3_bind_text(stmt, 2, text.nfkc, -1, SQLITE_TRANSIENT)
+                sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
+        setOCRState("since", String(changes.next))
+        setOCRState("gen", changes.gen)
+        exec("COMMIT;")
+    }
+
+    /// 取り込み済みの OCR の文字（オフラインでプレビュー画面に出す用）。未取り込み・削除済みは nil
+    func ocrText(forImage id: String) -> String? {
+        guard let stmt = prepare("SELECT text FROM ocr.image_ocr WHERE image_id = ? AND deleted = 0;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        return sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
+    }
+
+    /// 取り込み済みの画像の数（設定画面・確認用）
+    func ocrImageCount() -> Int {
+        guard let stmt = prepare("SELECT COUNT(*) FROM ocr.image_ocr WHERE deleted = 0 AND text IS NOT NULL AND text <> '';") else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    /// 語を「貼ってある画像の中の文字」に含むノートの id 集合。3文字以上は FTS5(trigram)、1〜2文字は LIKE。
+    private func imageOCRMatchNoteIDs(_ term: String) -> Set<String> {
+        let condition = term.count >= 3 ? "image_ocr_fts MATCH ?" : "ocr.image_ocr_fts.content LIKE ?"
+        let stmt = prepare("""
+        SELECT DISTINCT r.note_id FROM ocr.image_ocr_fts
+        JOIN image_refs r ON r.image_id = ocr.image_ocr_fts.image_id
+        JOIN notes n ON n.id = r.note_id
+        WHERE \(condition) AND n.deleted = 0 LIMIT 2000;
+        """)
+        let value = term.count >= 3
+            ? "\"" + term.nfkc.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            : "%" + term.nfkc + "%"
+        sqlite3_bind_text(stmt, 1, value, -1, SQLITE_TRANSIENT)
+        return collectIDs(stmt)
+    }
+
+    /// そのノートに貼ってある画像の OCR から、語の前後を切り出す（一覧の「画像内の文字: …」用）
+    private func imageOCRSnippet(noteID: String, term: String) -> String? {
+        guard let stmt = prepare("""
+        SELECT o.text FROM image_refs r JOIN ocr.image_ocr o ON o.image_id = r.image_id
+        WHERE r.note_id = ? AND o.deleted = 0 AND o.text IS NOT NULL;
+        """) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, noteID, -1, SQLITE_TRANSIENT)
+        let needle = term.foldedForMatch
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let text = columnText(stmt, 0) else { continue }
+            let folded = text.nfkc
+            guard let hit = folded.range(of: needle, options: .caseInsensitive) else { continue }
+            let start = folded.index(hit.lowerBound, offsetBy: -30, limitedBy: folded.startIndex) ?? folded.startIndex
+            let end = folded.index(hit.upperBound, offsetBy: 80, limitedBy: folded.endIndex) ?? folded.endIndex
+            let body = folded[start..<end].split(whereSeparator: \.isNewline).joined(separator: " ")
+            return (start > folded.startIndex ? "…" : "") + body + (end < folded.endIndex ? "…" : "")
+        }
+        return nil
+    }
+
+    /// その画像が貼られているノート（端末に同期されている範囲）
+    func notes(forImage id: String) -> [NoteItem] {
+        guard let stmt = prepare("""
+        SELECT n.id, n.path, n.mtime, substr(n.content, 1, 400)
+        FROM image_refs r JOIN notes n ON n.id = r.note_id
+        WHERE r.image_id = ? AND n.deleted = 0 ORDER BY n.mtime DESC;
+        """) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        return readItems(stmt, previewTrim: true)
+    }
+
+    /// 渡した id のうち、端末にあるノート（プレビュー画面で、未同期のノートを薄く出すため）
+    func existingNoteIDs(_ ids: [String]) -> Set<String> {
+        var out = Set<String>()
+        guard let stmt = prepare("SELECT 1 FROM notes WHERE id = ? AND deleted = 0;") else { return out }
+        defer { sqlite3_finalize(stmt) }
+        for id in ids {
+            sqlite3_reset(stmt)
+            sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+            if sqlite3_step(stmt) == SQLITE_ROW { out.insert(id) }
+        }
+        return out
+    }
+
+    private func updateImageRefs(id: String, content: String) {
+        deleteImageRefs(id)
+        // ホスト名を含まない本文は調べない（ほとんどのノートはここで終わる）
+        guard content.range(of: CouchImgService.host, options: .caseInsensitive) != nil else { return }
+        let refs = ImageRefs.extract(content)
+        guard !refs.isEmpty, let stmt = prepare("INSERT INTO image_refs (image_id, note_id, kind) VALUES (?, ?, ?);") else { return }
+        defer { sqlite3_finalize(stmt) }
+        for r in refs {
+            sqlite3_reset(stmt)
+            sqlite3_bind_text(stmt, 1, r.id, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, r.kind.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+        }
+    }
+
+    private func deleteImageRefs(_ id: String) {
+        guard let stmt = prepare("DELETE FROM image_refs WHERE note_id = ?;") else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    /// 全ノートの本文から image_refs を作り直す（既存 DB の初回だけ）
+    private func rebuildImageRefs() {
+        var rows: [(String, String)] = []
+        if let stmt = prepare("SELECT id, content FROM notes WHERE deleted = 0 AND content LIKE '%img.choiyaki.com%';") {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append((columnText(stmt, 0) ?? "", columnText(stmt, 1) ?? ""))
+            }
+            sqlite3_finalize(stmt)
+        }
+        exec("BEGIN TRANSACTION;")
+        exec("DELETE FROM image_refs;")
+        for (id, content) in rows { updateImageRefs(id: id, content: content) }
         exec("COMMIT;")
     }
 
