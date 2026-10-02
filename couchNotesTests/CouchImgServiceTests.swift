@@ -203,6 +203,35 @@ final class CouchImgAPIDecodingTests: XCTestCase {
         XCTAssertEqual(hints.privateInPublicNotes.count, 1)
     }
 
+    func testDevicesAndPairCode() throws {
+        struct Reply: Decodable { let devices: [CouchImgService.Device] }
+        let devices = try decode(Reply.self, """
+        {"devices":[
+          {"name":"couchagent","kinds":[],"static_kinds":["ocr"],"created_at":null,"expires_at":null,"last_upload_at":null},
+          {"name":"iphone","kinds":["upload","app"],"static_kinds":["admin"],"created_at":1800000000,"expires_at":null,"last_upload_at":null},
+          {"name":"win-home","kinds":["upload"],"static_kinds":[],"created_at":1800000000,"expires_at":1800003600,"last_upload_at":1800000010}]}
+        """).devices
+        XCTAssertEqual(devices.map(\.isServerOnly), [true, false, false])
+        XCTAssertEqual(devices.map(\.kindsText), ["OCR", "アップロード・閲覧・管理", "アップロード"])
+        XCTAssertEqual(devices[2].expiresAt, 1_800_003_600)
+
+        let code = try decode(CouchImgService.PairCode.self, """
+        {"code":"ABCD-EFGH","name":"win-home","scopes":["upload"],"token_ttl":null,"expires_at":1800000300,"replaces":true}
+        """)
+        XCTAssertEqual(code.code, "ABCD-EFGH")
+        XCTAssertNil(code.tokenTtl)
+        XCTAssertTrue(code.replaces)
+    }
+
+    func testDeviceNameFollowsTheServerRule() {
+        for ok in ["a", "win-home", "0mac", String(repeating: "a", count: 32)] {
+            XCTAssertTrue(CouchImgService.isValidDeviceName(ok), ok)
+        }
+        for bad in ["", "-a", "Win", "自宅", "a b", "a_b", "a/b", "..", "ａ", String(repeating: "a", count: 33)] {
+            XCTAssertFalse(CouchImgService.isValidDeviceName(bad), bad)
+        }
+    }
+
     func testPreviewTargetOnlyForOurImages() {
         let id = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
         XCTAssertEqual(ImagePreviewTarget(urlString: "https://img.choiyaki.com/\(id).jpg"), ImagePreviewTarget(id: id, ext: "jpg"))

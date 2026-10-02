@@ -388,7 +388,7 @@ struct ImageUploadSettingsView: View {
 
             Section(
                 header: Text("couchimg: この端末の登録"),
-                footer: Text("サーバーで couchimg-token pair <端末名> を実行すると出る8文字の登録コードを入力します（5分・1回だけ有効）。アップロードした画像は、最初はすべて非公開です。")
+                footer: Text("8文字の登録コードを入力します（5分・1回だけ有効）。コードは、登録済みの iPhone の「端末の追加と一覧」か、サーバーで couchimg-token pair <端末名> を実行すると出ます。アップロードした画像は、最初はすべて非公開です。")
             ) {
                 if let registeredName {
                     LabeledContent("登録済みの端末名", value: registeredName)
@@ -428,6 +428,12 @@ struct ImageUploadSettingsView: View {
                     }
                 }
                 .disabled(adminCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+            }
+
+            if hasAdmin {
+                Section(footer: Text("ほかの端末（PC のブラウザ・iPad・Mac）用の登録コードを出したり、登録済みの端末を無効にしたりします。WireGuard を繋いでいるときだけ使えます。")) {
+                    NavigationLink("端末の追加と一覧") { CouchImgDevicesView() }
+                }
             }
 
             Section(

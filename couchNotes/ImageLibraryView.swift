@@ -44,7 +44,7 @@ struct ImageLibraryView: View {
     @State private var loadGeneration = 0
 
     private static let sources: [(String, String)] = [
-        ("couchnotes", "couchNotes"), ("share", "共有シート"), ("web", "Web ページ"), ("mac", "Mac"), ("windows", "Windows"), ("import", "Gyazo から移行"),
+        ("couchnotes", "couchNotes"), ("couchlog", "couchLog"), ("share", "共有シート"), ("web", "Web ページ"), ("vscode", "VS Code"), ("import", "Gyazo から移行"),
     ]
     private let columns = [GridItem(.adaptive(minimum: 104, maximum: 180), spacing: 6)]
 

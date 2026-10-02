@@ -25,6 +25,8 @@ enum CouchImgError: LocalizedError {
     case notFound
     case adminUnreachable
     case cannotPrepare
+    case badDeviceName
+    case deviceNotFound
     case httpError(Int)
 
     var errorDescription: String? {
@@ -49,6 +51,10 @@ enum CouchImgError: LocalizedError {
             return "サーバーの管理用の口に繋がりません。WireGuard を繋いでからやり直してください。"
         case .cannotPrepare:
             return "画像を読み込めませんでした。"
+        case .badDeviceName:
+            return "端末名は、英小文字・数字・ハイフンで32文字までにしてください（例: win-home）。"
+        case .deviceNotFound:
+            return "その端末には、無効にできる登録がありません（すでに無効か、期限が切れています）。"
         case .httpError(let code):
             return "サーバーとの通信に失敗しました（\(code)）。"
         }
@@ -270,14 +276,22 @@ enum CouchImgService {
 
     // MARK: - 公開・削除（WireGuard 側の口）
 
-    private static func adminRequest(_ method: String, _ path: String) async throws {
+    /// WireGuard 側の口への要求（admin のトークン）。繋がらなければ adminUnreachable。
+    static func adminSend(_ method: String, _ path: String, json: [String: Any]? = nil) async throws -> (Data, Int) {
         guard let t = token(adminTokenKey) else { throw CouchImgError.adminNotRegistered }
         var request = URLRequest(url: adminBaseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.timeoutInterval = 8
         request.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
-        let status: Int
-        do { (_, status) = try await send(request) } catch { throw CouchImgError.adminUnreachable }
+        if let json {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: json)
+        }
+        do { return try await send(request) } catch { throw CouchImgError.adminUnreachable }
+    }
+
+    private static func adminRequest(_ method: String, _ path: String) async throws {
+        let (_, status) = try await adminSend(method, path)
         guard status == 200 else { throw error(for: status) }
     }
 
