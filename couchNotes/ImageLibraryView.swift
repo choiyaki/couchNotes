@@ -51,7 +51,8 @@ struct ImageLibraryView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                // Lazy にする: 末尾の「続きを読み込む」印が、そこまでスクロールしたときに初めて現れるように
+                LazyVStack(alignment: .leading, spacing: 12) {
                     Picker("表示", selection: $mode) {
                         ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
                     }
@@ -65,7 +66,9 @@ struct ImageLibraryView: View {
                     } else {
                         grid(cells)
                         if next != nil {
-                            ProgressView().frame(maxWidth: .infinity).task { await loadMore() }
+                            // 続きの印（next）ごとに作り直す。作り直さないと .task が最初の1回しか走らず、
+                            // 2ページ目（120枚）で読み込みが止まる
+                            ProgressView().frame(maxWidth: .infinity).id(next).task { await loadMore() }
                         } else if cells.isEmpty, !isLoading, errorText == nil {
                             Text(query.isEmpty ? "画像はありません。" : "一致する画像はありません。")
                                 .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 30)

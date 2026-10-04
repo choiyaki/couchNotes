@@ -688,28 +688,34 @@ class CouchDBClient {
     }
 
     private func makeChunks(text: String) -> ([String], [LiveSyncChunk]) {
-        let bytes = Array(text.utf8)
         var chunks: [LiveSyncChunk] = []
         var ids: [String] = []
-        var offset = 0
-
-        while offset < bytes.count {
-            let end   = min(offset + chunkSize, bytes.count)
-            let slice = Data(bytes[offset..<end])
-            let chunk = String(data: slice, encoding: .utf8) ?? ""
-            let cid   = "h:\(sha1prefix(chunk))"
-            chunks.append(LiveSyncChunk(_id: cid, data: chunk))
+        // 空の本文でも断片を1つ作る（splitUTF8 は空文字を1つ返す）
+        for piece in Self.splitUTF8(text, maxBytes: chunkSize) {
+            let cid = "h:\(sha1prefix(piece))"
+            chunks.append(LiveSyncChunk(_id: cid, data: piece))
             ids.append(cid)
+        }
+        return (ids, chunks)
+    }
+
+    /// 本文を、UTF-8 で maxBytes 以下の断片に切る。**文字の途中では切らない**。
+    /// 以前はバイト数だけで機械的に切っていたので、切れ目が日本語などの複数バイト文字の途中に来ると
+    /// その断片が文字列に戻せず空になり、100KB を超えるノートで本文の一部が消えていた（2026-10-04 に修正）。
+    /// 断片を順に連結すると、必ず元の本文と一致する。
+    static func splitUTF8(_ text: String, maxBytes: Int) -> [String] {
+        let bytes = Array(text.utf8)
+        guard !bytes.isEmpty, maxBytes >= 4 else { return [text] }   // UTF-8 の1文字は最大4バイト
+        var pieces: [String] = []
+        var offset = 0
+        while offset < bytes.count {
+            var end = min(offset + maxBytes, bytes.count)
+            // 切れ目が文字の途中（続きのバイト 10xxxxxx）なら、その文字の先頭まで戻る
+            while end < bytes.count, end > offset, bytes[end] & 0xC0 == 0x80 { end -= 1 }
+            pieces.append(String(decoding: bytes[offset..<end], as: UTF8.self))
             offset = end
         }
-
-        if chunks.isEmpty {
-            let cid = "h:\(sha1prefix(text))"
-            chunks.append(LiveSyncChunk(_id: cid, data: text))
-            ids.append(cid)
-        }
-
-        return (ids, chunks)
+        return pieces
     }
 
     private func sha1prefix(_ text: String) -> String {

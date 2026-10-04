@@ -533,19 +533,18 @@ struct NoteListView: View {
         .contentShape(Rectangle())
     }
 
-    /// 画面下部のフッター：左＝設定。
+    /// 画面下部のフッター：左＝設定、右＝画像一覧。
     var footerBar: some View {
         HStack {
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape")
             }
+            Spacer()
             if CouchImgService.hasAppToken {
                 Button { showImageLibrary = true } label: {
                     Image(systemName: "photo.on.rectangle.angled")
                 }
-                .padding(.leading, 18)
             }
-            Spacer()
         }
         .font(.title3)
         .padding(.horizontal, 24)
