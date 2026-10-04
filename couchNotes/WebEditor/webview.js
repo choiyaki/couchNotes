@@ -33295,7 +33295,7 @@
           if (cell.href)
             holder.setAttribute("data-href", cell.href);
           const img = document.createElement("img");
-          img.src = cell.url;
+          img.src = displaySrc(cell.url);
           img.style.width = `${Math.round(cell.w)}px`;
           img.style.height = `${Math.round(cell.h)}px`;
           img.addEventListener("load", () => {
