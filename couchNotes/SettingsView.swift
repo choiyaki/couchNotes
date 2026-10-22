@@ -388,7 +388,7 @@ struct ImageUploadSettingsView: View {
 
             Section(
                 header: Text("couchimg: この端末の登録"),
-                footer: Text("8文字の登録コードを入力します（5分・1回だけ有効）。コードは、登録済みの iPhone の「端末の追加と一覧」か、サーバーで couchimg-token pair <端末名> を実行すると出ます。アップロードした画像は、最初はすべて非公開です。")
+                footer: Text("8文字の登録コードを入力します（5分・1回だけ有効）。コードは、couchImg のアプリの端末管理か、サーバーで couchimg-token pair <端末名> を実行すると出ます。アップロードした画像は、最初はすべて非公開です。")
             ) {
                 if let registeredName {
                     LabeledContent("登録済みの端末名", value: registeredName)
@@ -413,7 +413,7 @@ struct ImageUploadSettingsView: View {
 
             Section(
                 header: Text("couchimg: 管理用の登録（公開・削除）"),
-                footer: Text("画像の公開と削除は、WireGuard を繋いでいるときだけ使えます。WireGuard を繋いだ状態で、サーバーで couchimg-token admin-pair <端末名> を実行して出たコードを入力します。")
+                footer: Text("画像の公開と削除は、Tailscale を繋いでいるときだけ使えます。Tailscale を繋いだ状態で、サーバーで couchimg-token admin-pair <端末名> を実行して出たコードを入力します。端末の追加と一覧は、couchImg のアプリで行います。")
             ) {
                 LabeledContent("管理用の登録", value: hasAdmin ? "済み" : "なし")
                 TextField("管理用の登録コード", text: $adminCode)
@@ -428,12 +428,6 @@ struct ImageUploadSettingsView: View {
                     }
                 }
                 .disabled(adminCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
-            }
-
-            if hasAdmin {
-                Section(footer: Text("ほかの端末（PC のブラウザ・iPad・Mac）用の登録コードを出したり、登録済みの端末を無効にしたりします。WireGuard を繋いでいるときだけ使えます。")) {
-                    NavigationLink("端末の追加と一覧") { CouchImgDevicesView() }
-                }
             }
 
             Section(

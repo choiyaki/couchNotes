@@ -6,7 +6,8 @@
 //  設計は ../couchimg/docs/DESIGN.md。
 //  - トークンは端末ごと・種類ごと（upload / app / admin）。登録コードと引き換えに受け取り、Keychain に置く
 //  - アップロード直後は常に非公開。非公開画像は app のトークンを付けて取得する
-//  - 公開・削除は WireGuard 側の口（10.9.0.10:8751）でだけ受け付けられる
+//  - 公開・削除は管理用の口（Tailscale の中の couchimg:8751）でだけ受け付けられる。
+//    端末の追加・一覧・無効化は画像のアプリ（couchImgApp）で行い、ここには持たない
 //
 
 import Foundation
@@ -25,8 +26,6 @@ enum CouchImgError: LocalizedError {
     case notFound
     case adminUnreachable
     case cannotPrepare
-    case badDeviceName
-    case deviceNotFound
     case httpError(Int)
 
     var errorDescription: String? {
@@ -34,7 +33,7 @@ enum CouchImgError: LocalizedError {
         case .notRegistered:
             return "この端末は couchimg に登録されていません。設定 →「画像アップロード」で登録コードを入力してください。"
         case .adminNotRegistered:
-            return "公開・削除には管理用の登録が必要です。設定 →「画像アップロード」で、WireGuard を繋いだ状態で管理用の登録コードを入力してください。"
+            return "公開・削除には管理用の登録が必要です。設定 →「画像アップロード」で、Tailscale を繋いだ状態で管理用の登録コードを入力してください。"
         case .badCode:
             return "登録コードが違うか、期限（5分）が切れています。コードを出し直してください。"
         case .unauthorized:
@@ -48,13 +47,9 @@ enum CouchImgError: LocalizedError {
         case .notFound:
             return "画像が見つかりません（すでに削除されている可能性があります）。"
         case .adminUnreachable:
-            return "サーバーの管理用の口に繋がりません。WireGuard を繋いでからやり直してください。"
+            return "サーバーの管理用の口に繋がりません。Tailscale を繋いでからやり直してください。"
         case .cannotPrepare:
             return "画像を読み込めませんでした。"
-        case .badDeviceName:
-            return "端末名は、英小文字・数字・ハイフンで32文字までにしてください（例: win-home）。"
-        case .deviceNotFound:
-            return "その端末には、無効にできる登録がありません（すでに無効か、期限が切れています）。"
         case .httpError(let code):
             return "サーバーとの通信に失敗しました（\(code)）。"
         }
@@ -64,8 +59,9 @@ enum CouchImgError: LocalizedError {
 enum CouchImgService {
     static let host = "img.choiyaki.com"
     static let baseURL = URL(string: "https://img.choiyaki.com")!
-    /// WireGuard 側の口。WireGuard のトンネルの中なので平文の HTTP（Info.plist の NSAllowsLocalNetworking で許可）
-    static let adminBaseURL = URL(string: "http://10.9.0.10:8751")!
+    /// 管理用の口。Tailscale の中なので平文の HTTP。`.` のない名前（MagicDNS の短い名前）にして、
+    /// Info.plist の NSAllowsLocalNetworking で許可させる（IP アドレスや長い名前だと ATS に止められる）
+    static let adminBaseURL = URL(string: "http://couchimg:8751")!
     /// 編集画面（WKWebView）で画像を表示するときだけ使う独自スキーム。ノート本文の URL は https のまま
     static let scheme = "couchimg"
 
@@ -164,7 +160,7 @@ enum CouchImgService {
         return result.name
     }
 
-    /// 管理用（公開・削除）のトークンを受け取る。WireGuard を繋いだ状態でだけ届く。
+    /// 管理用（公開・削除）のトークンを受け取る。Tailscale を繋いだ状態でだけ届く。
     static func pairAdmin(code: String) async throws {
         let data: Data, status: Int
         do {
@@ -282,19 +278,15 @@ enum CouchImgService {
         return url
     }
 
-    // MARK: - 公開・削除（WireGuard 側の口）
+    // MARK: - 公開・削除（管理用の口）
 
-    /// WireGuard 側の口への要求（admin のトークン）。繋がらなければ adminUnreachable。
-    static func adminSend(_ method: String, _ path: String, json: [String: Any]? = nil) async throws -> (Data, Int) {
+    /// 管理用の口への要求（admin のトークン）。繋がらなければ adminUnreachable。
+    private static func adminSend(_ method: String, _ path: String) async throws -> (Data, Int) {
         guard let t = token(adminTokenKey) else { throw CouchImgError.adminNotRegistered }
         var request = URLRequest(url: adminBaseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.timeoutInterval = 8
         request.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
-        if let json {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: json)
-        }
         do { return try await send(request) } catch { throw CouchImgError.adminUnreachable }
     }
 

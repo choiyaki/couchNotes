@@ -15,8 +15,8 @@
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- couchimg の公開・削除は WireGuard のトンネルの中の口（http://10.9.0.10:8751）へ送る。
-		     トンネルが暗号化するので平文の HTTP。IP アドレス宛てのローカル通信だけを許可する -->
+		<!-- couchimg の公開・削除は Tailscale の中の管理用の口（http://couchimg:8751）へ送る。
+		     Tailscale が暗号化するので平文の HTTP。`.` のない名前などのローカル通信だけを許可する -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>

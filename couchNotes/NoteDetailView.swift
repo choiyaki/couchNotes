@@ -782,7 +782,7 @@ struct NoteDetailView: View {
         webBridge.insertHandwriting(result, atEnd: true)
     }
 
-    /// couchimg の画像を公開・削除する（WireGuard を繋いでいるときだけ届く）。
+    /// couchimg の画像を公開・削除する（Tailscale を繋いでいるときだけ届く）。
     private func performImageAction(_ action: ImageAction) async {
         do {
             switch action.kind {

@@ -412,7 +412,7 @@ struct ImagePreviewView: View {
             Text(metaText(info)).font(.caption2).foregroundStyle(.secondary)
             Button(role: .destructive) { confirm = .delete } label: { Label("サーバーから削除…", systemImage: "trash") }
                 .disabled(isWorking)
-            Text("公開・削除は、WireGuard を繋いでいるときだけ使えます。").font(.caption2).foregroundStyle(.secondary)
+            Text("公開・削除は、Tailscale を繋いでいるときだけ使えます。").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.top, 4)
     }
