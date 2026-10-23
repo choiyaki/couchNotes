@@ -13,6 +13,9 @@
 			</array>
 		</dict>
 	</array>
+	<!-- 独自の暗号化はない（通信は OS の HTTPS）。TestFlight へ送るときの申告 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<!-- couchimg の公開・削除は Tailscale の中の管理用の口（http://couchimg:8751）へ送る。
