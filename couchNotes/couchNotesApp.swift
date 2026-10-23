@@ -15,6 +15,8 @@ struct couchNotesApp: App {
                     LinkIndexPublisher.shared.start()
                     // 共有シートの拡張機能に、couchimg のアップロード専用トークンの写しを渡す
                     CouchImgService.syncShareExtensionToken()
+                    // 前の版が置いた couchimg の admin のトークンを消す（公開・削除は publish で登録し直す）
+                    CouchImgService.removeLegacyAdminToken()
                 }
                 .onOpenURL { url in
                     URLActionRouter.shared.handle(url)

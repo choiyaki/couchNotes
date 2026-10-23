@@ -11,8 +11,9 @@ Obsidian LiveSync（CouchDB）上の Markdown ノートを読み書きする iOS
 ## 画像（couchimg）
 
 - アップロードと表示は `https://img.choiyaki.com`（upload・app のトークン）
-- 公開・削除は、Tailscale の中の管理用の口 `http://couchimg:8751`（admin のトークン）。`.` のない名前への平文の HTTP なので、`Info.plist` の `NSAllowsLocalNetworking` が要る（2026-10-23 に WireGuard から移した）
+- 公開・削除は、Tailscale の中の管理用の口 `http://couchimg:8751`（publish のトークン。2026-10-23 に admin から替えた。前の版が置いた admin のトークンは、起動のときに Keychain から消す）。`.` のない名前への平文の HTTP なので、`Info.plist` の `NSAllowsLocalNetworking` が要る（2026-10-23 に WireGuard から移した）
 - 端末の追加・一覧・無効化（登録コードの発行）は、画像のアプリ（`~/src/couchImgApp`）だけで行う。このアプリには足さない（2026-10-23 利用者決定）
+- 登録の欄は1つ（2026-10-23 利用者決定）。コードはまず一般用の口の `/pair` へ送り、421 `{redeem_at: "admin"}`（publish を含むコード）なら管理用の口の `/pair` へ送り直す。登録し直すと、手元のトークンはすべて入れ替わる（新しいコードに含まれない種類は消える）
 
 ## 守ること
 

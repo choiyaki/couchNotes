@@ -365,11 +365,10 @@ struct ImageUploadSettingsView: View {
 
     // couchimg の登録
     @State private var pairCode = ""
-    @State private var adminCode = ""
     @State private var isWorking = false
     @State private var couchImgMessage: String?
     @State private var registeredName = CouchImgService.deviceName
-    @State private var hasAdmin = CouchImgService.hasAdminToken
+    @State private var rights = CouchImgService.rightsDescription
     @State private var confirmForget = false
 
     var body: some View {
@@ -388,11 +387,12 @@ struct ImageUploadSettingsView: View {
 
             Section(
                 header: Text("couchimg: この端末の登録"),
-                footer: Text("8文字の登録コードを入力します（5分・1回だけ有効）。コードは、couchImg のアプリの端末管理か、サーバーで couchimg-token pair <端末名> を実行すると出ます。アップロードした画像は、最初はすべて非公開です。")
+                footer: Text("8文字の登録コードを入力します（5分・1回だけ有効）。コードは couchImg のアプリの端末管理で、権限（閲覧・アップロード・公開・削除）を選んで出します。公開・削除を含むコードは、Tailscale を繋いだ状態で入力します。登録し直すと前の登録はすべて入れ替わるので、要る権限を全部オンにしたコードを使ってください。アップロードした画像は、最初はすべて非公開です。")
             ) {
                 if let registeredName {
                     LabeledContent("登録済みの端末名", value: registeredName)
-                    Button("登録がまだ有効か確かめる") { run { try await CouchImgService.checkRegistration(); return "登録は有効です。" } }
+                    LabeledContent("権限", value: rights)
+                    Button("登録がまだ有効か確かめる") { run { try await CouchImgService.checkRegistration() } }
                     Button("この端末の登録を消す", role: .destructive) { confirmForget = true }
                 } else {
                     Text("未登録").foregroundStyle(.secondary)
@@ -405,29 +405,11 @@ struct ImageUploadSettingsView: View {
                         let name = try await CouchImgService.pair(code: pairCode)
                         pairCode = ""
                         registeredName = name
-                        return "「\(name)」として登録しました。"
+                        rights = CouchImgService.rightsDescription
+                        return "「\(name)」として登録しました（権限: \(rights)）。"
                     }
                 }
                 .disabled(pairCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
-            }
-
-            Section(
-                header: Text("couchimg: 管理用の登録（公開・削除）"),
-                footer: Text("画像の公開と削除は、Tailscale を繋いでいるときだけ使えます。Tailscale を繋いだ状態で、サーバーで couchimg-token admin-pair <端末名> を実行して出たコードを入力します。端末の追加と一覧は、couchImg のアプリで行います。")
-            ) {
-                LabeledContent("管理用の登録", value: hasAdmin ? "済み" : "なし")
-                TextField("管理用の登録コード", text: $adminCode)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.characters)
-                Button("管理用の登録をする") {
-                    run {
-                        try await CouchImgService.pairAdmin(code: adminCode)
-                        adminCode = ""
-                        hasAdmin = true
-                        return "管理用の登録をしました。"
-                    }
-                }
-                .disabled(adminCode.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
             }
 
             Section(
@@ -451,11 +433,11 @@ struct ImageUploadSettingsView: View {
             Button("消す", role: .destructive) {
                 CouchImgService.forgetRegistration()
                 registeredName = nil
-                hasAdmin = false
+                rights = CouchImgService.rightsDescription
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("この端末に保存したトークンを消します。サーバー側でも無効にするには、サーバーで couchimg-token revoke <端末名> を実行してください。")
+            Text("この端末に保存したトークンを消します。サーバー側でも無効にするには、couchImg のアプリの端末管理で、この端末を無効にしてください。")
         }
         .navigationTitle("画像アップロード")
         .navigationBarTitleDisplayMode(.inline)

@@ -8,6 +8,17 @@ final class CouchImgServiceTests: XCTestCase {
 
     // MARK: - URL の判定
 
+    /// 一般用の口の /pair が 421 {redeem_at: "admin"} を返したときだけ、管理用の口へ送り直す
+    func testAdminRedirectIsRecognizedOnlyFor421WithRedeemAtAdmin() {
+        let redirect = Data(#"{"redeem_at":"admin"}"#.utf8)
+        XCTAssertTrue(CouchImgService.isAdminRedirect(status: 421, data: redirect))
+        XCTAssertFalse(CouchImgService.isAdminRedirect(status: 403, data: redirect), "外れのコード")
+        XCTAssertFalse(CouchImgService.isAdminRedirect(status: 200, data: redirect))
+        XCTAssertFalse(CouchImgService.isAdminRedirect(status: 421, data: Data(#"{"redeem_at":"general"}"#.utf8)))
+        XCTAssertFalse(CouchImgService.isAdminRedirect(status: 421, data: Data()))
+        XCTAssertFalse(CouchImgService.isAdminRedirect(status: 421, data: Data("[]".utf8)))
+    }
+
     func testImageFileAcceptsOnlyOurHostAndShape() {
         XCTAssertEqual(CouchImgService.imageFile(from: "https://img.choiyaki.com/\(id).jpg"), "\(id).jpg")
         XCTAssertEqual(CouchImgService.imageFile(from: "https://IMG.CHOIYAKI.COM/\(id.uppercased()).PNG"), "\(id).png")

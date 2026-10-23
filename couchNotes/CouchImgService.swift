@@ -4,9 +4,11 @@
 //
 //  自分のサーバー（couchimg, https://img.choiyaki.com）への画像アップロード・取得・公開・削除。
 //  設計は ../couchimg/docs/DESIGN.md。
-//  - トークンは端末ごと・種類ごと（upload / app / admin）。登録コードと引き換えに受け取り、Keychain に置く
+//  - トークンは端末ごと・種類ごと（upload / app / publish）。登録コードと引き換えに受け取り、Keychain に置く。
+//    登録し直すと、前の登録はすべて入れ替わる（新しいコードに含まれない種類は消える。2026-10-23 利用者決定）
 //  - アップロード直後は常に非公開。非公開画像は app のトークンを付けて取得する
-//  - 公開・削除は管理用の口（Tailscale の中の couchimg:8751）でだけ受け付けられる。
+//  - 公開・削除は管理用の口（Tailscale の中の couchimg:8751）でだけ、publish のトークンで受け付けられる。
+//    publish を含む登録コードも管理用の口でだけ受け取れる（一般用の口は 421 で案内する）。admin は持たない
 //    端末の追加・一覧・無効化は画像のアプリ（couchImgApp）で行い、ここには持たない
 //
 
@@ -17,7 +19,8 @@ import UniformTypeIdentifiers
 
 enum CouchImgError: LocalizedError {
     case notRegistered
-    case adminNotRegistered
+    case publishNotRegistered
+    case publishCodeNeedsTailscale
     case badCode
     case unauthorized
     case rejected
@@ -32,8 +35,10 @@ enum CouchImgError: LocalizedError {
         switch self {
         case .notRegistered:
             return "この端末は couchimg に登録されていません。設定 →「画像アップロード」で登録コードを入力してください。"
-        case .adminNotRegistered:
-            return "公開・削除には管理用の登録が必要です。設定 →「画像アップロード」で、Tailscale を繋いだ状態で管理用の登録コードを入力してください。"
+        case .publishNotRegistered:
+            return "この端末には公開・削除の権限がありません。couchImg のアプリで「公開・削除」をオンにした登録コードを出し、Tailscale を繋いだ状態で、設定 →「画像アップロード」に入力してください。"
+        case .publishCodeNeedsTailscale:
+            return "このコードには公開・削除が含まれるので、Tailscale を繋いだ状態でしか受け取れません。Tailscale を繋いでから、同じコードをもう一度入力してください（5分以内）。"
         case .badCode:
             return "登録コードが違うか、期限（5分）が切れています。コードを出し直してください。"
         case .unauthorized:
@@ -67,7 +72,9 @@ enum CouchImgService {
 
     static let uploadTokenKey = "couchimg_upload_token"
     static let appTokenKey = "couchimg_app_token"
-    static let adminTokenKey = "couchimg_admin_token"
+    static let publishTokenKey = "couchimg_publish_token"
+    /// 前の版が置いていた admin のトークン。起動したときに消す（removeLegacyAdminToken）
+    static let legacyAdminTokenKey = "couchimg_admin_token"
     private static let deviceNameKey = "couchimg_device_name"
 
     /// サーバーの上限（4,000万画素）より十分小さくする。長辺がこれを超える写真は縮める
@@ -78,7 +85,14 @@ enum CouchImgService {
     static var deviceName: String? { UserDefaults.standard.string(forKey: deviceNameKey) }
     static var isRegistered: Bool { token(uploadTokenKey) != nil }
     static var hasAppToken: Bool { token(appTokenKey) != nil }
-    static var hasAdminToken: Bool { token(adminTokenKey) != nil }
+    static var hasPublishToken: Bool { token(publishTokenKey) != nil }
+
+    /// この端末にある権限（設定画面の表示用）
+    static var rightsDescription: String {
+        let names = [(uploadTokenKey, "アップロード"), (appTokenKey, "閲覧"), (publishTokenKey, "公開・削除")]
+            .filter { token($0.0) != nil }.map(\.1)
+        return names.isEmpty ? "なし" : names.joined(separator: "・")
+    }
 
     static func token(_ key: String) -> String? {
         guard let t = KeychainManager.shared.load(key: key), !t.isEmpty else { return nil }
@@ -87,9 +101,17 @@ enum CouchImgService {
 
     /// この端末に置いたトークンを消す（サーバー側の無効化は couchimg-token revoke で行う）
     static func forgetRegistration() {
-        for key in [uploadTokenKey, appTokenKey, adminTokenKey] { KeychainManager.shared.delete(key: key) }
+        for key in allTokenKeys { KeychainManager.shared.delete(key: key) }
         UserDefaults.standard.removeObject(forKey: deviceNameKey)
         syncShareExtensionToken()
+    }
+
+    private static let allTokenKeys = [uploadTokenKey, appTokenKey, publishTokenKey, legacyAdminTokenKey]
+
+    /// 前の版が置いた admin のトークンを消す（couchNotes には admin を持たせない。2026-10-23 利用者決定）。
+    /// 起動のときに呼ぶ。公開・削除は、publish を含む登録コードで登録し直すまで使えない
+    static func removeLegacyAdminToken() {
+        KeychainManager.shared.delete(key: legacyAdminTokenKey)
     }
 
     /// 共有シートの拡張機能に渡すアップロード専用トークンの写しを、今の登録に合わせる。
@@ -146,45 +168,66 @@ enum CouchImgService {
         return (name, tokens)
     }
 
-    /// 登録コードと引き換えに、この端末専用のトークン（upload・app）を受け取って保存する。端末名を返す。
+    /// 一般用の口の /pair の応答が「管理用の口で受け取る」の案内（421 {redeem_at: "admin"}）か
+    static func isAdminRedirect(status: Int, data: Data) -> Bool {
+        guard status == 421, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["redeem_at"] as? String == "admin"
+    }
+
+    /// 登録コードと引き換えに、この端末専用のトークン（upload・app・publish のうちコードが含むもの）を受け取って保存する。
+    /// まず一般用の口へ送り、publish を含むコード（421 の案内）なら管理用の口へ送り直す。端末名を返す。
     @discardableResult
     static func pair(code: String) async throws -> String {
         let (data, status) = try await send(pairRequest(base: baseURL, code: code, timeout: 20))
-        guard status == 200, let result = parsePairResponse(data) else { throw error(for: status) }
-        // 登録し直しのときは、古い種類のトークンを残さない
-        for key in [uploadTokenKey, appTokenKey] { KeychainManager.shared.delete(key: key) }
+        let reply: Data
+        if isAdminRedirect(status: status, data: data) {
+            let adminStatus: Int
+            do {
+                (reply, adminStatus) = try await send(pairRequest(base: adminBaseURL, code: code, timeout: 8))
+            } catch {
+                throw CouchImgError.publishCodeNeedsTailscale
+            }
+            guard adminStatus == 200 else { throw self.error(for: adminStatus) }
+        } else {
+            guard status == 200 else { throw error(for: status) }
+            reply = data
+        }
+        guard let result = parsePairResponse(reply) else { throw CouchImgError.httpError(status) }
+        // 登録し直すと全部入れ替える（新しいコードに含まれない種類のトークンを残さない）
+        for key in allTokenKeys { KeychainManager.shared.delete(key: key) }
         if let t = result.tokens["upload"] { save(t, key: uploadTokenKey) }
         if let t = result.tokens["app"] { save(t, key: appTokenKey) }
+        if let t = result.tokens["publish"] { save(t, key: publishTokenKey) }
         UserDefaults.standard.set(result.name, forKey: deviceNameKey)
         syncShareExtensionToken()
         return result.name
-    }
-
-    /// 管理用（公開・削除）のトークンを受け取る。Tailscale を繋いだ状態でだけ届く。
-    static func pairAdmin(code: String) async throws {
-        let data: Data, status: Int
-        do {
-            (data, status) = try await send(pairRequest(base: adminBaseURL, code: code, timeout: 8))
-        } catch {
-            throw CouchImgError.adminUnreachable
-        }
-        guard status == 200, let result = parsePairResponse(data), let t = result.tokens["admin"] else {
-            throw self.error(for: status)
-        }
-        save(t, key: adminTokenKey)
     }
 
     private static func save(_ token: String, key: String) {
         KeychainManager.shared.save(key: key, value: token, thisDeviceOnly: true)
     }
 
-    /// 登録がサーバー側でまだ有効かを確かめる。
-    static func checkRegistration() async throws {
-        guard let t = token(appTokenKey) ?? token(uploadTokenKey) else { throw CouchImgError.notRegistered }
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/me"))
-        request.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
-        let (_, status) = try await send(request)
-        guard status == 200 else { throw error(for: status) }
+    /// 登録がサーバー側でまだ有効かを確かめ、結果の文を返す。公開・削除は管理用の口で確かめる（Tailscale が要る）
+    static func checkRegistration() async throws -> String {
+        let general = token(appTokenKey) ?? token(uploadTokenKey)
+        guard general != nil || hasPublishToken else { throw CouchImgError.notRegistered }
+        var lines: [String] = []
+        if let t = general {
+            var request = URLRequest(url: baseURL.appendingPathComponent("api/me"))
+            request.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
+            let (_, status) = try await send(request)
+            guard status == 200 else { throw error(for: status) }
+            lines.append("アップロード・閲覧の登録は有効です。")
+        }
+        if hasPublishToken {
+            do {
+                try await adminRequest("GET", "api/me")
+                lines.append("公開・削除の登録は有効です。")
+            } catch CouchImgError.adminUnreachable {
+                lines.append("公開・削除の登録は、Tailscale に繋がらないので確かめられませんでした。")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - URL の判定
@@ -280,9 +323,9 @@ enum CouchImgService {
 
     // MARK: - 公開・削除（管理用の口）
 
-    /// 管理用の口への要求（admin のトークン）。繋がらなければ adminUnreachable。
+    /// 管理用の口への要求（publish のトークン）。繋がらなければ adminUnreachable。
     private static func adminSend(_ method: String, _ path: String) async throws -> (Data, Int) {
-        guard let t = token(adminTokenKey) else { throw CouchImgError.adminNotRegistered }
+        guard let t = token(publishTokenKey) else { throw CouchImgError.publishNotRegistered }
         var request = URLRequest(url: adminBaseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.timeoutInterval = 8
