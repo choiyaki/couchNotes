@@ -26,7 +26,7 @@ import {
 import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
 import { mathPreview } from "./math";
-import { installEnterDiag } from "./enterdiag";
+import { installEnterDiag, enterDiagListener, diagEvent } from "./enterdiag";
 import {
   listContinuation,
   indentLines,
@@ -353,6 +353,8 @@ const view = new EditorView({
       clickHandler,
       updateListener,
       caretFollow,
+      // 【診断用・一時】Enter で入力が消える件（enterdiag.ts）
+      enterDiagListener,
       keymap.of(completionKeymap),
       cnKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
@@ -430,6 +432,7 @@ function setDocText(text: string) {
 // 自前のキーボード上ツールバー（Swiftのフローティングビュー）から呼ばれるコマンド実行口。
 // inputAccessoryView を使わない代わりに、ボタン押下→ここでCM6コマンドを直接叩く。
 window.couchNotesRunCommand = (name: string) => {
+  diagEvent(`ツールバー ${name}`);
   switch (name) {
     case "wikiLink": insertWikiLink(view); break;
     case "listToggle": toggleListMarker(view); break;
@@ -451,6 +454,7 @@ window.couchNotesInsertPlaceholder = () => insertUploadPlaceholder(view);
 
 // Swift 側 evaluateJavaScript("window.couchNotesReceive({...})") から呼ばれる。
 window.couchNotesReceive = (msg: any) => {
+  diagEvent(`Swift から ${msg?.type}`);
   switch (msg?.type) {
     case "init":
       if (typeof msg.version === "number") docVersion = msg.version;

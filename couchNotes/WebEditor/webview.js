@@ -34831,34 +34831,116 @@ ${fence}`;
   var footerExtension = footerPlugin;
 
   // webview/enterdiag.ts
-  var lastEnter = null;
+  var KEEP_MS = 3e3;
+  var MAX_EVENTS = 40;
+  var events = [];
   var lastCompositionEnd = 0;
+  function diagEvent(text2) {
+    const now = Date.now();
+    events.push({ at: now, text: text2 });
+    while (events.length > MAX_EVENTS || events.length && now - events[0].at > KEEP_MS)
+      events.shift();
+  }
+  function timeline(now) {
+    return events.filter((e) => now - e.at <= KEEP_MS).map((e) => `${String(e.at - now).padStart(6)}ms ${e.text}`).join("\n");
+  }
+  function short(s) {
+    const t2 = JSON.stringify(s);
+    return t2.length > 24 ? t2.slice(0, 22) + '\u2026"' : t2;
+  }
   var box = null;
   var hideTimer;
-  function show(message) {
+  var shownAt = 0;
+  function show(title, detail) {
+    const now = Date.now();
+    if (now - shownAt < 1500)
+      return;
+    shownAt = now;
     if (!box) {
       box = document.createElement("div");
-      box.style.cssText = "position:fixed;top:8px;left:8px;right:8px;z-index:9999;padding:8px 10px;background:rgba(200,30,30,0.92);color:#fff;font:12px/1.4 -apple-system,sans-serif;border-radius:8px;white-space:pre-wrap;word-break:break-all;pointer-events:none;";
+      box.style.cssText = "position:fixed;top:8px;left:8px;right:8px;z-index:9999;padding:8px 10px;background:rgba(200,30,30,0.92);color:#fff;font:11px/1.35 ui-monospace,Menlo,monospace;border-radius:8px;white-space:pre-wrap;word-break:break-all;pointer-events:none;max-height:80vh;overflow:hidden;";
       document.body.appendChild(box);
     }
-    box.textContent = message;
+    box.textContent = [title, ...detail, "--- \u76F4\u524D\u306E\u51FA\u6765\u4E8B\uFF080ms = \u5E2F\u3092\u51FA\u3057\u305F\u6642\uFF09 ---", timeline(now)].join("\n");
     box.style.display = "block";
     window.clearTimeout(hideTimer);
     hideTimer = window.setTimeout(() => {
       if (box)
         box.style.display = "none";
-    }, 6e3);
+    }, 15e3);
   }
+  function domSelectionText(view2) {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.anchorNode)
+      return "";
+    if (!view2.contentDOM.contains(sel.anchorNode))
+      return "";
+    return sel.toString();
+  }
+  function selectionSummary(view2) {
+    const s = view2.state.selection.main;
+    const cm = s.empty ? "\u306A\u3057" : `${short(view2.state.sliceDoc(s.from, s.to))}\uFF08${s.from}\u301C${s.to}\uFF09`;
+    const dom = domSelectionText(view2);
+    return `\u9078\u629E: CodeMirror=${cm}\u30FB\u753B\u9762=${dom ? short(dom) : "\u306A\u3057"}`;
+  }
+  var enterDiagListener = EditorView.updateListener.of((u) => {
+    const composing = u.view.composing ? "\u5909\u63DB\u4E2D" : "";
+    if (!u.transactions.length) {
+      const flags = [u.viewportChanged && "viewport", u.geometryChanged && "geometry", u.focusChanged && "focus"].filter(Boolean).join(",");
+      diagEvent(`\u66F4\u65B0(\u53D6\u5F15\u306A\u3057) ${flags} ${composing}`);
+      return;
+    }
+    for (const tr of u.transactions) {
+      const ev = ["input", "delete", "select", "undo", "redo", "move"].find((t2) => tr.isUserEvent(t2)) ?? "-";
+      const parts = [`\u66F4\u65B0 ${ev}`];
+      if (tr.docChanged)
+        parts.push("\u672C\u6587");
+      if (tr.selection)
+        parts.push("\u9078\u629E");
+      if (tr.effects.length)
+        parts.push(`\u52B9\u679C${tr.effects.length}`);
+      if (composing)
+        parts.push(composing);
+      diagEvent(parts.join(" "));
+    }
+  });
   function installEnterDiag(view2) {
     const dom = view2.contentDOM;
-    dom.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.keyCode === 13 || e.keyCode === 229) {
-        lastEnter = { at: Date.now(), isComposing: e.isComposing, keyCode: e.keyCode };
+    dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
+    dom.addEventListener("compositionupdate", (e) => diagEvent(`compositionupdate ${short(e.data ?? "")}`), true);
+    dom.addEventListener("compositionend", (e) => {
+      lastCompositionEnd = Date.now();
+      diagEvent(`compositionend ${short(e.data ?? "")}`);
+      for (const delay of [0, 120]) {
+        window.setTimeout(() => {
+          const dom2 = domSelectionText(view2);
+          const cm = !view2.state.selection.main.empty;
+          if (dom2 || cm) {
+            diagEvent(`\u5909\u63DB\u5F8C\u306B\u9078\u629E\u3042\u308A\uFF08${delay}ms \u5F8C\uFF09`);
+            show("\u5909\u63DB\u306E\u5F8C\u306B\u3001\u9078\u629E\u7BC4\u56F2\u304C\u6B8B\u308A\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09", [selectionSummary(view2)]);
+          }
+        }, delay);
       }
     }, true);
-    dom.addEventListener("compositionend", () => {
-      lastCompositionEnd = Date.now();
+    dom.addEventListener("keydown", (e) => {
+      const k = e.key === " " ? "Space" : e.key;
+      diagEvent(`keydown ${k} code=${e.keyCode}${e.isComposing ? " \u5909\u63DB\u4E2D" : ""}`);
+      if (e.key !== "Enter" && e.keyCode !== 13)
+        return;
+      if (Date.now() - lastCompositionEnd > KEEP_MS)
+        return;
+      if (!domSelectionText(view2) && view2.state.selection.main.empty)
+        return;
+      show("\u5909\u63DB\u306E\u5F8C\u3001\u9078\u629E\u7BC4\u56F2\u304C\u3042\u308B\u307E\u307E Enter \u304C\u62BC\u3055\u308C\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09", [
+        selectionSummary(view2),
+        `isComposing=${e.isComposing}\u30FBcompositionend \u306F ${Date.now() - lastCompositionEnd}ms \u524D`
+      ]);
     }, true);
+    dom.addEventListener("beforeinput", (e) => {
+      const ie3 = e;
+      diagEvent(`beforeinput ${ie3.inputType} ${short(ie3.data ?? "")}`);
+    }, true);
+    dom.addEventListener("blur", () => diagEvent("blur"), true);
     const inputState = view2.inputState;
     if (!inputState || typeof inputState.flushIOSKey !== "function")
       return;
@@ -34869,15 +34951,11 @@ ${fence}`;
       const handled = original(change);
       const lost = !!change && (/\S/.test(change.insert.toString()) || change.from < change.to);
       if (handled && lost && pending2?.key === "Enter") {
-        const now = Date.now();
-        const lines = [
-          "Enter \u306E\u4FDD\u7559\u3067\u3001\u5165\u529B\u3092\u6368\u3066\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09",
-          `\u6368\u3066\u305F\u633F\u5165: ${JSON.stringify(change.insert.toString())}`,
-          `\u7F6E\u304D\u63DB\u3048\u5BFE\u8C61: ${JSON.stringify(removed)}\uFF08${change.from}\u301C${change.to}\uFF09`,
-          lastEnter ? `Enter keydown: ${now - lastEnter.at}ms \u524D\u30FBkeyCode=${lastEnter.keyCode}\u30FBisComposing=${lastEnter.isComposing}` : "Enter keydown: \u8A18\u9332\u306A\u3057",
-          `compositionend: ${lastCompositionEnd ? `${now - lastCompositionEnd}ms \u524D` : "\u306A\u3057"}`
-        ];
-        show(lines.join("\n"));
+        diagEvent("Enter \u306E\u4FDD\u7559\u3067\u5165\u529B\u3092\u6368\u3066\u305F");
+        show("Enter \u306E\u4FDD\u7559\u3067\u3001\u5165\u529B\u3092\u6368\u3066\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09", [
+          `\u6368\u3066\u305F\u633F\u5165: ${short(change.insert.toString())}`,
+          `\u7F6E\u304D\u63DB\u3048\u5BFE\u8C61: ${short(removed)}\uFF08${change.from}\u301C${change.to}\uFF09`
+        ]);
       }
       return handled;
     };
@@ -35108,6 +35186,8 @@ ${fence}`;
         clickHandler,
         updateListener2,
         caretFollow,
+        // 【診断用・一時】Enter で入力が消える件（enterdiag.ts）
+        enterDiagListener,
         keymap.of(completionKeymap),
         cnKeymap,
         keymap.of([...historyKeymap, ...defaultKeymap])
@@ -35169,6 +35249,7 @@ ${fence}`;
     });
   }
   window.couchNotesRunCommand = (name2) => {
+    diagEvent(`\u30C4\u30FC\u30EB\u30D0\u30FC ${name2}`);
     switch (name2) {
       case "wikiLink":
         insertWikiLink(view);
@@ -35199,6 +35280,7 @@ ${fence}`;
   };
   window.couchNotesInsertPlaceholder = () => insertUploadPlaceholder(view);
   window.couchNotesReceive = (msg) => {
+    diagEvent(`Swift \u304B\u3089 ${msg?.type}`);
     switch (msg?.type) {
       case "init":
         if (typeof msg.version === "number")

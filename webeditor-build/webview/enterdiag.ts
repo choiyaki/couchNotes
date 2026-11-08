@@ -1,40 +1,134 @@
 // 【診断用・一時】iPad のハードウェアキーボードで Enter を押すと入力が消える件の調査。
-// CodeMirror は iOS で Enter を保留し（pendingIOSKey）、直後に来た本文の変化を捨てて
-// Enter のコマンドに置き換える（flushIOSKey）。その「捨てた変化」を画面の上に数秒出す。
-// 文字が消えたときにこの表示が出れば、原因はこの仕組みと確かめられる。原因がわかったら外す。
-import { EditorView } from "@codemirror/view";
+// 1回目の診断で、日本語の変換が Enter より前に打ち切られ（compositionend）、残った文字が
+// 「選択範囲」になり、Enter がそれを改行で置き換えて消していると分かった。
+// 何が変換を打ち切るのかを知るため、直前の出来事（変換・打鍵・Swift からの更新・エディタの更新）を
+// 記録し、次のときに画面の上へ出す。原因がわかったら外す。
+// - 変換が終わった直後に、選択範囲が残った
+// - 変換が終わって間もなく、選択範囲があるまま Enter が押された
+// - CodeMirror が Enter を保留して、入力を捨てた（flushIOSKey）
+import { EditorView, ViewUpdate } from "@codemirror/view";
 
-// 直近の Enter の keydown（IME の変換中だったか）
-let lastEnter: { at: number; isComposing: boolean; keyCode: number } | null = null;
+const KEEP_MS = 3000;
+const MAX_EVENTS = 40;
+
+type DiagEvent = { at: number; text: string };
+const events: DiagEvent[] = [];
 let lastCompositionEnd = 0;
+
+/** 出来事を1つ記録する（main.ts から、Swift から届いた更新の種類も記録する） */
+export function diagEvent(text: string) {
+  const now = Date.now();
+  events.push({ at: now, text });
+  while (events.length > MAX_EVENTS || (events.length && now - events[0].at > KEEP_MS)) events.shift();
+}
+
+function timeline(now: number): string {
+  return events
+    .filter((e) => now - e.at <= KEEP_MS)
+    .map((e) => `${String(e.at - now).padStart(6)}ms ${e.text}`)
+    .join("\n");
+}
+
+function short(s: string): string {
+  const t = JSON.stringify(s);
+  return t.length > 24 ? t.slice(0, 22) + "…\"" : t;
+}
 
 let box: HTMLDivElement | null = null;
 let hideTimer: number | undefined;
+let shownAt = 0;
 
-function show(message: string) {
+function show(title: string, detail: string[]) {
+  const now = Date.now();
+  // 同じ出来事で続けて出すと、最初の内容が上書きされて読めないので、少し間を空ける
+  if (now - shownAt < 1500) return;
+  shownAt = now;
   if (!box) {
     box = document.createElement("div");
     box.style.cssText =
       "position:fixed;top:8px;left:8px;right:8px;z-index:9999;padding:8px 10px;" +
-      "background:rgba(200,30,30,0.92);color:#fff;font:12px/1.4 -apple-system,sans-serif;" +
-      "border-radius:8px;white-space:pre-wrap;word-break:break-all;pointer-events:none;";
+      "background:rgba(200,30,30,0.92);color:#fff;font:11px/1.35 ui-monospace,Menlo,monospace;" +
+      "border-radius:8px;white-space:pre-wrap;word-break:break-all;pointer-events:none;" +
+      "max-height:80vh;overflow:hidden;";
     document.body.appendChild(box);
   }
-  box.textContent = message;
+  box.textContent = [title, ...detail, "--- 直前の出来事（0ms = 帯を出した時） ---", timeline(now)].join("\n");
   box.style.display = "block";
   window.clearTimeout(hideTimer);
-  hideTimer = window.setTimeout(() => { if (box) box.style.display = "none"; }, 6000);
+  hideTimer = window.setTimeout(() => { if (box) box.style.display = "none"; }, 15000);
 }
+
+/** 画面（DOM）の選択範囲のうち、エディタの中にあるものの文字列 */
+function domSelectionText(view: EditorView): string {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return "";
+  if (!view.contentDOM.contains(sel.anchorNode)) return "";
+  return sel.toString();
+}
+
+function selectionSummary(view: EditorView): string {
+  const s = view.state.selection.main;
+  const cm = s.empty ? "なし" : `${short(view.state.sliceDoc(s.from, s.to))}（${s.from}〜${s.to}）`;
+  const dom = domSelectionText(view);
+  return `選択: CodeMirror=${cm}・画面=${dom ? short(dom) : "なし"}`;
+}
+
+/** エディタの更新を記録する拡張。入力と、それ以外（Swift からの更新・自前の dispatch）を見分ける */
+export const enterDiagListener = EditorView.updateListener.of((u: ViewUpdate) => {
+  const composing = u.view.composing ? "変換中" : "";
+  if (!u.transactions.length) {
+    const flags = [u.viewportChanged && "viewport", u.geometryChanged && "geometry", u.focusChanged && "focus"]
+      .filter(Boolean).join(",");
+    diagEvent(`更新(取引なし) ${flags} ${composing}`);
+    return;
+  }
+  for (const tr of u.transactions) {
+    const ev = ["input", "delete", "select", "undo", "redo", "move"].find((t) => tr.isUserEvent(t)) ?? "-";
+    const parts = [`更新 ${ev}`];
+    if (tr.docChanged) parts.push("本文");
+    if (tr.selection) parts.push("選択");
+    if (tr.effects.length) parts.push(`効果${tr.effects.length}`);
+    if (composing) parts.push(composing);
+    diagEvent(parts.join(" "));
+  }
+});
 
 export function installEnterDiag(view: EditorView) {
   const dom = view.contentDOM;
   // CodeMirror より先に見るため capture で付ける（見るだけで、何も止めない）
-  dom.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.keyCode === 13 || e.keyCode === 229) {
-      lastEnter = { at: Date.now(), isComposing: e.isComposing, keyCode: e.keyCode };
+  dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
+  dom.addEventListener("compositionupdate", (e) => diagEvent(`compositionupdate ${short((e as CompositionEvent).data ?? "")}`), true);
+  dom.addEventListener("compositionend", (e) => {
+    lastCompositionEnd = Date.now();
+    diagEvent(`compositionend ${short((e as CompositionEvent).data ?? "")}`);
+    // 変換の確定が反映された後に、選択範囲が残っていないかを見る
+    for (const delay of [0, 120]) {
+      window.setTimeout(() => {
+        const dom = domSelectionText(view);
+        const cm = !view.state.selection.main.empty;
+        if (dom || cm) {
+          diagEvent(`変換後に選択あり（${delay}ms 後）`);
+          show("変換の後に、選択範囲が残りました（診断）", [selectionSummary(view)]);
+        }
+      }, delay);
     }
   }, true);
-  dom.addEventListener("compositionend", () => { lastCompositionEnd = Date.now(); }, true);
+  dom.addEventListener("keydown", (e) => {
+    const k = e.key === " " ? "Space" : e.key;
+    diagEvent(`keydown ${k} code=${e.keyCode}${e.isComposing ? " 変換中" : ""}`);
+    if (e.key !== "Enter" && e.keyCode !== 13) return;
+    if (Date.now() - lastCompositionEnd > KEEP_MS) return;
+    if (!domSelectionText(view) && view.state.selection.main.empty) return;
+    show("変換の後、選択範囲があるまま Enter が押されました（診断）", [
+      selectionSummary(view),
+      `isComposing=${e.isComposing}・compositionend は ${Date.now() - lastCompositionEnd}ms 前`,
+    ]);
+  }, true);
+  dom.addEventListener("beforeinput", (e) => {
+    const ie = e as InputEvent;
+    diagEvent(`beforeinput ${ie.inputType} ${short(ie.data ?? "")}`);
+  }, true);
+  dom.addEventListener("blur", () => diagEvent("blur"), true);
 
   // CodeMirror の内部（InputState.flushIOSKey）を、このビューの分だけ包む
   const inputState = (view as any).inputState;
@@ -49,17 +143,11 @@ export function installEnterDiag(view: EditorView) {
     // 改行だけの挿入は、Enter そのものの分なので出さない
     const lost = !!change && (/\S/.test(change.insert.toString()) || change.from < change.to);
     if (handled && lost && pending?.key === "Enter") {
-      const now = Date.now();
-      const lines = [
-        "Enter の保留で、入力を捨てました（診断）",
-        `捨てた挿入: ${JSON.stringify(change!.insert.toString())}`,
-        `置き換え対象: ${JSON.stringify(removed)}（${change!.from}〜${change!.to}）`,
-        lastEnter
-          ? `Enter keydown: ${now - lastEnter.at}ms 前・keyCode=${lastEnter.keyCode}・isComposing=${lastEnter.isComposing}`
-          : "Enter keydown: 記録なし",
-        `compositionend: ${lastCompositionEnd ? `${now - lastCompositionEnd}ms 前` : "なし"}`,
-      ];
-      show(lines.join("\n"));
+      diagEvent("Enter の保留で入力を捨てた");
+      show("Enter の保留で、入力を捨てました（診断）", [
+        `捨てた挿入: ${short(change!.insert.toString())}`,
+        `置き換え対象: ${short(removed)}（${change!.from}〜${change!.to}）`,
+      ]);
     }
     return handled;
   };
