@@ -27,6 +27,7 @@ import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste"
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
 import { mathPreview } from "./math";
 import { installEnterDiag, enterDiagListener, diagEvent } from "./enterdiag";
+import { installImeSelectionFix } from "./imefix";
 import {
   listContinuation,
   indentLines,
@@ -362,6 +363,8 @@ const view = new EditorView({
   }),
 });
 
+// iPad の日本語入力で、確定した文字が次の Enter で消えないようにする（診断より先に組み込む）
+installImeSelectionFix(view);
 // 【診断用・一時】Enter で入力が消える件（enterdiag.ts）
 installEnterDiag(view);
 

@@ -34961,6 +34961,40 @@ ${fence}`;
     };
   }
 
+  // webview/imefix.ts
+  function installImeSelectionFix(view2) {
+    const dom = view2.contentDOM;
+    let committed = null;
+    const collapseIfStale = () => {
+      if (!committed || view2.composing)
+        return;
+      const sel = view2.state.selection.main;
+      if (sel.empty || view2.state.sliceDoc(sel.from, sel.to) !== committed)
+        return;
+      view2.dispatch({ selection: { anchor: sel.to }, userEvent: "select" });
+    };
+    dom.addEventListener("compositionstart", () => {
+      committed = null;
+    }, true);
+    dom.addEventListener("compositionend", (e) => {
+      committed = e.data || null;
+      window.setTimeout(collapseIfStale, 0);
+    }, true);
+    dom.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.keyCode === 13) {
+        collapseIfStale();
+      } else if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key) && e.keyCode !== 229) {
+        committed = null;
+      }
+    }, true);
+    dom.addEventListener("mousedown", () => {
+      committed = null;
+    }, true);
+    dom.addEventListener("touchstart", () => {
+      committed = null;
+    }, true);
+  }
+
   // webview/main.ts
   var native = window.webkit.messageHandlers.couchNotes;
   var initPayload = window.__couchNotesInit ?? {};
@@ -35194,6 +35228,7 @@ ${fence}`;
       ]
     })
   });
+  installImeSelectionFix(view);
   installEnterDiag(view);
   view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
   view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
