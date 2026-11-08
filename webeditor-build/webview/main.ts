@@ -26,6 +26,7 @@ import {
 import { pasteImages, applyPasteResult, insertUploadPlaceholder } from "./paste";
 import { footerExtension, setFooterData, setFooterPoster, FooterData } from "./footer";
 import { mathPreview } from "./math";
+import { installEnterDiag } from "./enterdiag";
 import {
   listContinuation,
   indentLines,
@@ -358,6 +359,9 @@ const view = new EditorView({
     ],
   }),
 });
+
+// 【診断用・一時】Enter で入力が消える件（enterdiag.ts）
+installEnterDiag(view);
 
 // フォーカス状態をネイティブへ通知（キーボードツールバーの表示制御用）
 view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));

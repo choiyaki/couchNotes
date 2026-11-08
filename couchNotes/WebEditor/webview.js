@@ -33153,12 +33153,12 @@
     const cached = naturalWidthCache.get(key);
     if (cached != null)
       return cached;
-    const box = measurer(view2);
-    box.style.width = "auto";
-    box.style.whiteSpace = "nowrap";
-    box.textContent = "";
-    buildCellContent(box, content2, allowBreaks);
-    const w = box.scrollWidth;
+    const box2 = measurer(view2);
+    box2.style.width = "auto";
+    box2.style.whiteSpace = "nowrap";
+    box2.textContent = "";
+    buildCellContent(box2, content2, allowBreaks);
+    const w = box2.scrollWidth;
     naturalWidthCache.set(key, w);
     return w;
   }
@@ -33166,24 +33166,24 @@
     return naturalWidth(view2, content2, false);
   }
   function editorLineHeight(view2) {
-    const box = measurer(view2);
-    box.style.width = "auto";
-    box.style.whiteSpace = "nowrap";
-    box.textContent = "M";
-    return box.offsetHeight;
+    const box2 = measurer(view2);
+    box2.style.width = "auto";
+    box2.style.whiteSpace = "nowrap";
+    box2.textContent = "M";
+    return box2.offsetHeight;
   }
   function wrappedHeight(view2, content2, width) {
     const key = `${Math.round(width)}|${content2}`;
     const cached = heightCache.get(key);
     if (cached != null)
       return cached;
-    const box = measurer(view2);
-    box.style.width = `${Math.round(width)}px`;
-    box.style.whiteSpace = "normal";
-    box.style.overflowWrap = "anywhere";
-    box.textContent = "";
-    buildCellContent(box, content2);
-    const h = box.offsetHeight;
+    const box2 = measurer(view2);
+    box2.style.width = `${Math.round(width)}px`;
+    box2.style.whiteSpace = "normal";
+    box2.style.overflowWrap = "anywhere";
+    box2.textContent = "";
+    buildCellContent(box2, content2);
+    const h = box2.offsetHeight;
     heightCache.set(key, h);
     return h;
   }
@@ -34830,6 +34830,59 @@ ${fence}`;
   );
   var footerExtension = footerPlugin;
 
+  // webview/enterdiag.ts
+  var lastEnter = null;
+  var lastCompositionEnd = 0;
+  var box = null;
+  var hideTimer;
+  function show(message) {
+    if (!box) {
+      box = document.createElement("div");
+      box.style.cssText = "position:fixed;top:8px;left:8px;right:8px;z-index:9999;padding:8px 10px;background:rgba(200,30,30,0.92);color:#fff;font:12px/1.4 -apple-system,sans-serif;border-radius:8px;white-space:pre-wrap;word-break:break-all;pointer-events:none;";
+      document.body.appendChild(box);
+    }
+    box.textContent = message;
+    box.style.display = "block";
+    window.clearTimeout(hideTimer);
+    hideTimer = window.setTimeout(() => {
+      if (box)
+        box.style.display = "none";
+    }, 6e3);
+  }
+  function installEnterDiag(view2) {
+    const dom = view2.contentDOM;
+    dom.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.keyCode === 13 || e.keyCode === 229) {
+        lastEnter = { at: Date.now(), isComposing: e.isComposing, keyCode: e.keyCode };
+      }
+    }, true);
+    dom.addEventListener("compositionend", () => {
+      lastCompositionEnd = Date.now();
+    }, true);
+    const inputState = view2.inputState;
+    if (!inputState || typeof inputState.flushIOSKey !== "function")
+      return;
+    const original = inputState.flushIOSKey.bind(inputState);
+    inputState.flushIOSKey = (change) => {
+      const pending2 = inputState.pendingIOSKey;
+      const removed = change ? view2.state.sliceDoc(change.from, change.to) : "";
+      const handled = original(change);
+      const lost = !!change && (/\S/.test(change.insert.toString()) || change.from < change.to);
+      if (handled && lost && pending2?.key === "Enter") {
+        const now = Date.now();
+        const lines = [
+          "Enter \u306E\u4FDD\u7559\u3067\u3001\u5165\u529B\u3092\u6368\u3066\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09",
+          `\u6368\u3066\u305F\u633F\u5165: ${JSON.stringify(change.insert.toString())}`,
+          `\u7F6E\u304D\u63DB\u3048\u5BFE\u8C61: ${JSON.stringify(removed)}\uFF08${change.from}\u301C${change.to}\uFF09`,
+          lastEnter ? `Enter keydown: ${now - lastEnter.at}ms \u524D\u30FBkeyCode=${lastEnter.keyCode}\u30FBisComposing=${lastEnter.isComposing}` : "Enter keydown: \u8A18\u9332\u306A\u3057",
+          `compositionend: ${lastCompositionEnd ? `${now - lastCompositionEnd}ms \u524D` : "\u306A\u3057"}`
+        ];
+        show(lines.join("\n"));
+      }
+      return handled;
+    };
+  }
+
   // webview/main.ts
   var native = window.webkit.messageHandlers.couchNotes;
   var initPayload = window.__couchNotesInit ?? {};
@@ -35061,6 +35114,7 @@ ${fence}`;
       ]
     })
   });
+  installEnterDiag(view);
   view.contentDOM.addEventListener("focus", () => native.postMessage({ type: "focus" }));
   view.contentDOM.addEventListener("blur", () => native.postMessage({ type: "blur" }));
   window.addEventListener("resize", () => {
