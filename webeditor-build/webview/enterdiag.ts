@@ -14,7 +14,6 @@ const MAX_EVENTS = 40;
 type DiagEvent = { at: number; text: string };
 const events: DiagEvent[] = [];
 let lastCompositionEnd = 0;
-let lastCompositionUpdate = 0;
 
 /** 出来事を1つ記録する（main.ts から、Swift から届いた更新の種類も記録する） */
 export function diagEvent(text: string) {
@@ -95,18 +94,10 @@ export const enterDiagListener = EditorView.updateListener.of((u: ViewUpdate) =>
 });
 
 export function installEnterDiag(view: EditorView) {
-  // Swift 側（Mac 版）から、レスポンダーチェーンの調べた結果を出す口
-  (window as any).couchNotesShowDiag = (title: string, lines: string[]) => {
-    shownAt = 0;   // 他の帯の間隔の制限を受けずに出す
-    show(title, Array.isArray(lines) ? lines.map(String) : []);
-  };
   const dom = view.contentDOM;
   // CodeMirror より先に見るため capture で付ける（見るだけで、何も止めない）
   dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
-  dom.addEventListener("compositionupdate", (e) => {
-    lastCompositionUpdate = Date.now();
-    diagEvent(`compositionupdate ${short((e as CompositionEvent).data ?? "")}`);
-  }, true);
+  dom.addEventListener("compositionupdate", (e) => diagEvent(`compositionupdate ${short((e as CompositionEvent).data ?? "")}`), true);
   dom.addEventListener("compositionend", (e) => {
     lastCompositionEnd = Date.now();
     diagEvent(`compositionend ${short((e as CompositionEvent).data ?? "")}`);
@@ -125,20 +116,6 @@ export function installEnterDiag(view: EditorView) {
   dom.addEventListener("keydown", (e) => {
     const k = e.key === " " ? "Space" : e.key;
     diagEvent(`keydown ${k} code=${e.keyCode}${e.isComposing ? " 変換中" : ""}`);
-    // Mac 版: 変換中の矢印キーで候補を選べない件。届いたキーの様子と、その後の出来事を出す。
-    // iPad（タッチあり）では矢印キーで選べているので出さない
-    if (navigator.maxTouchPoints === 0 && /^Arrow/.test(e.key) &&
-        (e.isComposing || e.keyCode === 229 || view.composing || Date.now() - lastCompositionUpdate < KEEP_MS)) {
-      const cmComposing = (view as any).inputState?.composing;
-      window.setTimeout(() => {
-        show("Mac: 変換中に矢印キーが届きました（診断）", [
-          `key=${e.key}・keyCode=${e.keyCode}・isComposing=${e.isComposing}`,
-          `既定の動作を止めた（preventDefault）: ${e.defaultPrevented}`,
-          `CodeMirror の変換の状態: composing=${cmComposing}・view.composing=${view.composing}`,
-          selectionSummary(view),
-        ]);
-      }, 400);
-    }
     if (e.key !== "Enter" && e.keyCode !== 13) return;
     if (Date.now() - lastCompositionEnd > KEEP_MS) return;
     if (!domSelectionText(view) && view.state.selection.main.empty) return;

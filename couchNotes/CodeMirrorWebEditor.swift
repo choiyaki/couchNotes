@@ -278,12 +278,6 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         webView.scrollView.backgroundColor = .clear
         // 下スワイプでキーボードを畳めるようにする（旧エディタと同じ）
         webView.scrollView.keyboardDismissMode = .interactive
-        #if targetEnvironment(macCatalyst)
-        // Mac 版では、外枠のスクロールが上下の矢印キーを日本語入力より先に取り、
-        // 変換の候補を上下キーで選べなかった（2026-11-09 診断。左右は届いていた）。
-        // 本文のスクロールは CodeMirror が中で行うので、外枠のキーでのスクロールは切る
-        webView.scrollView.allowsKeyboardScrolling = false
-        #endif
         context.coordinator.webView = webView
         bridge?.webView = webView
 
@@ -594,9 +588,6 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
 
             case "focus":
                 parent.bridge?.isEditorFocused = true
-                #if targetEnvironment(macCatalyst)
-                reportArrowKeyOwnersOnce()
-                #endif
             case "blur":
                 parent.bridge?.isEditorFocused = false
 
@@ -604,43 +595,6 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
                 break
             }
         }
-
-        #if targetEnvironment(macCatalyst)
-        // 【診断用・一時】Mac 版で、変換中の上下の矢印キーが Web の中まで届かない件。
-        // 外枠のスクロールを切っても直らなかった（2026-11-09）。ファーストレスポンダーから上の
-        // レスポンダーチェーンをたどり、上下キーのキーコマンドを持つものを帯に出す。
-        private var reportedArrowKeyOwners = false
-
-        private func reportArrowKeyOwnersOnce() {
-            guard !reportedArrowKeyOwners else { return }
-            reportedArrowKeyOwners = true
-            // フォーカスが WebKit の中へ移り終えてから調べる
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self, let webView = self.webView else { return }
-                let arrows = [UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow]
-                var lines: [String] = []
-                var responder: UIResponder? = UIResponder.cnCurrentFirstResponder()
-                if responder == nil { lines.append("ファーストレスポンダー: 見つからない") }
-                while let r = responder {
-                    let cmds = (r.keyCommands ?? []).filter { arrows.contains($0.input ?? "") }
-                    var line = String(describing: type(of: r))
-                    if !cmds.isEmpty {
-                        line += " ← 上下キー: " + cmds.map { c in
-                            let key = c.input == UIKeyCommand.inputUpArrow ? "↑" : "↓"
-                            return "\(key) mods=\(c.modifierFlags.rawValue) \(c.action.map { NSStringFromSelector($0) } ?? "-")"
-                                + (c.wantsPriorityOverSystemBehavior ? " 優先" : "")
-                        }.joined(separator: ", ")
-                    }
-                    lines.append(line)
-                    responder = r.next
-                }
-                lines.append("外枠のキーでのスクロール: \(webView.scrollView.allowsKeyboardScrolling)")
-                guard let data = try? JSONSerialization.data(withJSONObject: lines),
-                      let json = String(data: data, encoding: .utf8) else { return }
-                webView.evaluateJavaScript("window.couchNotesShowDiag?.(\"Mac: レスポンダーチェーン（上から順）\", \(json));")
-            }
-        }
-        #endif
 
         // MARK: WKNavigationDelegate
 
@@ -655,20 +609,3 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         }
     }
 }
-
-#if targetEnvironment(macCatalyst)
-// 【診断用・一時】今のファーストレスポンダーを得る（宛先なしの sendAction は、それに届く）
-private extension UIResponder {
-    private static weak var cnFound: UIResponder?
-
-    static func cnCurrentFirstResponder() -> UIResponder? {
-        cnFound = nil
-        UIApplication.shared.sendAction(#selector(cnCaptureFirstResponder), to: nil, from: nil, for: nil)
-        return cnFound
-    }
-
-    @objc func cnCaptureFirstResponder() {
-        UIResponder.cnFound = self
-    }
-}
-#endif
