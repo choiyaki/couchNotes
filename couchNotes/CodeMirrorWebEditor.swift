@@ -278,6 +278,12 @@ struct CodeMirrorWebEditor: UIViewRepresentable {
         webView.scrollView.backgroundColor = .clear
         // 下スワイプでキーボードを畳めるようにする（旧エディタと同じ）
         webView.scrollView.keyboardDismissMode = .interactive
+        #if targetEnvironment(macCatalyst)
+        // Mac 版では、外枠のスクロールが上下の矢印キーを日本語入力より先に取り、
+        // 変換の候補を上下キーで選べなかった（2026-11-09 診断。左右は届いていた）。
+        // 本文のスクロールは CodeMirror が中で行うので、外枠のキーでのスクロールは切る
+        webView.scrollView.allowsKeyboardScrolling = false
+        #endif
         context.coordinator.webView = webView
         bridge?.webView = webView
 
