@@ -34906,6 +34906,10 @@ ${fence}`;
     }
   });
   function installEnterDiag(view2) {
+    window.couchNotesShowDiag = (title, lines) => {
+      shownAt = 0;
+      show(title, Array.isArray(lines) ? lines.map(String) : []);
+    };
     const dom = view2.contentDOM;
     dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
     dom.addEventListener("compositionupdate", (e) => {

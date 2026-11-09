@@ -95,6 +95,11 @@ export const enterDiagListener = EditorView.updateListener.of((u: ViewUpdate) =>
 });
 
 export function installEnterDiag(view: EditorView) {
+  // Swift 側（Mac 版）から、レスポンダーチェーンの調べた結果を出す口
+  (window as any).couchNotesShowDiag = (title: string, lines: string[]) => {
+    shownAt = 0;   // 他の帯の間隔の制限を受けずに出す
+    show(title, Array.isArray(lines) ? lines.map(String) : []);
+  };
   const dom = view.contentDOM;
   // CodeMirror より先に見るため capture で付ける（見るだけで、何も止めない）
   dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
