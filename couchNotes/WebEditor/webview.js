@@ -34835,6 +34835,7 @@ ${fence}`;
   var MAX_EVENTS = 40;
   var events = [];
   var lastCompositionEnd = 0;
+  var lastCompositionUpdate = 0;
   function diagEvent(text2) {
     const now = Date.now();
     events.push({ at: now, text: text2 });
@@ -34907,7 +34908,10 @@ ${fence}`;
   function installEnterDiag(view2) {
     const dom = view2.contentDOM;
     dom.addEventListener("compositionstart", () => diagEvent("compositionstart"), true);
-    dom.addEventListener("compositionupdate", (e) => diagEvent(`compositionupdate ${short(e.data ?? "")}`), true);
+    dom.addEventListener("compositionupdate", (e) => {
+      lastCompositionUpdate = Date.now();
+      diagEvent(`compositionupdate ${short(e.data ?? "")}`);
+    }, true);
     dom.addEventListener("compositionend", (e) => {
       lastCompositionEnd = Date.now();
       diagEvent(`compositionend ${short(e.data ?? "")}`);
@@ -34925,6 +34929,17 @@ ${fence}`;
     dom.addEventListener("keydown", (e) => {
       const k = e.key === " " ? "Space" : e.key;
       diagEvent(`keydown ${k} code=${e.keyCode}${e.isComposing ? " \u5909\u63DB\u4E2D" : ""}`);
+      if (navigator.maxTouchPoints === 0 && /^Arrow/.test(e.key) && (e.isComposing || e.keyCode === 229 || view2.composing || Date.now() - lastCompositionUpdate < KEEP_MS)) {
+        const cmComposing = view2.inputState?.composing;
+        window.setTimeout(() => {
+          show("Mac: \u5909\u63DB\u4E2D\u306B\u77E2\u5370\u30AD\u30FC\u304C\u5C4A\u304D\u307E\u3057\u305F\uFF08\u8A3A\u65AD\uFF09", [
+            `key=${e.key}\u30FBkeyCode=${e.keyCode}\u30FBisComposing=${e.isComposing}`,
+            `\u65E2\u5B9A\u306E\u52D5\u4F5C\u3092\u6B62\u3081\u305F\uFF08preventDefault\uFF09: ${e.defaultPrevented}`,
+            `CodeMirror \u306E\u5909\u63DB\u306E\u72B6\u614B: composing=${cmComposing}\u30FBview.composing=${view2.composing}`,
+            selectionSummary(view2)
+          ]);
+        }, 400);
+      }
       if (e.key !== "Enter" && e.keyCode !== 13)
         return;
       if (Date.now() - lastCompositionEnd > KEEP_MS)
